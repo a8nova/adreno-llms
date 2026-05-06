@@ -1,0 +1,53 @@
+# Normalize line endings on commit and force LF on checkout for everything
+# that must run on Unix toolchains (Android NDK, bash, python, cmake).
+# Without this, a contributor on Windows with core.autocrlf=true will
+# silently CRLF-ify *.sh on checkout and bash will refuse to run them.
+
+* text=auto eol=lf
+
+# Shell + python + build files: hard-pin LF, override any autocrlf.
+*.sh        text eol=lf
+*.bash      text eol=lf
+*.py        text eol=lf
+*.cmake     text eol=lf
+CMakeLists.txt text eol=lf
+Makefile    text eol=lf
+*.mk        text eol=lf
+
+# Source code: LF.
+*.c         text eol=lf
+*.h         text eol=lf
+*.cpp       text eol=lf
+*.hpp       text eol=lf
+*.cl        text eol=lf
+
+# Docs + config: LF.
+*.md        text eol=lf
+*.json      text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.toml      text eol=lf
+*.cfg       text eol=lf
+*.ini       text eol=lf
+.gitignore  text eol=lf
+.gitattributes text eol=lf
+LICENSE     text eol=lf
+
+# Binary: never touched by autocrlf, never normalized.
+*.bin       binary
+*.so        binary
+*.a         binary
+*.dylib     binary
+*.dll       binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.webp      binary
+*.mp4       binary
+*.mov       binary
+*.gz        binary
+*.tar       binary
+*.tgz       binary
+*.zip       binary
+*.safetensors binary
