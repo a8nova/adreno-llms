@@ -1,0 +1,136 @@
+{
+  "input_ids": [
+    510,
+    9732,
+    4307,
+    387,
+    253,
+    209
+  ],
+  "generated_ids": [
+    510,
+    9732,
+    4307,
+    387,
+    253,
+    209,
+    187
+  ],
+  "prompt": "The teacher worked at the ",
+  "reference_text": "The teacher worked at the \n",
+  "generated_text": "\n",
+  "max_new_tokens": 1,
+  "model_id": "state-spaces/mamba2-130m",
+  "test_prompts": [
+    {
+      "prompt": "The teacher worked at the ",
+      "input_ids": [
+        510,
+        9732,
+        4307,
+        387,
+        253,
+        209
+      ]
+    },
+    {
+      "prompt": "Hello",
+      "input_ids": [
+        12092
+      ]
+    },
+    {
+      "prompt": "Hello, world!",
+      "input_ids": [
+        12092,
+        13,
+        1533,
+        2
+      ]
+    },
+    {
+      "prompt": "The quick brown fox jumps over the lazy dog.",
+      "input_ids": [
+        510,
+        3158,
+        8516,
+        30013,
+        27287,
+        689,
+        253,
+        22658,
+        4370,
+        15
+      ]
+    },
+    {
+      "prompt": "  leading and   multiple   whitespace  ",
+      "input_ids": [
+        50276,
+        16378,
+        285,
+        50275,
+        34263,
+        50275,
+        2484,
+        3254,
+        4511,
+        50276
+      ]
+    },
+    {
+      "prompt": "Numbers 0 1 2 3 and code def f(x): return x**2",
+      "input_ids": [
+        45972,
+        470,
+        337,
+        374,
+        495,
+        285,
+        2127,
+        809,
+        269,
+        9,
+        89,
+        2262,
+        1091,
+        1269,
+        424,
+        19
+      ]
+    },
+    {
+      "prompt": "Email: user@example.com (2024-01-01)",
+      "input_ids": [
+        17835,
+        27,
+        2608,
+        33,
+        11667,
+        15,
+        681,
+        313,
+        938,
+        1348,
+        14,
+        520,
+        14,
+        520,
+        10
+      ]
+    },
+    {
+      "prompt": "\n\tnewlines and\ttabs\n",
+      "input_ids": [
+        187,
+        186,
+        1826,
+        8737,
+        285,
+        186,
+        33754,
+        187
+      ]
+    }
+  ]
+}

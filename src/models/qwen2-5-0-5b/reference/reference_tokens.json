@@ -1,0 +1,144 @@
+{
+  "input_ids": [
+    785,
+    11079,
+    6439,
+    518,
+    279,
+    220
+  ],
+  "generated_ids": [
+    785,
+    11079,
+    6439,
+    518,
+    279,
+    220,
+    16,
+    15,
+    339,
+    6422,
+    315,
+    279,
+    2906
+  ],
+  "prompt": "The teacher worked at the ",
+  "reference_text": "The teacher worked at the 10th floor of the school",
+  "generated_text": "10th floor of the school",
+  "max_new_tokens": 7,
+  "model_id": "Qwen/Qwen2.5-0.5B",
+  "test_prompts": [
+    {
+      "prompt": "The teacher worked at the ",
+      "input_ids": [
+        785,
+        11079,
+        6439,
+        518,
+        279,
+        220
+      ]
+    },
+    {
+      "prompt": "Hello",
+      "input_ids": [
+        9707
+      ]
+    },
+    {
+      "prompt": "Hello, world!",
+      "input_ids": [
+        9707,
+        11,
+        1879,
+        0
+      ]
+    },
+    {
+      "prompt": "The quick brown fox jumps over the lazy dog.",
+      "input_ids": [
+        785,
+        3974,
+        13876,
+        38835,
+        34208,
+        916,
+        279,
+        15678,
+        5562,
+        13
+      ]
+    },
+    {
+      "prompt": "  leading and   multiple   whitespace  ",
+      "input_ids": [
+        220,
+        6388,
+        323,
+        256,
+        5248,
+        256,
+        36372,
+        256
+      ]
+    },
+    {
+      "prompt": "Numbers 0 1 2 3 and code def f(x): return x**2",
+      "input_ids": [
+        27237,
+        220,
+        15,
+        220,
+        16,
+        220,
+        17,
+        220,
+        18,
+        323,
+        2038,
+        707,
+        282,
+        2075,
+        1648,
+        470,
+        856,
+        334,
+        17
+      ]
+    },
+    {
+      "prompt": "Email: user@example.com (2024-01-01)",
+      "input_ids": [
+        4781,
+        25,
+        1196,
+        35487,
+        905,
+        320,
+        17,
+        15,
+        17,
+        19,
+        12,
+        15,
+        16,
+        12,
+        15,
+        16,
+        8
+      ]
+    },
+    {
+      "prompt": "\n\tnewlines and\ttabs\n",
+      "input_ids": [
+        198,
+        8638,
+        7969,
+        323,
+        3244,
+        3435,
+        198
+      ]
+    }
+  ]
+}

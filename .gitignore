@@ -1,0 +1,44 @@
+# Build artifacts
+build/
+build_tests/
+*.o
+*.a
+*.so
+*.dylib
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+
+# Everything under any weights/ directory is fetched from HuggingFace via
+# scripts/fetch_weights.sh — not committed to git. The directory itself is
+# kept in tree via a .gitkeep marker so the path exists after clone.
+**/weights/*
+!**/weights/.gitkeep
+
+# Per-model dev artifacts (regenerable, large)
+.nnport/
+.nnopt/
+.nnport_venv/
+.cache/
+.deploy_manifest.json
+layer_dumps/
+layer_dumps_fixed/
+layer_dumps_new/
+reference/layers/
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local demo captures (kept private, never committed)
+adreno-llms-demos/

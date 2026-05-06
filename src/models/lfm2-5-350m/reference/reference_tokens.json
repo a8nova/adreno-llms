@@ -1,0 +1,152 @@
+{
+  "input_ids": [
+    1,
+    1098,
+    7727,
+    6619,
+    963,
+    779,
+    730
+  ],
+  "generated_ids": [
+    1,
+    1098,
+    7727,
+    6619,
+    963,
+    779,
+    730,
+    528,
+    6884,
+    8913,
+    803,
+    779,
+    2254,
+    884
+  ],
+  "prompt": "The teacher worked at the ",
+  "reference_text": "The teacher worked at the 3rd floor of the school on",
+  "generated_text": "3rd floor of the school on",
+  "max_new_tokens": 7,
+  "model_id": "LiquidAI/LFM2.5-350M-Base",
+  "test_prompts": [
+    {
+      "prompt": "The teacher worked at the ",
+      "input_ids": [
+        1,
+        1098,
+        7727,
+        6619,
+        963,
+        779,
+        730
+      ]
+    },
+    {
+      "prompt": "Hello",
+      "input_ids": [
+        1,
+        36309
+      ]
+    },
+    {
+      "prompt": "Hello, world!",
+      "input_ids": [
+        1,
+        36309,
+        521,
+        2031,
+        510
+      ]
+    },
+    {
+      "prompt": "The quick brown fox jumps over the lazy dog.",
+      "input_ids": [
+        1,
+        1098,
+        4605,
+        10800,
+        36387,
+        56586,
+        1391,
+        779,
+        46199,
+        4949,
+        523
+      ]
+    },
+    {
+      "prompt": "  leading and   multiple   whitespace  ",
+      "input_ids": [
+        1,
+        730,
+        5845,
+        810,
+        767,
+        5321,
+        767,
+        27946,
+        6041,
+        767
+      ]
+    },
+    {
+      "prompt": "Numbers 0 1 2 3 and code def f(x): return x**2",
+      "input_ids": [
+        1,
+        555,
+        20661,
+        730,
+        525,
+        730,
+        526,
+        730,
+        527,
+        730,
+        528,
+        810,
+        5214,
+        1629,
+        792,
+        6780,
+        3271,
+        1789,
+        3053,
+        1463,
+        527
+      ]
+    },
+    {
+      "prompt": "Email: user@example.com (2024-01-01)",
+      "input_ids": [
+        1,
+        28461,
+        535,
+        5196,
+        16939,
+        2450,
+        843,
+        1718,
+        529,
+        522,
+        4541,
+        522,
+        4541,
+        518
+      ]
+    },
+    {
+      "prompt": "\n\tnewlines and\ttabs\n",
+      "input_ids": [
+        1,
+        708,
+        53622,
+        10890,
+        810,
+        15153,
+        7954,
+        708
+      ]
+    }
+  ]
+}
