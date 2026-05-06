@@ -49,7 +49,8 @@ $ADB push "$NNOPT_BUILD_DIR/$BINARY_NAME" $REMOTE_DIR/
 $ADB shell "chmod +x $REMOTE_DIR/$BINARY_NAME"
 
 # Push OpenCL library if available
-OPENCL_LIB="$HOME/.nnopt/deps/opencl/lib/android-arm64-v8a/libOpenCL.so"
+ADRENO_LLMS_CACHE="${ADRENO_LLMS_CACHE:-$HOME/.cache/adreno-llms}"
+OPENCL_LIB="$ADRENO_LLMS_CACHE/opencl/lib/android-arm64-v8a/libOpenCL.so"
 if [ -f "$OPENCL_LIB" ]; then
     echo "Pushing OpenCL library..."
     $ADB push "$OPENCL_LIB" $REMOTE_DIR/lib/libOpenCL.so

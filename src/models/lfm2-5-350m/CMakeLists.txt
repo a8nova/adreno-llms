@@ -52,7 +52,7 @@ if(ANDROID)
 endif()
 
 # CLBlast backend
-# OpenCL headers from ~/.nnopt/deps/ (downloaded by porting orchestrator)
+# OpenCL headers from $HOME/.cache/adreno-llms/opencl/include (downloaded by scripts/setup_deps.sh).
 # These are Khronos headers with an OpenCL/ symlink for macOS compatibility
 if(DEFINED OPENCL_INCLUDE_DIR)
     message(STATUS "Using OpenCL headers from: ${OPENCL_INCLUDE_DIR}")
@@ -107,11 +107,11 @@ endif()
 # Include our Khronos headers for all project code (BEFORE ensures priority over system paths)
 include_directories(BEFORE ${OPENCL_INCLUDE_DIR})
 
-# CLBlast — prefer pre-built from ~/.nnopt/deps/clblast/, fall back to FetchContent.
+# CLBlast — built from source via CMake FetchContent (no system install needed).
 # Under fp16, SKIP the pre-built artifact: it's typically built without HALF=ON
 # (Hgemm symbol absent), and a silent Sgemm fallback would defeat the whole
 # point of the fp16 build. Always FetchContent + rebuild with HALF=ON for fp16.
-set(NNOPT_CLBLAST_DIR "$ENV{HOME}/.nnopt/deps/clblast")
+set(NNOPT_CLBLAST_DIR "$ENV{NNOPT_CLBLAST_DIR}")
 set(_NNOPT_USE_PREBUILT_CLBLAST FALSE)
 if(NOT NNOPT_DTYPE STREQUAL "fp16"
    AND EXISTS "${NNOPT_CLBLAST_DIR}/lib/libclblast.a"
