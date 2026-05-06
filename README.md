@@ -2,7 +2,23 @@
 
 > All code in this repo was ported and optimized by **NNOpt** — a coding agent for porting and optimizing neural networks for Android embedded targets. **Contact a8nova@gmail.com for early access.**
 
-State-of-the-art small language models, hand-tuned for **Adreno 6xx GPUs on non-flagship Android phones**. Pure C++/OpenCL with CLBlast — no llama.cpp, no Vulkan, no NNAPI. Cross-compiled on macOS, deploys via `adb` to `/data/local/tmp/`.
+State-of-the-art small language models running on **Adreno 6xx GPUs** — the GPU class found in mid-range Android phones. Pure C++/OpenCL inference, cross-compiled on macOS, deployed via `adb` to `/data/local/tmp/`.
+
+Each model ships with **hand-written OpenCL kernels tuned for Adreno's WG=64 wave size, vec4 fp16 ALUs, and image-cache texture path:**
+
+- **`gemv_m1.cl`** — cooperative-WG=64 GEMV with vec4 fp16 + fp32 accumulator + `__local`-mem tree reduce. The decode-path workhorse, replacing CLBlast HGemm at every M=1 site (q/k/v/o-proj, gate/up/down-proj, lm_head). A `_no8` multi-output variant produces 4 output columns per WG when N is divisible by 4.
+- **`block_fused.cl`** — fused-residual GEMV variants that write `out[i] = sum + residual[i]` in a single launch (kills the separate `element_add` kernel after attn out-proj and MLP down-proj).
+- **`attention.cl`** — grouped-query attention scores + softmax + out-proj.
+- **`mlp.cl` / `mlp_swiglu.cl`** — fused gate × silu × up.
+- **`rope.cl`** — rotary position embedding.
+- **`rmsnorm.cl` / `layernorm.cl`** — cooperative-WG=64 row reduction with vec4 fp16, replacing the "1 thread per row" baseline.
+- **`embedding.cl`** — embedding lookup.
+- **`argmax.cl`** — GPU-side argmax over the vocab. Skips a 50K–150K-element fp16→fp32 readback + host scan per decode token at greedy `temperature=0`.
+- **Mamba-specific:** `selective_scan.cl` (the SSM recurrence), `causal_conv1d.cl`, `ssm.cl` (`split_xz`, `split_xproj`, `bias_add_rows` glue).
+- **Mamba2-specific:** `mamba_rms_norm_gated.cl` (the SSD-block gated norm), `lm_head.cl`.
+- **LFM2-specific:** `convolution.cl` (short conv), `operator_norm.cl`.
+
+CLBlast 1.6.3 handles the M>1 prefill GEMMs; the custom `gemv_m1` path takes over for M=1 decode.
 
 ## Models
 

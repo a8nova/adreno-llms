@@ -59,6 +59,7 @@ int main(int argc, char* argv[]) {
     int max_tokens = 64;
     SamplerConfig sampler_config;
     std::string token_ids_file;
+    bool chat_mode = false;
 
     // Parse positional and optional args
     int arg_idx = 2;
@@ -67,6 +68,7 @@ int main(int argc, char* argv[]) {
     }
     while (arg_idx < argc) {
         std::string flag = argv[arg_idx++];
+        if (flag == "--chat") { chat_mode = true; continue; }  // bare flag, no value
         if (arg_idx >= argc) { print_usage(argv[0]); return 1; }
         if (flag == "--temperature")       sampler_config.temperature = std::stof(argv[arg_idx++]);
         else if (flag == "--top-k")        sampler_config.top_k = std::stoi(argv[arg_idx++]);
@@ -154,6 +156,28 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         std::cerr << "Loaded " << input_ids.size() << " token IDs from file (tokenizer bypass)" << std::endl;
+    } else if (chat_mode) {
+        // SmolLM2-Instruct chat template (matches the HF tokenizer's
+        // chat_template field). Special tokens are inserted as raw IDs because
+        // the BPE encoder treats them as substrings; only the user-visible
+        // body and "user"/"assistant" role labels go through encode().
+        //   <|im_start|>user
+        //   {prompt}<|im_end|>
+        //   <|im_start|>assistant
+        //
+        constexpr int IM_START = 1;  // <|im_start|>
+        constexpr int IM_END   = 2;  // <|im_end|>
+        auto user_ids = tokenizer.encode("user\n");
+        auto body_ids = tokenizer.encode(prompt);
+        auto assistant_ids = tokenizer.encode("\nassistant\n");
+        input_ids.push_back(IM_START);
+        input_ids.insert(input_ids.end(), user_ids.begin(), user_ids.end());
+        input_ids.insert(input_ids.end(), body_ids.begin(), body_ids.end());
+        input_ids.push_back(IM_END);
+        input_ids.push_back(IM_START);
+        input_ids.insert(input_ids.end(), assistant_ids.begin(), assistant_ids.end());
+        // Stop generation at <|im_end|> (the assistant's turn-end marker).
+        sampler_config.eos_token_id = IM_END;
     } else {
         input_ids = tokenizer.encode(prompt);
         // Dump encode result so FinalizePort can diff C++ tokenizer output
