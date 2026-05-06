@@ -375,6 +375,417 @@ void fused_gate_up_silu_m1(
 //      RoPE rotation — all merge into thread 0's write or the K-loop)
 // Reuse WG_SIZE defined above.
 //
+// ──────────────────────────────────────────────────────────────────────
+// SmolLM2-specific image2d_t-backed GEMV (Adreno texture cache path).
+//
+// Adreno 6xx GPUs have a dedicated texture-fetch engine with higher
+// effective bandwidth than buffer reads (1.3-1.5× measured on Qwen
+// port). Wrapping fp16 weights as CL_RGBA / CL_HALF_FLOAT images
+// (4 fp16 per pixel) routes reads through that engine. K=576 is
+// SmolLM2's hidden_size and is shared by q/k/v/o/gate/up/lm_head.
+//
+// no4 = 4 outputs per WG. 4 fp32 accumulators per thread share a
+// single x-vector load — register-level parallelism that quarters the
+// WG count. Predicate: N % 4 == 0 (true for all SmolLM2 GEMV sites).
+//
+// K=576 = 144 vec4-pixels = 2*64 + 16 → 2 full waves + 16-thread tail.
+// Buffer-fallback variants (gemv_m1_k576_no4) preserve the same
+// dispatch pattern when the W can't be wrapped as an image (oversized
+// row count beyond CL_DEVICE_IMAGE2D_MAX_HEIGHT, or driver refusal).
+#ifdef USE_FP16
+
+__constant sampler_t kImgSampler =
+    CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_NONE | CLK_FILTER_NEAREST;
+
+// K=576, image2d-backed W, 4 outputs per WG. N % 4 must be 0.
+// Dispatch: gws = (N / 4) * WG_SIZE, lws = WG_SIZE.
+__kernel
+__attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
+void gemv_m1_k576_no4_img(
+    __global const half* x,
+    __read_only image2d_t W_img,
+    __global half* out,
+    const int N) {
+  const int n_base = (int)get_group_id(0) * 4;
+  const int tid   = (int)get_local_id(0);
+  if (n_base >= N) return;
+
+  __local float partial[4][WG_SIZE];
+  float acc0=0.0f, acc1=0.0f, acc2=0.0f, acc3=0.0f;
+
+  // 2 full waves of vec4 (covers 2*256 = 512 fp16 of K=576).
+  #pragma unroll
+  for (int j = 0; j < 2; ++j) {
+    const int x_off = j * (WG_SIZE * 4) + tid * 4;
+    const int pix   = j *  WG_SIZE      + tid;       // pixel column (0..143)
+    float4 xv = vload_half4(0, x + x_off);
+    float4 w0 = convert_float4(read_imageh(W_img, kImgSampler, (int2)(pix, n_base + 0)));
+    float4 w1 = convert_float4(read_imageh(W_img, kImgSampler, (int2)(pix, n_base + 1)));
+    float4 w2 = convert_float4(read_imageh(W_img, kImgSampler, (int2)(pix, n_base + 2)));
+    float4 w3 = convert_float4(read_imageh(W_img, kImgSampler, (int2)(pix, n_base + 3)));
+    acc0 += dot(xv, w0); acc1 += dot(xv, w1);
+    acc2 += dot(xv, w2); acc3 += dot(xv, w3);
+  }
+  // Tail: 576-512 = 64 fp16 = 16 vec4 → first 16 threads.
+  if (tid < 16) {
+    const int x_off = 2 * (WG_SIZE * 4) + tid * 4;
+    const int pix   = 2 *  WG_SIZE      + tid;       // pix in [128..143]
+    float4 xv = vload_half4(0, x + x_off);
+    float4 w0 = convert_float4(read_imageh(W_img, kImgSampler, (int2)(pix, n_base + 0)));
+    float4 w1 = convert_float4(read_imageh(W_img, kImgSampler, (int2)(pix, n_base + 1)));
+    float4 w2 = convert_float4(read_imageh(W_img, kImgSampler, (int2)(pix, n_base + 2)));
+    float4 w3 = convert_float4(read_imageh(W_img, kImgSampler, (int2)(pix, n_base + 3)));
+    acc0 += dot(xv, w0); acc1 += dot(xv, w1);
+    acc2 += dot(xv, w2); acc3 += dot(xv, w3);
+  }
+
+  partial[0][tid] = acc0; partial[1][tid] = acc1;
+  partial[2][tid] = acc2; partial[3][tid] = acc3;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
+    if (tid < s) {
+      partial[0][tid] += partial[0][tid + s];
+      partial[1][tid] += partial[1][tid + s];
+      partial[2][tid] += partial[2][tid + s];
+      partial[3][tid] += partial[3][tid + s];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (tid == 0) {
+    vstore_half(partial[0][0], 0, out + n_base + 0);
+    vstore_half(partial[1][0], 0, out + n_base + 1);
+    vstore_half(partial[2][0], 0, out + n_base + 2);
+    vstore_half(partial[3][0], 0, out + n_base + 3);
+  }
+}
+
+// K=576, vec4 fused gate+up SwiGLU with single output per WG.
+// Why not no4 + image: dual-accumulator (gate + up) with no4 = 8 fp32 accs
+// per thread → register spill on Adreno (Qwen Step 7 measured 1.78× regression).
+// Single-output keeps 2 fp32 accs/thread (safe), vec4 turns scalar 9-iter loop
+// into 2 vec4 iters + 16-thread tail. This kernel was the #1 hotspot
+// (35% of GPU time) at Step 3 — lots of headroom in the inner loop.
+__kernel
+__attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
+void fused_gate_up_silu_m1_v4(
+    __global const half* x,        // [H]
+    __global const half* w_gate,   // [INTER, H]
+    __global const half* w_up,     // [INTER, H]
+    __global half* out,            // [INTER]
+    const int H,
+    const int INTER) {
+  const int c   = (int)get_group_id(0);
+  const int tid = (int)get_local_id(0);
+  if (c >= INTER) return;
+
+  __local float ls_gate[WG_SIZE];
+  __local float ls_up  [WG_SIZE];
+
+  const int base = c * H;
+  float gate_acc = 0.0f, up_acc = 0.0f;
+
+  // 2 full waves of vec4 (covers 2*256 = 512 fp16 of K=576).
+  #pragma unroll
+  for (int j = 0; j < 2; ++j) {
+    const int off = j * (WG_SIZE * 4) + tid * 4;
+    float4 xv  = vload_half4(0, x + off);
+    float4 wgv = vload_half4(0, w_gate + base + off);
+    float4 wuv = vload_half4(0, w_up   + base + off);
+    gate_acc += dot(xv, wgv);
+    up_acc   += dot(xv, wuv);
+  }
+  // Tail: 64 fp16 = 16 vec4 → first 16 threads.
+  if (tid < 16) {
+    const int off = 2 * (WG_SIZE * 4) + tid * 4;
+    float4 xv  = vload_half4(0, x + off);
+    float4 wgv = vload_half4(0, w_gate + base + off);
+    float4 wuv = vload_half4(0, w_up   + base + off);
+    gate_acc += dot(xv, wgv);
+    up_acc   += dot(xv, wuv);
+  }
+
+  ls_gate[tid] = gate_acc;
+  ls_up  [tid] = up_acc;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
+    if (tid < s) {
+      ls_gate[tid] += ls_gate[tid + s];
+      ls_up  [tid] += ls_up  [tid + s];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (tid == 0) {
+    float g = ls_gate[0];
+    vstore_half((g / (1.0f + exp(-g))) * ls_up[0], c, out);
+  }
+}
+
+// K=576, image2d-backed Wgate AND Wup, single output per WG, vec4 inner loop.
+// no4 risks register spill (8 fp32 accs/thread — Qwen Step 7 regression).
+// Single-output keeps 2 accs/thread; texture cache provides the BW win.
+__kernel
+__attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
+void fused_gate_up_silu_m1_v4_img(
+    __global const half* x,                  // [H]
+    __read_only image2d_t Wg_img,            // [INTER, K_PIX]
+    __read_only image2d_t Wu_img,            // [INTER, K_PIX]
+    __global half* out,                      // [INTER]
+    const int INTER) {
+  const int c   = (int)get_group_id(0);
+  const int tid = (int)get_local_id(0);
+  if (c >= INTER) return;
+
+  __local float ls_gate[WG_SIZE];
+  __local float ls_up  [WG_SIZE];
+
+  float gate_acc = 0.0f, up_acc = 0.0f;
+
+  // K=576 = 2 vec4 waves + 16-thread tail (same layout as gemv_m1_k576_no4_img).
+  #pragma unroll
+  for (int j = 0; j < 2; ++j) {
+    const int x_off = j * (WG_SIZE * 4) + tid * 4;
+    const int pix   = j *  WG_SIZE      + tid;
+    float4 xv  = vload_half4(0, x + x_off);
+    float4 wgv = convert_float4(read_imageh(Wg_img, kImgSampler, (int2)(pix, c)));
+    float4 wuv = convert_float4(read_imageh(Wu_img, kImgSampler, (int2)(pix, c)));
+    gate_acc += dot(xv, wgv);
+    up_acc   += dot(xv, wuv);
+  }
+  if (tid < 16) {
+    const int x_off = 2 * (WG_SIZE * 4) + tid * 4;
+    const int pix   = 2 *  WG_SIZE      + tid;
+    float4 xv  = vload_half4(0, x + x_off);
+    float4 wgv = convert_float4(read_imageh(Wg_img, kImgSampler, (int2)(pix, c)));
+    float4 wuv = convert_float4(read_imageh(Wu_img, kImgSampler, (int2)(pix, c)));
+    gate_acc += dot(xv, wgv);
+    up_acc   += dot(xv, wuv);
+  }
+
+  ls_gate[tid] = gate_acc;
+  ls_up  [tid] = up_acc;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
+    if (tid < s) {
+      ls_gate[tid] += ls_gate[tid + s];
+      ls_up  [tid] += ls_up  [tid + s];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (tid == 0) {
+    float g = ls_gate[0];
+    vstore_half((g / (1.0f + exp(-g))) * ls_up[0], c, out);
+  }
+}
+
+// K=576, image2d-backed Wq/Wk/Wv, 4 outputs per WG.
+// Replaces fused_qkv_gemv_m1 buffer kernel (Q_DIM=576 + 2*KV_DIM=192 = 960 outputs).
+// Dispatch: gws = (Q_DIM + 2*KV_DIM) / 4 * WG_SIZE, lws = WG_SIZE.
+// All boundary conditions assume Q_DIM % 4 == 0 AND KV_DIM % 4 == 0.
+__kernel
+__attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
+void fused_qkv_gemv_m1_no4_img(
+    __global const half* x,
+    __read_only image2d_t Wq_img,
+    __read_only image2d_t Wk_img,
+    __read_only image2d_t Wv_img,
+    __global half* q_out,
+    __global half* k_out,
+    __global half* v_out,
+    const int Q_DIM_4,    // = Q_DIM / 4 (workgroup count for Q segment)
+    const int KV_DIM_4) { // = KV_DIM / 4 (workgroup count for K and V each)
+  const int gid_block = (int)get_group_id(0);
+  const int tid       = (int)get_local_id(0);
+
+  // Pick projection based on which segment this WG falls in. OpenCL forbids
+  // image2d_t variables, so we replicate the inner loop per segment branch.
+  const int seg = (gid_block < Q_DIM_4) ? 0
+                : (gid_block < Q_DIM_4 + KV_DIM_4) ? 1
+                : 2;
+  const int n_base = (seg == 0) ? gid_block * 4
+                  : (seg == 1) ? (gid_block - Q_DIM_4) * 4
+                              : (gid_block - Q_DIM_4 - KV_DIM_4) * 4;
+  __global half* OUT = (seg == 0) ? q_out
+                     : (seg == 1) ? k_out
+                                  : v_out;
+
+  __local float partial[4][WG_SIZE];
+  float acc0=0.0f, acc1=0.0f, acc2=0.0f, acc3=0.0f;
+
+#define QKV_NO4_INNER(W_IMG)                                                   \
+  do {                                                                         \
+    _Pragma("unroll")                                                          \
+    for (int j = 0; j < 2; ++j) {                                              \
+      const int x_off = j * (WG_SIZE * 4) + tid * 4;                           \
+      const int pix   = j *  WG_SIZE      + tid;                               \
+      float4 xv = vload_half4(0, x + x_off);                                   \
+      float4 w0 = convert_float4(read_imageh((W_IMG), kImgSampler, (int2)(pix, n_base + 0))); \
+      float4 w1 = convert_float4(read_imageh((W_IMG), kImgSampler, (int2)(pix, n_base + 1))); \
+      float4 w2 = convert_float4(read_imageh((W_IMG), kImgSampler, (int2)(pix, n_base + 2))); \
+      float4 w3 = convert_float4(read_imageh((W_IMG), kImgSampler, (int2)(pix, n_base + 3))); \
+      acc0 += dot(xv, w0); acc1 += dot(xv, w1);                                \
+      acc2 += dot(xv, w2); acc3 += dot(xv, w3);                                \
+    }                                                                          \
+    if (tid < 16) {                                                            \
+      const int x_off = 2 * (WG_SIZE * 4) + tid * 4;                           \
+      const int pix   = 2 *  WG_SIZE      + tid;                               \
+      float4 xv = vload_half4(0, x + x_off);                                   \
+      float4 w0 = convert_float4(read_imageh((W_IMG), kImgSampler, (int2)(pix, n_base + 0))); \
+      float4 w1 = convert_float4(read_imageh((W_IMG), kImgSampler, (int2)(pix, n_base + 1))); \
+      float4 w2 = convert_float4(read_imageh((W_IMG), kImgSampler, (int2)(pix, n_base + 2))); \
+      float4 w3 = convert_float4(read_imageh((W_IMG), kImgSampler, (int2)(pix, n_base + 3))); \
+      acc0 += dot(xv, w0); acc1 += dot(xv, w1);                                \
+      acc2 += dot(xv, w2); acc3 += dot(xv, w3);                                \
+    }                                                                          \
+  } while (0)
+
+  if      (seg == 0) { QKV_NO4_INNER(Wq_img); }
+  else if (seg == 1) { QKV_NO4_INNER(Wk_img); }
+  else               { QKV_NO4_INNER(Wv_img); }
+
+#undef QKV_NO4_INNER
+
+  partial[0][tid] = acc0; partial[1][tid] = acc1;
+  partial[2][tid] = acc2; partial[3][tid] = acc3;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
+    if (tid < s) {
+      partial[0][tid] += partial[0][tid + s];
+      partial[1][tid] += partial[1][tid + s];
+      partial[2][tid] += partial[2][tid + s];
+      partial[3][tid] += partial[3][tid + s];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (tid == 0) {
+    vstore_half(partial[0][0], 0, OUT + n_base + 0);
+    vstore_half(partial[1][0], 0, OUT + n_base + 1);
+    vstore_half(partial[2][0], 0, OUT + n_base + 2);
+    vstore_half(partial[3][0], 0, OUT + n_base + 3);
+  }
+}
+
+// K=576, image2d-backed W, 4 outputs per WG, fused residual add.
+// Replaces fused_oproj_residual_m1: out_proj.x → += residual.
+// N must be a multiple of 4. residual is INOUT.
+__kernel
+__attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
+void fused_oproj_residual_m1_no4_img(
+    __global const half* attn_out,        // [Q_DIM]
+    __read_only image2d_t Wo_img,         // [H, Q_DIM] as image
+    __global half* residual,              // [H] INOUT
+    const int H) {
+  const int n_base = (int)get_group_id(0) * 4;
+  const int tid    = (int)get_local_id(0);
+  if (n_base >= H) return;
+
+  __local float partial[4][WG_SIZE];
+  float acc0=0.0f, acc1=0.0f, acc2=0.0f, acc3=0.0f;
+
+  // 2 full waves of vec4 (covers 2*256 = 512 fp16 of K=576).
+  #pragma unroll
+  for (int j = 0; j < 2; ++j) {
+    const int x_off = j * (WG_SIZE * 4) + tid * 4;
+    const int pix   = j *  WG_SIZE      + tid;
+    float4 xv = vload_half4(0, attn_out + x_off);
+    float4 w0 = convert_float4(read_imageh(Wo_img, kImgSampler, (int2)(pix, n_base + 0)));
+    float4 w1 = convert_float4(read_imageh(Wo_img, kImgSampler, (int2)(pix, n_base + 1)));
+    float4 w2 = convert_float4(read_imageh(Wo_img, kImgSampler, (int2)(pix, n_base + 2)));
+    float4 w3 = convert_float4(read_imageh(Wo_img, kImgSampler, (int2)(pix, n_base + 3)));
+    acc0 += dot(xv, w0); acc1 += dot(xv, w1);
+    acc2 += dot(xv, w2); acc3 += dot(xv, w3);
+  }
+  if (tid < 16) {
+    const int x_off = 2 * (WG_SIZE * 4) + tid * 4;
+    const int pix   = 2 *  WG_SIZE      + tid;
+    float4 xv = vload_half4(0, attn_out + x_off);
+    float4 w0 = convert_float4(read_imageh(Wo_img, kImgSampler, (int2)(pix, n_base + 0)));
+    float4 w1 = convert_float4(read_imageh(Wo_img, kImgSampler, (int2)(pix, n_base + 1)));
+    float4 w2 = convert_float4(read_imageh(Wo_img, kImgSampler, (int2)(pix, n_base + 2)));
+    float4 w3 = convert_float4(read_imageh(Wo_img, kImgSampler, (int2)(pix, n_base + 3)));
+    acc0 += dot(xv, w0); acc1 += dot(xv, w1);
+    acc2 += dot(xv, w2); acc3 += dot(xv, w3);
+  }
+
+  partial[0][tid] = acc0; partial[1][tid] = acc1;
+  partial[2][tid] = acc2; partial[3][tid] = acc3;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
+    if (tid < s) {
+      partial[0][tid] += partial[0][tid + s];
+      partial[1][tid] += partial[1][tid + s];
+      partial[2][tid] += partial[2][tid + s];
+      partial[3][tid] += partial[3][tid + s];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (tid == 0) {
+    float r0 = vload_half(n_base + 0, residual);
+    float r1 = vload_half(n_base + 1, residual);
+    float r2 = vload_half(n_base + 2, residual);
+    float r3 = vload_half(n_base + 3, residual);
+    vstore_half(r0 + partial[0][0], n_base + 0, residual);
+    vstore_half(r1 + partial[1][0], n_base + 1, residual);
+    vstore_half(r2 + partial[2][0], n_base + 2, residual);
+    vstore_half(r3 + partial[3][0], n_base + 3, residual);
+  }
+}
+
+// K=1536 (INTERMEDIATE_SIZE), image2d-backed W, 4 outputs per WG, fused residual add.
+// Replaces fused_down_residual_m1. K_PIX = 1536/4 = 384 = 6*64 → 6 full waves, no tail.
+__kernel
+__attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
+void fused_down_residual_m1_no4_img(
+    __global const half* mlp_in,         // [INTER]
+    __read_only image2d_t Wd_img,        // [H, INTER] as image
+    __global half* residual,             // [H] INOUT
+    const int H) {
+  const int n_base = (int)get_group_id(0) * 4;
+  const int tid    = (int)get_local_id(0);
+  if (n_base >= H) return;
+
+  __local float partial[4][WG_SIZE];
+  float acc0=0.0f, acc1=0.0f, acc2=0.0f, acc3=0.0f;
+
+  // 6 full waves of vec4 (covers 6*256 = 1536 fp16 = full K), no tail.
+  #pragma unroll
+  for (int j = 0; j < 6; ++j) {
+    const int x_off = j * (WG_SIZE * 4) + tid * 4;
+    const int pix   = j *  WG_SIZE      + tid;
+    float4 xv = vload_half4(0, mlp_in + x_off);
+    float4 w0 = convert_float4(read_imageh(Wd_img, kImgSampler, (int2)(pix, n_base + 0)));
+    float4 w1 = convert_float4(read_imageh(Wd_img, kImgSampler, (int2)(pix, n_base + 1)));
+    float4 w2 = convert_float4(read_imageh(Wd_img, kImgSampler, (int2)(pix, n_base + 2)));
+    float4 w3 = convert_float4(read_imageh(Wd_img, kImgSampler, (int2)(pix, n_base + 3)));
+    acc0 += dot(xv, w0); acc1 += dot(xv, w1);
+    acc2 += dot(xv, w2); acc3 += dot(xv, w3);
+  }
+
+  partial[0][tid] = acc0; partial[1][tid] = acc1;
+  partial[2][tid] = acc2; partial[3][tid] = acc3;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
+    if (tid < s) {
+      partial[0][tid] += partial[0][tid + s];
+      partial[1][tid] += partial[1][tid + s];
+      partial[2][tid] += partial[2][tid + s];
+      partial[3][tid] += partial[3][tid + s];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (tid == 0) {
+    float r0 = vload_half(n_base + 0, residual);
+    float r1 = vload_half(n_base + 1, residual);
+    float r2 = vload_half(n_base + 2, residual);
+    float r3 = vload_half(n_base + 3, residual);
+    vstore_half(r0 + partial[0][0], n_base + 0, residual);
+    vstore_half(r1 + partial[1][0], n_base + 1, residual);
+    vstore_half(r2 + partial[2][0], n_base + 2, residual);
+    vstore_half(r3 + partial[3][0], n_base + 3, residual);
+  }
+}
+
+#endif // USE_FP16
+
 // SCAFFOLD-EMITTED (above, ready to call from host code):
 //   - fused_oproj_residual_m1      (every transformer)
 //   - fused_down_residual_m1       (every MLP with down-proj)

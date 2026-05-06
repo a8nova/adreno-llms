@@ -37,8 +37,8 @@ Razr 2020 / Adreno 618, fp16, greedy (`temperature=0, seed=42`), 32-token genera
 
 | | Decode tok/s | TTFT (s) |
 |---|---:|---:|
-| Measured today | **14.57** | **1.61** |
-| min / max across 5 runs | 13.86 / 15.32 | — |
+| Measured today | **23.65** | **1.53** |
+| min / max across 5 runs | 22.75 / 23.95 | — |
 | Roofline ceiling (10 GB/s) | 36.9 | — |
 
 Per-token weight footprint: ~275 MB. Full optimization log + per-kernel timings in [BENCHMARK.md](./BENCHMARK.md).

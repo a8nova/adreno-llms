@@ -9,6 +9,7 @@
 #include "prof.h"
 #include <clblast.h>
 #include <cmath>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -29,7 +30,13 @@ Mlp::~Mlp() {
     if (silu_mul_kernel_) clReleaseKernel(silu_mul_kernel_);
     if (mlp_program_) clReleaseProgram(mlp_program_);
     if (fused_gate_up_silu_m1_) clReleaseKernel(fused_gate_up_silu_m1_);
+    if (fused_gate_up_silu_m1_v4_) clReleaseKernel(fused_gate_up_silu_m1_v4_);
+    if (fused_gate_up_silu_m1_v4_img_) clReleaseKernel(fused_gate_up_silu_m1_v4_img_);
     if (fused_down_res_m1_) clReleaseKernel(fused_down_res_m1_);
+    if (fused_down_no4_img_) clReleaseKernel(fused_down_no4_img_);
+    if (w_down_img_) clReleaseMemObject(w_down_img_);
+    if (w_gate_img_) clReleaseMemObject(w_gate_img_);
+    if (w_up_img_)   clReleaseMemObject(w_up_img_);
     if (block_fused_prog_) clReleaseProgram(block_fused_prog_);
 }
 
@@ -67,6 +74,14 @@ bool Mlp::initialize() {
         NNOPT_ERROR_FMT("clCreateKernel fused_gate_up_silu_m1 failed: %d", err);
         return false;
     }
+#ifdef NNOPT_USE_FP16
+    // vec4 variant — 2 fp32 accumulators per thread, vec4 inner loop.
+    // K=576 = 2 vec4 waves + 16-thread tail. Falls back to scalar if missing.
+    fused_gate_up_silu_m1_v4_ = clCreateKernel(block_fused_prog_, "fused_gate_up_silu_m1_v4", &err);
+    if (err != CL_SUCCESS) fused_gate_up_silu_m1_v4_ = nullptr;
+    fused_gate_up_silu_m1_v4_img_ = clCreateKernel(block_fused_prog_, "fused_gate_up_silu_m1_v4_img", &err);
+    if (err != CL_SUCCESS) fused_gate_up_silu_m1_v4_img_ = nullptr;
+#endif
     fused_down_res_m1_ = clCreateKernel(block_fused_prog_, "fused_down_residual_m1", &err);
     if (err != CL_SUCCESS || !fused_down_res_m1_) {
         NNOPT_ERROR_FMT("clCreateKernel fused_down_residual_m1 failed: %d", err);
@@ -74,6 +89,47 @@ bool Mlp::initialize() {
     }
 
     if (!set_weights()) return false;
+
+#ifdef NNOPT_USE_FP16
+    // Image2d_t-backed Wdown view (Adreno texture cache).
+    // Wdown shape [H=576, INTER=1536]. K=INTER=1536 → K_PIX=384, height=576.
+    // Both well under image2d limits.
+    fused_down_no4_img_ = clCreateKernel(block_fused_prog_, "fused_down_residual_m1_no4_img", &err);
+    if (err != CL_SUCCESS) fused_down_no4_img_ = nullptr;
+
+    {
+        const int H     = MODEL_CONFIG::HIDDEN_SIZE;
+        const int INTER = MODEL_CONFIG::INTERMEDIATE_SIZE;
+        cl_image_format fmt;
+        fmt.image_channel_order     = CL_RGBA;
+        fmt.image_channel_data_type = CL_HALF_FLOAT;
+
+        auto wrap = [&](cl_mem buf, size_t pix_w, size_t pix_h) -> cl_mem {
+            cl_image_desc desc;
+            std::memset(&desc, 0, sizeof(desc));
+            desc.image_type      = CL_MEM_OBJECT_IMAGE2D;
+            desc.image_width     = pix_w;
+            desc.image_height    = pix_h;
+            desc.image_row_pitch = 0;
+            desc.buffer          = buf;
+            cl_int e = CL_SUCCESS;
+            cl_mem img = clCreateImage(cl_ctx_.context(), CL_MEM_READ_ONLY, &fmt, &desc, nullptr, &e);
+            return (e == CL_SUCCESS) ? img : nullptr;
+        };
+
+        // Wdown: shape [H=576, INTER=1536]. K_PIX = 384, height = 576.
+        if (fused_down_no4_img_ && w_down_) {
+            w_down_img_ = wrap(w_down_, (size_t)(INTER / 4), (size_t)H);
+            down_img_ready_ = (w_down_img_ != nullptr);
+        }
+        // Wgate / Wup: shape [INTER=1536, H=576]. K_PIX = 144, height = 1536.
+        if (fused_gate_up_silu_m1_v4_img_ && w_gate_ && w_up_) {
+            w_gate_img_ = wrap(w_gate_, (size_t)(H / 4), (size_t)INTER);
+            w_up_img_   = wrap(w_up_,   (size_t)(H / 4), (size_t)INTER);
+            gate_up_img_ready_ = (w_gate_img_ && w_up_img_);
+        }
+    }
+#endif
 
     // Pre-allocate persistent decode intermediate buffer.
     cl_int berr = CL_SUCCESS;
@@ -176,28 +232,52 @@ bool Mlp::forward_decode_into_residual(cl_command_queue queue, cl_mem x, cl_mem 
     // Use persistent decode buffer — no allocation per step.
     cl_mem act = decode_act_buf_;
 
-    // 1. fused_gate_up_silu_m1: silu(Wgate*x) * (Wup*x) -> act[I]
-    if (!set_arg_checked(fused_gate_up_silu_m1_, 0, sizeof(cl_mem), &x,      "x"))     return false;
-    if (!set_arg_checked(fused_gate_up_silu_m1_, 1, sizeof(cl_mem), &w_gate_,"w_gate"))return false;
-    if (!set_arg_checked(fused_gate_up_silu_m1_, 2, sizeof(cl_mem), &w_up_,  "w_up"))  return false;
-    if (!set_arg_checked(fused_gate_up_silu_m1_, 3, sizeof(cl_mem), &act,    "out"))   return false;
-    if (!set_arg_checked(fused_gate_up_silu_m1_, 4, sizeof(int),    &H,      "H"))     return false;
-    if (!set_arg_checked(fused_gate_up_silu_m1_, 5, sizeof(int),    &I,      "INTER")) return false;
-    {
+    // 1. silu(Wgate*x) * (Wup*x) -> act[I]. Path priority:
+    //    image+vec4 > buffer+vec4 > buffer scalar.
+    if (gate_up_img_ready_ && fused_gate_up_silu_m1_v4_img_) {
+        cl_kernel gu = fused_gate_up_silu_m1_v4_img_;
+        if (!set_arg_checked(gu, 0, sizeof(cl_mem), &x,           "x"))         return false;
+        if (!set_arg_checked(gu, 1, sizeof(cl_mem), &w_gate_img_, "Wg_img"))    return false;
+        if (!set_arg_checked(gu, 2, sizeof(cl_mem), &w_up_img_,   "Wu_img"))    return false;
+        if (!set_arg_checked(gu, 3, sizeof(cl_mem), &act,         "out"))       return false;
+        if (!set_arg_checked(gu, 4, sizeof(int),    &I,           "INTER"))     return false;
         const size_t WG = 64;
         size_t gws = (size_t)I * WG;
         size_t lws = WG;
-        err = nnopt_prof::enqueue(queue, fused_gate_up_silu_m1_, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
-        if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("fused_gate_up_silu_m1 failed: %d", err); return false; }
+        err = nnopt_prof::enqueue(queue, gu, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("fused_gate_up_silu_m1_v4_img failed: %d", err); return false; }
+    } else {
+        cl_kernel gu_kernel = fused_gate_up_silu_m1_v4_ ? fused_gate_up_silu_m1_v4_ : fused_gate_up_silu_m1_;
+        if (!set_arg_checked(gu_kernel, 0, sizeof(cl_mem), &x,      "x"))     return false;
+        if (!set_arg_checked(gu_kernel, 1, sizeof(cl_mem), &w_gate_,"w_gate"))return false;
+        if (!set_arg_checked(gu_kernel, 2, sizeof(cl_mem), &w_up_,  "w_up"))  return false;
+        if (!set_arg_checked(gu_kernel, 3, sizeof(cl_mem), &act,    "out"))   return false;
+        if (!set_arg_checked(gu_kernel, 4, sizeof(int),    &H,      "H"))     return false;
+        if (!set_arg_checked(gu_kernel, 5, sizeof(int),    &I,      "INTER")) return false;
+        const size_t WG = 64;
+        size_t gws = (size_t)I * WG;
+        size_t lws = WG;
+        err = nnopt_prof::enqueue(queue, gu_kernel, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("fused_gate_up_silu_m1[_v4] failed: %d", err); return false; }
     }
 
-    // 2. fused_down_residual_m1: Wdown*act + residual -> residual in-place.
-    if (!set_arg_checked(fused_down_res_m1_, 0, sizeof(cl_mem), &act,      "mlp_in"))  return false;
-    if (!set_arg_checked(fused_down_res_m1_, 1, sizeof(cl_mem), &w_down_,  "w_down"))  return false;
-    if (!set_arg_checked(fused_down_res_m1_, 2, sizeof(cl_mem), &residual, "residual"))return false;
-    if (!set_arg_checked(fused_down_res_m1_, 3, sizeof(int),    &H,        "K"))       return false;
-    if (!set_arg_checked(fused_down_res_m1_, 4, sizeof(int),    &I,        "N"))       return false;
-    {
+    // 2. Wdown*act + residual: prefer image2d_t no4 path; fall back to buffer kernel.
+    if (down_img_ready_ && fused_down_no4_img_) {
+        if (!set_arg_checked(fused_down_no4_img_, 0, sizeof(cl_mem), &act,         "mlp_in"))   return false;
+        if (!set_arg_checked(fused_down_no4_img_, 1, sizeof(cl_mem), &w_down_img_, "Wd_img"))   return false;
+        if (!set_arg_checked(fused_down_no4_img_, 2, sizeof(cl_mem), &residual,    "residual")) return false;
+        if (!set_arg_checked(fused_down_no4_img_, 3, sizeof(int),    &H,           "H"))        return false;
+        const size_t WG = 64;
+        size_t gws = (size_t)(H / 4) * WG;
+        size_t lws = WG;
+        err = nnopt_prof::enqueue(queue, fused_down_no4_img_, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("fused_down_residual_m1_no4_img failed: %d", err); return false; }
+    } else {
+        if (!set_arg_checked(fused_down_res_m1_, 0, sizeof(cl_mem), &act,      "mlp_in"))  return false;
+        if (!set_arg_checked(fused_down_res_m1_, 1, sizeof(cl_mem), &w_down_,  "w_down"))  return false;
+        if (!set_arg_checked(fused_down_res_m1_, 2, sizeof(cl_mem), &residual, "residual"))return false;
+        if (!set_arg_checked(fused_down_res_m1_, 3, sizeof(int),    &H,        "K"))       return false;
+        if (!set_arg_checked(fused_down_res_m1_, 4, sizeof(int),    &I,        "N"))       return false;
         const size_t WG = 64;
         size_t gws = (size_t)H * WG;
         size_t lws = WG;

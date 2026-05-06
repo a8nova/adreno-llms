@@ -9,12 +9,21 @@
 #include "model_config.h"
 #include "prof.h"
 #include <clblast.h>
+#include <cstring>
+#include <iostream>
 #include <string>
 
 LmHead::LmHead(OpenCLContext& cl_ctx, Weights& weights)
     : cl_ctx_(cl_ctx), weights_(weights) {}
 
 LmHead::~LmHead() {
+    for (auto& t : w_tiles_) {
+        if (t.image)      clReleaseMemObject(t.image);
+        if (t.sub_buffer) clReleaseMemObject(t.sub_buffer);
+        if (t.out_sub)    clReleaseMemObject(t.out_sub);
+    }
+    if (w_image_single_) clReleaseMemObject(w_image_single_);
+    if (gemv_k576_no4_img_) clReleaseKernel(gemv_k576_no4_img_);
     if (fused_lm_head_m1_) clReleaseKernel(fused_lm_head_m1_);
     if (block_fused_prog_) clReleaseProgram(block_fused_prog_);
 }
@@ -45,6 +54,110 @@ bool LmHead::initialize() {
         return false;
     }
 
+#ifdef NNOPT_USE_FP16
+    // Image2d_t-backed no4 GEMV (Adreno texture cache). USE_FP16-only.
+    // clCreateKernel on a missing kernel returns CL_INVALID_KERNEL_NAME — log and continue.
+    gemv_k576_no4_img_ = clCreateKernel(block_fused_prog_, "gemv_m1_k576_no4_img", &err);
+    if (err != CL_SUCCESS) gemv_k576_no4_img_ = nullptr;
+
+    // Try to wrap W (shape [V, H] = [49152, 576] fp16) as an image2d. The
+    // standard layout requires height ≤ CL_DEVICE_IMAGE2D_MAX_HEIGHT
+    // (typically 16384 on Adreno 6xx) — V=49152 will fail and fall through
+    // to tiling. Each tile is a clCreateSubBuffer + clCreateImage over the
+    // sub-buffer; the same gemv_m1_k576_no4_img kernel runs once per tile.
+    if (gemv_k576_no4_img_) {
+        cl_context  ctx = cl_ctx_.context();
+        cl_device_id dev = cl_ctx_.device();
+        const int H = MODEL_CONFIG::HIDDEN_SIZE;
+        const int V = MODEL_CONFIG::VOCAB_SIZE;
+        const int K_PIX = H / 4;  // 144 vec4-pixels per row
+
+        size_t img_max_w = 0, img_max_h = 0;
+        clGetDeviceInfo(dev, CL_DEVICE_IMAGE2D_MAX_WIDTH,  sizeof(img_max_w), &img_max_w, nullptr);
+        clGetDeviceInfo(dev, CL_DEVICE_IMAGE2D_MAX_HEIGHT, sizeof(img_max_h), &img_max_h, nullptr);
+
+        cl_image_format fmt;
+        fmt.image_channel_order     = CL_RGBA;
+        fmt.image_channel_data_type = CL_HALF_FLOAT;
+
+        auto try_image_over = [&](cl_mem buf, size_t pix_w, size_t pix_h) -> cl_mem {
+            if (pix_w == 0 || pix_h == 0) return nullptr;
+            if (pix_w > img_max_w || pix_h > img_max_h) return nullptr;
+            cl_image_desc desc;
+            std::memset(&desc, 0, sizeof(desc));
+            desc.image_type      = CL_MEM_OBJECT_IMAGE2D;
+            desc.image_width     = pix_w;
+            desc.image_height    = pix_h;
+            desc.image_row_pitch = 0;
+            desc.buffer          = buf;
+            cl_int e = CL_SUCCESS;
+            cl_mem img = clCreateImage(ctx, CL_MEM_READ_ONLY, &fmt, &desc, nullptr, &e);
+            if (e != CL_SUCCESS || !img) return nullptr;
+            return img;
+        };
+
+        // 1) Try single-image (works iff V ≤ img_max_h).
+        cl_mem one = try_image_over(w_, (size_t)K_PIX, (size_t)V);
+        if (one) {
+            w_image_single_ = one;
+            img_path_ready_ = true;
+        } else if ((size_t)K_PIX <= img_max_w && img_max_h > 0) {
+            // 2) Tile over rows. row_bytes = H*2 = 1152, divisible by 128
+            //    (Adreno sub-buffer alignment requirement). TILE_H must
+            //    keep rows_per_tile a multiple of 4 so per-tile dispatch
+            //    n_base alignment holds.
+            const int row_bytes = H * 2;  // fp16
+            int TILE_H = (int)img_max_h;
+            TILE_H -= (TILE_H % 4);  // align to 4 for no4 dispatch
+            if (TILE_H > 0 && (row_bytes % 128) == 0) {
+                int rows_left = V, row_offset = 0;
+                bool ok = true;
+                while (rows_left > 0) {
+                    int tile_n = rows_left < TILE_H ? rows_left : TILE_H;
+                    if ((tile_n % 4) != 0) { ok = false; break; }  // would skip outputs
+                    cl_buffer_region region;
+                    region.origin = (size_t)row_offset * (size_t)row_bytes;
+                    region.size   = (size_t)tile_n   * (size_t)row_bytes;
+                    cl_int e = CL_SUCCESS;
+                    cl_mem sub = clCreateSubBuffer(w_, CL_MEM_READ_ONLY,
+                                                   CL_BUFFER_CREATE_TYPE_REGION,
+                                                   &region, &e);
+                    if (e != CL_SUCCESS || !sub) { ok = false; break; }
+                    cl_mem sub_img = try_image_over(sub, (size_t)K_PIX, (size_t)tile_n);
+                    if (!sub_img) { clReleaseMemObject(sub); ok = false; break; }
+                    WImageTile t;
+                    t.sub_buffer = sub;
+                    t.image      = sub_img;
+                    t.row_offset = row_offset;
+                    t.row_count  = tile_n;
+                    t.out_sub    = nullptr;  // built lazily in forward() per output buffer
+                    w_tiles_.push_back(t);
+                    row_offset += tile_n;
+                    rows_left  -= tile_n;
+                }
+                if (ok && !w_tiles_.empty()) {
+                    img_path_ready_ = true;
+                } else {
+                    for (auto& t : w_tiles_) {
+                        if (t.image)      clReleaseMemObject(t.image);
+                        if (t.sub_buffer) clReleaseMemObject(t.sub_buffer);
+                    }
+                    w_tiles_.clear();
+                }
+            }
+        }
+        if (img_path_ready_) {
+            std::cerr << "LmHead: image2d path ready ("
+                      << (w_image_single_ ? "single image" : "tiled, ")
+                      << (w_image_single_ ? "" : std::to_string(w_tiles_.size()) + " tiles")
+                      << ", img_max=" << img_max_w << "x" << img_max_h << ")" << std::endl;
+        } else {
+            std::cerr << "LmHead: image2d path unavailable, using buffer kernel "
+                      << "(img_max=" << img_max_w << "x" << img_max_h << ")" << std::endl;
+        }
+    }
+#endif // NNOPT_USE_FP16
+
     NNOPT_LAYER_INIT("lm_head");
     return true;
 }
@@ -62,6 +175,62 @@ cl_mem LmHead::forward(cl_command_queue queue, cl_mem hidden, int M) {
     if (err != CL_SUCCESS || !out) {
         NNOPT_ERROR_FMT("LmHead: alloc out failed: %d", err);
         return nullptr;
+    }
+
+    if (M == 1 && img_path_ready_ && gemv_k576_no4_img_) {
+        // ── Image-backed decode fast path ──
+        // Single-image: one dispatch over the whole V×H weight as one image.
+        // Tiled: dispatch per tile, writing to a sub-buffer of `out` covering
+        // that tile's row range. Sub-buffers are cached per tile so we don't
+        // pay clCreateSubBuffer cost on every decode step.
+        const int K_PIX = H / 4;
+        (void)K_PIX;
+
+        if (w_image_single_) {
+            err = clSetKernelArg(gemv_k576_no4_img_, 0, sizeof(cl_mem), &hidden);          if (err != CL_SUCCESS) goto img_failed;
+            err = clSetKernelArg(gemv_k576_no4_img_, 1, sizeof(cl_mem), &w_image_single_); if (err != CL_SUCCESS) goto img_failed;
+            err = clSetKernelArg(gemv_k576_no4_img_, 2, sizeof(cl_mem), &out);             if (err != CL_SUCCESS) goto img_failed;
+            err = clSetKernelArg(gemv_k576_no4_img_, 3, sizeof(int),    &V);               if (err != CL_SUCCESS) goto img_failed;
+            const size_t WG = 64;
+            size_t gws = (size_t)(V / 4) * WG;
+            size_t lws = WG;
+            err = nnopt_prof::enqueue(queue, gemv_k576_no4_img_, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+            if (err != CL_SUCCESS) goto img_failed;
+        } else {
+            // Tiled path. `out` changes between calls (allocated above), so
+            // we build per-tile sub-buffers per call. Cheap on Adreno (~µs)
+            // but in a future pass move to persistent decode_logits_buf_
+            // and cache the sub-buffers.
+            const size_t out_row_bytes = sizeof(nnopt_storage_t);  // fp16 = 2
+            for (auto& t : w_tiles_) {
+                cl_buffer_region region;
+                region.origin = (size_t)t.row_offset * out_row_bytes;
+                region.size   = (size_t)t.row_count  * out_row_bytes;
+                cl_mem out_sub = clCreateSubBuffer(out, CL_MEM_READ_WRITE,
+                                                   CL_BUFFER_CREATE_TYPE_REGION,
+                                                   &region, &err);
+                if (err != CL_SUCCESS || !out_sub) { NNOPT_ERROR_FMT("lm_head tile out_sub failed: %d", err); goto img_failed; }
+
+                err = clSetKernelArg(gemv_k576_no4_img_, 0, sizeof(cl_mem), &hidden);  if (err != CL_SUCCESS) { clReleaseMemObject(out_sub); goto img_failed; }
+                err = clSetKernelArg(gemv_k576_no4_img_, 1, sizeof(cl_mem), &t.image); if (err != CL_SUCCESS) { clReleaseMemObject(out_sub); goto img_failed; }
+                err = clSetKernelArg(gemv_k576_no4_img_, 2, sizeof(cl_mem), &out_sub); if (err != CL_SUCCESS) { clReleaseMemObject(out_sub); goto img_failed; }
+                int tile_n = t.row_count;
+                err = clSetKernelArg(gemv_k576_no4_img_, 3, sizeof(int),    &tile_n);  if (err != CL_SUCCESS) { clReleaseMemObject(out_sub); goto img_failed; }
+
+                const size_t WG = 64;
+                size_t gws = (size_t)(tile_n / 4) * WG;
+                size_t lws = WG;
+                err = nnopt_prof::enqueue(queue, gemv_k576_no4_img_, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+                clReleaseMemObject(out_sub);
+                if (err != CL_SUCCESS) goto img_failed;
+            }
+        }
+        NNOPT_LAYER_CHECK("lm_head", queue, out, (size_t)M * (size_t)V);
+        return out;
+
+      img_failed:
+        NNOPT_ERROR_FMT("lm_head image dispatch failed: %d — falling through to buffer kernel", err);
+        // Fall through to buffer fast path or CLBlast.
     }
 
     if (M == 1 && fused_lm_head_m1_) {

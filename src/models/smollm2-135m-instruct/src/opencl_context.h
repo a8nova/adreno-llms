@@ -26,6 +26,15 @@ public:
     size_t max_work_group_size() const;
     size_t local_mem_size() const;
 
+    // Helper for code paths that only have a queue (e.g. utils::pytorch_linear's
+    // lazy gemv_m1 program build): same persistent-binary-cache behaviour as
+    // build_program(), but standalone — derives ctx + device from the queue
+    // and applies the same key (source + options + device_name + driver).
+    static cl_program build_cached_program_from_queue(
+        cl_command_queue queue,
+        const std::string& source,
+        const std::string& options);
+
 private:
     cl_platform_id platform_ = nullptr;
     cl_device_id device_ = nullptr;

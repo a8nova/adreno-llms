@@ -26,6 +26,14 @@ public:
     size_t max_work_group_size() const;
     size_t local_mem_size() const;
 
+    // Build a program with the same on-device kernel-binary cache as
+    // build_program(), but standalone — derives ctx + device from the queue
+    // and applies the same key (source + options + device_name + driver).
+    static cl_program build_cached_program_from_queue(
+        cl_command_queue queue,
+        const std::string& source,
+        const std::string& options);
+
 private:
     cl_platform_id platform_ = nullptr;
     cl_device_id device_ = nullptr;
