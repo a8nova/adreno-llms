@@ -21,9 +21,15 @@ NNOPT_DTYPE=fp16 ./scripts/build.sh --release
 # 3. Deploy
 NNOPT_DTYPE=fp16 ./scripts/deploy_android.sh
 
-# 4. Run
+# 4. Run — instruct mode (recommended; wraps prompt with the SmolLM2 chat template)
+NNOPT_DTYPE=fp16 ./scripts/run_android.sh "What is the capital of France?" 96 --chat
+
+# Or raw completion mode (no template — useful for benchmark parity but produces
+# rambling output on most prompts since this is an instruct-tuned model):
 NNOPT_DTYPE=fp16 ./scripts/run_android.sh "Once upon a time" 64
 ```
+
+The `--chat` flag wraps the prompt as `<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n` and stops generation at `<|im_end|>`. Without it the model still works but treats the prompt as raw completion, which is rarely what you want for an instruct model.
 
 ## Performance
 

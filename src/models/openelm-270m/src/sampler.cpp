@@ -8,13 +8,17 @@ Sampler::Sampler(const SamplerConfig& config) : config_(config) {}
 
 int Sampler::sample(std::vector<float>& logits,
                     const std::vector<int32_t>& generated_ids) const {
-    // Debug: show top logit before any processing
-    if (!logits.empty()) {
-        auto max_it = std::max_element(logits.begin(), logits.end());
-        int max_idx = static_cast<int>(max_it - logits.begin());
-        bool all_zero = std::all_of(logits.begin(), logits.end(), [](float v) { return v == 0.0f; });
-        fprintf(stderr, "Sampler: max_logit=%.4f at id=%d, logits_size=%zu%s\n",
-                *max_it, max_idx, logits.size(), all_zero ? " [ALL ZEROS - BROKEN!]" : "");
+    // Debug: show top logit before any processing. Gated by NNOPT_DEBUG_LAYERS
+    // so per-token stderr noise doesn't drown out streamed text in normal runs.
+    {
+        const char* env = std::getenv("NNOPT_DEBUG_LAYERS");
+        if (env != nullptr && env[0] != '0' && !logits.empty()) {
+            auto max_it = std::max_element(logits.begin(), logits.end());
+            int max_idx = static_cast<int>(max_it - logits.begin());
+            bool all_zero = std::all_of(logits.begin(), logits.end(), [](float v) { return v == 0.0f; });
+            fprintf(stderr, "Sampler: max_logit=%.4f at id=%d, logits_size=%zu%s\n",
+                    *max_it, max_idx, logits.size(), all_zero ? " [ALL ZEROS - BROKEN!]" : "");
+        }
     }
     // 1. Apply repetition penalty
     if (config_.repetition_penalty != 1.0f && !generated_ids.empty()) {

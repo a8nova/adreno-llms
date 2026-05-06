@@ -50,7 +50,8 @@ for arg in $EXTRA_ARGS; do
     if [ "$prev_arg" = "--token-ids" ] && [ -f "$arg" ]; then
         # Check if device already has the file with matching size; push only if missing/different.
         LOCAL_SIZE=$(stat -f%z "$arg" 2>/dev/null || stat -c%s "$arg" 2>/dev/null || echo "0")
-        REMOTE_SIZE=$($ADB shell "stat -c%s "$REMOTE_DIR/test_input_ids.bin" 2>/dev/null" 2>/dev/null | tr -d '')
+        REMOTE_SIZE=$($ADB shell "stat -c%s "$REMOTE_DIR/test_input_ids.bin" 2>/dev/null" 2>/dev/null | tr -d '
+')
         if [ -z "$REMOTE_SIZE" ] || [ "$LOCAL_SIZE" != "$REMOTE_SIZE" ]; then
             $ADB push "$arg" "$REMOTE_DIR/test_input_ids.bin" 2>/dev/null
         fi
@@ -62,9 +63,13 @@ for arg in $EXTRA_ARGS; do
     prev_arg="$arg"
 done
 
-# Debug layer validation is on by default; set NNOPT_DEBUG_LAYERS=0 to disable
-DEBUG_ENV="NNOPT_DEBUG_LAYERS=1"
-if [ "${NNOPT_DEBUG_LAYERS:-}" = "0" ]; then DEBUG_ENV=""; fi
+# Debug layer validation is OFF by default; set NNOPT_DEBUG_LAYERS=1 to enable
+# (per-token Sampler + Generated-token stderr noise — useful for debugging,
+# drowns out streamed text otherwise).
+DEBUG_ENV=""
+if [ -n "${NNOPT_DEBUG_LAYERS:-}" ] && [ "${NNOPT_DEBUG_LAYERS}" != "0" ]; then
+  DEBUG_ENV="NNOPT_DEBUG_LAYERS=${NNOPT_DEBUG_LAYERS}"
+fi
 
 # Layer dump mode (Infer tool sets NNOPT_DUMP_LAYERS=1 for SxSDebug)
 DUMP_ENV=""
