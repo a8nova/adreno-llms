@@ -271,6 +271,92 @@ Root causes:
 
 ---
 
-## Steps (to be filled as optimizations land)
+## Step 4 — Build-side wins (program-binary cache, fast-relaxed-math, perf hint)
+
+> **Status:** MEASURED — 2026-05-06 (rolled in with Step 5–7; see combined median)
+
+**What changed:** Ported `OpenCLContext::build_program` from the Qwen sister-port:
+- 64-bit FNV-1a-keyed persistent program-binary cache under `kernel_cache/` (loads via `clCreateProgramWithBinary` on subsequent runs — TTFT ~30 s → ~2 s on cold device).
+- Auto-appended `-cl-fast-relaxed-math` to all kernel builds.
+- `NNOPT_PROFILE`-gated `CL_QUEUE_PROFILING_ENABLE` (no-op when not profiling — measurable overhead at our 240+ disp/tok rate).
+- Adreno `clSetPerfHintQCOM(HIGH)` boost-clock hint via `clGetExtensionFunctionAddressForPlatform` (loaded dynamically; the ICD doesn't expose it as a standard symbol).
+
+These are infrastructure-level wins that don't move decode tok/s on their own (per-kernel time barely changes), but they unlock the larger experiments below by giving us a faster compile loop and stable clocks.
+
+---
+
+## Steps 5–7 — image2d_t texture cache + multi-output GEMV + vec4 SwiGLU + GPU argmax
+
+> **Status:** MEASURED — 2026-05-06
+
+**What changed (combined):**
+
+1. **`gemv_m1_k576_no4_img`** (`kernels/block_fused.cl`) — image2d-backed K=576 GEMV, 4 outputs/WG, vec4 fp16 reads via `read_imageh()` on `CL_RGBA / CL_HALF_FLOAT`. Adreno's texture-fetch engine has 1.3–1.5× higher effective BW than buffer reads. Dispatched 3× per layer for Q/K/V (separate dispatches outperformed a fused 3-image variant; branchy code in the fused version regressed by 2.5×) and once for `lm_head` (tiled into 3 sub-images of 16384 rows each because V=49152 > Adreno's 16384 image-height cap).
+
+2. **`fused_oproj_residual_m1_no4_img`** + **`fused_down_residual_m1_no4_img`** — image2d-backed, 4 outputs/WG, residual-add fused into the kernel. Down-proj has K=1536 = 6×WG×4 vec4 iters per thread (no tail).
+
+3. **`fused_gate_up_silu_m1_v4_img`** — image2d-backed Wgate AND Wup, vec4 inner loop, single-output (NOT no4 — 4 outputs × dual accumulators = 8 fp32 accs/thread, register spill. Qwen Step 7 measured 1.78× regression from this combination).
+
+4. **GPU argmax** (`kernels/argmax.cl`, ported from mamba2-130m) — replaces the synchronous 98 KB fp16 logits readback at greedy decode (`temperature ≤ 0` AND `repetition_penalty == 1.0`) with a two-pass cooperative reduce on-GPU and a 4-byte readback. `Model::forward_decode_greedy()` is the entry point; `Model::generate()` selects it when sampler config is greedy-pure.
+
+**Drift:** Tokens reverted to the Step 1 reference sequence (`"20th and 21st floors, and the student was at the 22nd floor. The student was 10 years old, and"`) — the new reduction order in the image-backed `_no4` kernels happens to match Step 1's GEMV order more closely than Step 3's `fused_decode_attn_m1` softmax-reduce. ID-for-ID stable across 5 runs.
+
+**5-run median (warm):**
+| Run | decode tok/s |
+|-----|-------------|
+| warmup | 23.55 |
+| 1 | 23.93 |
+| 2 | 23.65 |
+| 3 | 23.95 |
+| 4 | 22.75 |
+| 5 | 23.51 |
+| **median** | **23.65** |
+
+**Δ vs Step 3:** +**52.8%** (15.48 → 23.65 tok/s) | **Δ vs Step 0:** +**16.0×**
+
+**Step 7 per-kernel profile (NNOPT_PROFILE=1):**
+```
+=========== GPU per-kernel profile ===========
+Total recorded GPU time: 1087.77 ms across 16 distinct kernels
+kernel                                 count    total_ms    avg_us    max_us   % tot
+------------------------------------------------------------------------------------
+gemv_m1_k576_no4_img                    2883     379.100     131.5    2186.0   34.9%
+fused_gate_up_silu_m1_v4_img             930     377.407     405.8     462.1   34.7%
+fused_down_residual_m1_no4_img           930     145.834     156.8     188.2   13.4%
+fused_oproj_residual_m1_no4_img          930      90.606      97.4     120.8    8.3%
+fused_decode_attn_m1                     930      34.912      37.5      58.9    3.2%
+rmsnorm_forward                         1952      31.239      16.0      21.2    2.9%
+fused_rope_kvwrite_m1                    930      12.140      13.1      19.2    1.1%
+embedding_forward                         32      11.706     365.8     380.2    1.1%
+gqa_attn_scores                           30       1.216      40.5      43.0    0.1%
+gqa_attn_out                              30       1.137      37.9      39.9    0.1%
+argmax_partial                            31       0.701      22.6      24.1    0.1%
+gqa_softmax                               30       0.471      15.7      20.0    0.0%
+element_add                               60       0.429       7.2       8.2    0.0%
+silu_mul                                  30       0.361      12.0      15.1    0.0%
+rope_apply_qk                             30       0.348      11.6      13.1    0.0%
+argmax_final                              31       0.159       5.1       6.1    0.0%
+------------------------------------------------------------------------------------
+```
+
+**Per-kernel deltas vs Step 3 baseline:**
+| kernel (Step 3) → kernel (Step 7) | Step 3 ms | Step 7 ms | Δ |
+|---|---|---|---|
+| `fused_lm_head_gemv_m1` → `gemv_m1_k576_no4_img` (lm_head 3 tiles, ~6.5 ms/tok) | 423 | ~202 | **−52%** |
+| `fused_qkv_gemv_m1` → 3× `gemv_m1_k576_no4_img` (Q+K+V) | 271 | ~177 | **−35%** |
+| `fused_gate_up_silu_m1` (scalar) → `fused_gate_up_silu_m1_v4_img` | 597 | 377 | **−37%** |
+| `fused_down_residual_m1` → `fused_down_residual_m1_no4_img` | 177 | 146 | **−18%** |
+| `fused_oproj_residual_m1` → `fused_oproj_residual_m1_no4_img` | 165 | 91 | **−45%** |
+| **Total profiled GPU** | **1829** | **1088** | **−41%** |
+
+**Efficiency vs ceiling:** 23.65 / 38.5 = **61.4%** of 38.5 tok/s image-cache ceiling (vs 40% at Step 3, 28% at Step 2, 4% at Step 0).
+
+**Remaining headroom:**
+- `fused_gate_up_silu_m1_v4_img` is now tied for #1 (35% GPU) with the lm_head GEMV. Single-output keeps register pressure safe; trying `_no4_img` here regressed on Qwen and would likely regress here too.
+- Kernel-launch overhead is now ~62% of total inference time (1088 ms GPU / 2840 ms total = 38% GPU; rest is launch overhead + readback). The 60 extra dispatches/token from splitting QKV into 3 image dispatches contributed to this; recordable command queues (`cl_qcom_recordable_queues`) would amortize but Adreno 618 historically refuses them per Qwen's prior work.
+
+---
+
+## Steps (to be filled as further optimizations land)
 
 *(Each step: narrative + 3-run table + Δ vs Step N-1 + Δ vs Step 0 + per-kernel profile every 2-3 steps)*

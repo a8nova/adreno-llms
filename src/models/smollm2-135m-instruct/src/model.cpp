@@ -7,6 +7,7 @@
 #include "utils.h"
 #include "model_config.h"
 #include "benchmark.h"
+#include "prof.h"
 #include <CL/cl.h>
 #include <clblast.h>
 #include <iostream>
@@ -34,7 +35,133 @@ Model::Model(OpenCLContext& cl_ctx, Weights& weights)
     }
 }
 
-Model::~Model() {}
+Model::~Model() {
+    if (argmax_partial_)   clReleaseKernel(argmax_partial_);
+    if (argmax_final_)     clReleaseKernel(argmax_final_);
+    if (argmax_prog_)      clReleaseProgram(argmax_prog_);
+    if (argmax_scratch_v_) clReleaseMemObject(argmax_scratch_v_);
+    if (argmax_scratch_i_) clReleaseMemObject(argmax_scratch_i_);
+    if (argmax_out_idx_)   clReleaseMemObject(argmax_out_idx_);
+    if (argmax_cur_token_) clReleaseMemObject(argmax_cur_token_);
+}
+
+bool Model::ensure_argmax_program(cl_command_queue queue) {
+    if (argmax_tried_) return argmax_ready_;
+    argmax_tried_ = true;
+
+    constexpr int NUM_WG = 32;
+
+    cl_context ctx = cl_ctx_.context();
+    cl_int err = CL_SUCCESS;
+
+    argmax_prog_ = cl_ctx_.build_program_from_file(
+        "kernels/argmax.cl",
+#ifdef NNOPT_USE_FP16
+        "-DNNOPT_USE_FP16=1 -DUSE_FP16=1 -DNUM_WG=32"
+#else
+        "-DNUM_WG=32"
+#endif
+    );
+    if (!argmax_prog_) {
+        NNOPT_ERROR("Failed to build kernels/argmax.cl");
+        return false;
+    }
+    argmax_partial_ = clCreateKernel(argmax_prog_, "argmax_partial", &err);
+    if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("argmax_partial kernel failed: %d", err); return false; }
+    argmax_final_ = clCreateKernel(argmax_prog_, "argmax_final", &err);
+    if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("argmax_final kernel failed: %d", err); return false; }
+
+    argmax_scratch_v_ = clCreateBuffer(ctx, CL_MEM_READ_WRITE, NUM_WG * sizeof(float), nullptr, &err);
+    if (err != CL_SUCCESS) return false;
+    argmax_scratch_i_ = clCreateBuffer(ctx, CL_MEM_READ_WRITE, NUM_WG * sizeof(int),   nullptr, &err);
+    if (err != CL_SUCCESS) return false;
+    argmax_out_idx_   = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(int), nullptr, &err);
+    if (err != CL_SUCCESS) return false;
+    argmax_cur_token_ = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(int), nullptr, &err);
+    if (err != CL_SUCCESS) return false;
+
+    (void)queue;
+    argmax_ready_ = true;
+    return true;
+}
+
+int32_t Model::forward_decode_greedy(int32_t token_id, int start_pos) {
+    cl_command_queue queue = cl_ctx_.queue();
+    cl_context ctx = cl_ctx_.context();
+    cl_int err = CL_SUCCESS;
+
+    if (!ensure_argmax_program(queue)) return -1;
+
+    // 1. Token embedding.
+    const std::vector<int32_t> single_id = { token_id };
+    cl_mem ids_buf = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                    sizeof(int32_t), (void*)single_id.data(), &err);
+    if (err != CL_SUCCESS || !ids_buf) return -1;
+    cl_mem hidden = embed_tokens_->forward(queue, ids_buf, 1);
+    clReleaseMemObject(ids_buf);
+    if (!hidden) return -1;
+
+    // 2. Transformer layers (same as forward_decode).
+    for (int i = 0; i < MODEL_CONFIG::NUM_HIDDEN_LAYERS; i++) {
+        cl_mem normed = input_layernorm_[i]->forward_decode(queue, hidden);
+        if (!normed) { clReleaseMemObject(hidden); return -1; }
+        if (!self_attn_[i]->forward_decode_into_residual(queue, normed, start_pos, hidden)) {
+            clReleaseMemObject(hidden); return -1;
+        }
+        cl_mem normed2 = post_attention_layernorm_[i]->forward_decode(queue, hidden);
+        if (!normed2) { clReleaseMemObject(hidden); return -1; }
+        if (!mlp_[i]->forward_decode_into_residual(queue, normed2, hidden)) {
+            clReleaseMemObject(hidden); return -1;
+        }
+    }
+
+    cl_mem final_hidden = final_norm_->forward_decode(queue, hidden);
+    clReleaseMemObject(hidden);
+    if (!final_hidden) return -1;
+
+    cl_mem logits_buf = lm_head_->forward(queue, final_hidden, 1);
+    if (!logits_buf) return -1;
+
+    // 3. GPU argmax — two-pass cooperative reduce.
+    constexpr int NUM_WG = 32;
+    constexpr int WG_SIZE = 64;
+    const int V = MODEL_CONFIG::VOCAB_SIZE;
+    const int row_off = 0;
+    const int write_off = 0;
+    const int valid_n = V;
+
+    err  = clSetKernelArg(argmax_partial_, 0, sizeof(cl_mem), &logits_buf);
+    err |= clSetKernelArg(argmax_partial_, 1, sizeof(cl_mem), &argmax_scratch_v_);
+    err |= clSetKernelArg(argmax_partial_, 2, sizeof(cl_mem), &argmax_scratch_i_);
+    err |= clSetKernelArg(argmax_partial_, 3, sizeof(int),    &V);
+    err |= clSetKernelArg(argmax_partial_, 4, sizeof(int),    &valid_n);
+    err |= clSetKernelArg(argmax_partial_, 5, sizeof(int),    &row_off);
+    if (err != CL_SUCCESS) { clReleaseMemObject(logits_buf); return -1; }
+    {
+        size_t gws = (size_t)NUM_WG * WG_SIZE;
+        size_t lws = WG_SIZE;
+        err = nnopt_prof::enqueue(queue, argmax_partial_, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { clReleaseMemObject(logits_buf); return -1; }
+    }
+    err  = clSetKernelArg(argmax_final_, 0, sizeof(cl_mem), &argmax_scratch_v_);
+    err |= clSetKernelArg(argmax_final_, 1, sizeof(cl_mem), &argmax_scratch_i_);
+    err |= clSetKernelArg(argmax_final_, 2, sizeof(cl_mem), &argmax_out_idx_);
+    err |= clSetKernelArg(argmax_final_, 3, sizeof(cl_mem), &argmax_cur_token_);
+    err |= clSetKernelArg(argmax_final_, 4, sizeof(int),    &write_off);
+    if (err != CL_SUCCESS) { clReleaseMemObject(logits_buf); return -1; }
+    {
+        size_t gws = NUM_WG, lws = NUM_WG;
+        err = nnopt_prof::enqueue(queue, argmax_final_, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { clReleaseMemObject(logits_buf); return -1; }
+    }
+
+    // 4. Read back single int (4 bytes) instead of 98 KB of logits.
+    int32_t out = -1;
+    err = clEnqueueReadBuffer(queue, argmax_out_idx_, CL_TRUE, 0, sizeof(int32_t), &out, 0, nullptr, nullptr);
+    clReleaseMemObject(logits_buf);
+    if (err != CL_SUCCESS) return -1;
+    return out;
+}
 
 // Per-layer instance + kernel construction. Return false on the FIRST
 // per-layer failure — main.cpp checks the return and exits non-zero so the
@@ -481,17 +608,37 @@ std::vector<int32_t> Model::generate(
     // absolute position of that new token. Attention reuses cached K/V for
     // all prior tokens — work per step is O(layers * (hidden + seq_k * head_dim)),
     // not O((P + i)^2 * ...) like a re-prefill loop.
+    //
+    // GPU-argmax fast path: when sampler is pure greedy (temp ≤ 0,
+    // rep_penalty == 1), we run argmax on the GPU and read back a single int
+    // instead of the full V=49152 fp16 logits buffer (98 KB blocking transfer).
+    const bool greedy_fast_path =
+        sampler_config.temperature <= 0.0f &&
+        sampler_config.repetition_penalty == 1.0f;
+
     for (int i = 1; i < max_new_tokens; i++) {
         const int start_pos = (int)prompt_ids.size() + (i - 1);
-        std::vector<int32_t> single = { next_token };
 
-        logits = forward(single, start_pos);
-        if (logits.empty()) {
-            NNOPT_ERROR("decode forward() returned empty logits");
-            break;
+        if (greedy_fast_path) {
+            int32_t tok = forward_decode_greedy(next_token, start_pos);
+            if (tok < 0) {
+                NNOPT_ERROR("decode forward_decode_greedy failed; falling back to logits readback");
+                std::vector<int32_t> single = { next_token };
+                logits = forward(single, start_pos);
+                if (logits.empty()) break;
+                next_token = sampler.sample(logits, generated);
+            } else {
+                next_token = tok;
+            }
+        } else {
+            std::vector<int32_t> single = { next_token };
+            logits = forward(single, start_pos);
+            if (logits.empty()) {
+                NNOPT_ERROR("decode forward() returned empty logits");
+                break;
+            }
+            next_token = sampler.sample(logits, generated);
         }
-
-        next_token = sampler.sample(logits, generated);
         ids.push_back(next_token);
         generated.push_back(next_token);
         if (on_token) on_token(next_token);

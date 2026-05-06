@@ -31,6 +31,8 @@ private:
     // Decode fast-path kernels (block_fused.cl)
     cl_program block_fused_prog_ = nullptr;
     cl_kernel fused_gate_up_silu_m1_ = nullptr;
+    cl_kernel fused_gate_up_silu_m1_v4_ = nullptr;  // vec4 inner loop (buffer)
+    cl_kernel fused_gate_up_silu_m1_v4_img_ = nullptr;  // vec4 + image2d_t (preferred)
     cl_kernel fused_down_res_m1_ = nullptr;
 
     // Persistent decode buffer — allocated once in initialize().
@@ -39,4 +41,13 @@ private:
     cl_mem w_gate_ = nullptr;
     cl_mem w_up_ = nullptr;
     cl_mem w_down_ = nullptr;
+
+    // Image2d_t-backed view of w_down_ (Adreno texture cache).
+    // K=INTERMEDIATE_SIZE=1536; output dim H=576 fits one image easily.
+    cl_mem w_down_img_ = nullptr;
+    cl_mem w_gate_img_ = nullptr;
+    cl_mem w_up_img_   = nullptr;
+    cl_kernel fused_down_no4_img_ = nullptr;  // fused_down_residual_m1_no4_img
+    bool      down_img_ready_     = false;
+    bool      gate_up_img_ready_  = false;
 };

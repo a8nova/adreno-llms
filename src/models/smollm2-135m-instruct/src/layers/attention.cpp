@@ -18,6 +18,7 @@
 #include "prof.h"
 #include <clblast.h>
 #include <cmath>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,13 @@ Attention::~Attention() {
     if (fused_rope_kvwrite_m1_)   clReleaseKernel(fused_rope_kvwrite_m1_);
     if (fused_decode_attn_m1_)    clReleaseKernel(fused_decode_attn_m1_);
     if (fused_oproj_res_m1_)      clReleaseKernel(fused_oproj_res_m1_);
+    if (fused_qkv_no4_img_)       clReleaseKernel(fused_qkv_no4_img_);
+    if (gemv_k576_no4_img_)       clReleaseKernel(gemv_k576_no4_img_);
+    if (fused_oproj_no4_img_)     clReleaseKernel(fused_oproj_no4_img_);
+    if (wq_img_)                  clReleaseMemObject(wq_img_);
+    if (wk_img_)                  clReleaseMemObject(wk_img_);
+    if (wv_img_)                  clReleaseMemObject(wv_img_);
+    if (wo_img_)                  clReleaseMemObject(wo_img_);
     if (block_fused_prog_)        clReleaseProgram(block_fused_prog_);
 }
 
@@ -233,6 +241,50 @@ bool Attention::initialize() {
     decode_attn_out_buf_ = clCreateBuffer(bctx, CL_MEM_READ_WRITE, (size_t)Q_DIM_CONST  * sizeof(nnopt_storage_t), nullptr, &berr);
     if (berr || !decode_attn_out_buf_) { NNOPT_ERROR_FMT("alloc decode_attn_out_buf_ failed: %d", berr); return false; }
     // decode_scores_buf_ is unused — scores live in kernel local memory.
+
+#ifdef NNOPT_USE_FP16
+    // Image2d_t-backed weight views (Adreno texture cache).
+    // K=576 (HIDDEN_SIZE) for all four. Wq is [576,576], Wk/Wv are [192,576],
+    // Wo is [576,576]. All well below CL_DEVICE_IMAGE2D_MAX_HEIGHT=16384.
+    fused_qkv_no4_img_   = nullptr;  // deprecated — fused-3-image variant regressed (branchy code).
+    gemv_k576_no4_img_   = clCreateKernel(block_fused_prog_, "gemv_m1_k576_no4_img", &err);
+    if (err != CL_SUCCESS) gemv_k576_no4_img_ = nullptr;
+    fused_oproj_no4_img_ = clCreateKernel(block_fused_prog_, "fused_oproj_residual_m1_no4_img", &err);
+    if (err != CL_SUCCESS) fused_oproj_no4_img_ = nullptr;
+
+    if (gemv_k576_no4_img_ || fused_oproj_no4_img_) {
+        const int H = MODEL_CONFIG::HIDDEN_SIZE;
+        const int K_PIX = H / 4;  // 144 vec4 pixels per row
+
+        cl_image_format fmt;
+        fmt.image_channel_order     = CL_RGBA;
+        fmt.image_channel_data_type = CL_HALF_FLOAT;
+
+        auto wrap = [&](cl_mem buf, int N) -> cl_mem {
+            cl_image_desc desc;
+            std::memset(&desc, 0, sizeof(desc));
+            desc.image_type      = CL_MEM_OBJECT_IMAGE2D;
+            desc.image_width     = (size_t)K_PIX;
+            desc.image_height    = (size_t)N;
+            desc.image_row_pitch = 0;
+            desc.buffer          = buf;
+            cl_int e = CL_SUCCESS;
+            cl_mem img = clCreateImage(bctx, CL_MEM_READ_ONLY, &fmt, &desc, nullptr, &e);
+            return (e == CL_SUCCESS) ? img : nullptr;
+        };
+
+        if (gemv_k576_no4_img_) {
+            wq_img_ = wrap(wq_, Q_DIM_CONST);
+            wk_img_ = wrap(wk_, KV_DIM_CONST);
+            wv_img_ = wrap(wv_, KV_DIM_CONST);
+            qkv_img_ready_ = (wq_img_ && wk_img_ && wv_img_);
+        }
+        if (fused_oproj_no4_img_) {
+            wo_img_ = wrap(wo_, Q_DIM_CONST);
+            oproj_img_ready_ = (wo_img_ != nullptr);
+        }
+    }
+#endif
 
     NNOPT_LAYER_INIT_FMT("block%d_sub_attn", layer_idx_);
     return true;
@@ -536,18 +588,48 @@ bool Attention::forward_decode_into_residual(cl_command_queue queue,
     cl_mem k = decode_k_buf_;
     cl_mem v = decode_v_buf_;
 
-    // 1. fused_qkv_gemv_m1: Q/K/V from x in one kernel.
-    if (!_set_arg_checked(fused_qkv_m1_, 0, sizeof(cl_mem), &x,      "x"))      return false;
-    if (!_set_arg_checked(fused_qkv_m1_, 1, sizeof(cl_mem), &wq_,    "w_q"))    return false;
-    if (!_set_arg_checked(fused_qkv_m1_, 2, sizeof(cl_mem), &wk_,    "w_k"))    return false;
-    if (!_set_arg_checked(fused_qkv_m1_, 3, sizeof(cl_mem), &wv_,    "w_v"))    return false;
-    if (!_set_arg_checked(fused_qkv_m1_, 4, sizeof(cl_mem), &q,      "q_out"))  return false;
-    if (!_set_arg_checked(fused_qkv_m1_, 5, sizeof(cl_mem), &k,      "k_out"))  return false;
-    if (!_set_arg_checked(fused_qkv_m1_, 6, sizeof(cl_mem), &v,      "v_out"))  return false;
-    if (!_set_arg_checked(fused_qkv_m1_, 7, sizeof(int),    &H,      "H"))      return false;
-    if (!_set_arg_checked(fused_qkv_m1_, 8, sizeof(int),    &Q_DIM,  "Q_DIM"))  return false;
-    if (!_set_arg_checked(fused_qkv_m1_, 9, sizeof(int),    &KV_DIM, "KV_DIM")) return false;
-    {
+    // 1. QKV projection: prefer image2d_t no4 path (3 separate dispatches share x).
+    //    Fused-3-images variant regressed in early measurement — branchy code in
+    //    a single kernel (per-segment image select) hurt texture-cache flow.
+    //    Three back-to-back dispatches of the proven gemv_m1_k576_no4_img total
+    //    340ms vs 672ms for the fused variant.
+    if (qkv_img_ready_ && gemv_k576_no4_img_) {
+        const size_t WG = 64;
+        size_t lws = WG;
+        // Q
+        if (!_set_arg_checked(gemv_k576_no4_img_, 0, sizeof(cl_mem), &x,        "x"))        return false;
+        if (!_set_arg_checked(gemv_k576_no4_img_, 1, sizeof(cl_mem), &wq_img_,  "Wq_img"))   return false;
+        if (!_set_arg_checked(gemv_k576_no4_img_, 2, sizeof(cl_mem), &q,        "q_out"))    return false;
+        if (!_set_arg_checked(gemv_k576_no4_img_, 3, sizeof(int),    &Q_DIM,    "N=Q_DIM"))  return false;
+        size_t gws_q = (size_t)(Q_DIM / 4) * WG;
+        err = nnopt_prof::enqueue(queue, gemv_k576_no4_img_, 1, nullptr, &gws_q, &lws, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("gemv_m1_k576_no4_img(Q) failed: %d", err); return false; }
+        // K
+        if (!_set_arg_checked(gemv_k576_no4_img_, 0, sizeof(cl_mem), &x,        "x"))        return false;
+        if (!_set_arg_checked(gemv_k576_no4_img_, 1, sizeof(cl_mem), &wk_img_,  "Wk_img"))   return false;
+        if (!_set_arg_checked(gemv_k576_no4_img_, 2, sizeof(cl_mem), &k,        "k_out"))    return false;
+        if (!_set_arg_checked(gemv_k576_no4_img_, 3, sizeof(int),    &KV_DIM,   "N=KV_DIM")) return false;
+        size_t gws_k = (size_t)(KV_DIM / 4) * WG;
+        err = nnopt_prof::enqueue(queue, gemv_k576_no4_img_, 1, nullptr, &gws_k, &lws, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("gemv_m1_k576_no4_img(K) failed: %d", err); return false; }
+        // V
+        if (!_set_arg_checked(gemv_k576_no4_img_, 0, sizeof(cl_mem), &x,        "x"))        return false;
+        if (!_set_arg_checked(gemv_k576_no4_img_, 1, sizeof(cl_mem), &wv_img_,  "Wv_img"))   return false;
+        if (!_set_arg_checked(gemv_k576_no4_img_, 2, sizeof(cl_mem), &v,        "v_out"))    return false;
+        if (!_set_arg_checked(gemv_k576_no4_img_, 3, sizeof(int),    &KV_DIM,   "N=KV_DIM")) return false;
+        err = nnopt_prof::enqueue(queue, gemv_k576_no4_img_, 1, nullptr, &gws_k, &lws, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("gemv_m1_k576_no4_img(V) failed: %d", err); return false; }
+    } else {
+        if (!_set_arg_checked(fused_qkv_m1_, 0, sizeof(cl_mem), &x,      "x"))      return false;
+        if (!_set_arg_checked(fused_qkv_m1_, 1, sizeof(cl_mem), &wq_,    "w_q"))    return false;
+        if (!_set_arg_checked(fused_qkv_m1_, 2, sizeof(cl_mem), &wk_,    "w_k"))    return false;
+        if (!_set_arg_checked(fused_qkv_m1_, 3, sizeof(cl_mem), &wv_,    "w_v"))    return false;
+        if (!_set_arg_checked(fused_qkv_m1_, 4, sizeof(cl_mem), &q,      "q_out"))  return false;
+        if (!_set_arg_checked(fused_qkv_m1_, 5, sizeof(cl_mem), &k,      "k_out"))  return false;
+        if (!_set_arg_checked(fused_qkv_m1_, 6, sizeof(cl_mem), &v,      "v_out"))  return false;
+        if (!_set_arg_checked(fused_qkv_m1_, 7, sizeof(int),    &H,      "H"))      return false;
+        if (!_set_arg_checked(fused_qkv_m1_, 8, sizeof(int),    &Q_DIM,  "Q_DIM"))  return false;
+        if (!_set_arg_checked(fused_qkv_m1_, 9, sizeof(int),    &KV_DIM, "KV_DIM")) return false;
         const size_t WG = 64;
         size_t gws = (size_t)(Q_DIM + 2 * KV_DIM) * WG;
         size_t lws = WG;
@@ -602,14 +684,24 @@ bool Attention::forward_decode_into_residual(cl_command_queue queue,
         if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("fused_decode_attn_m1 failed: %d", err); return false; }
     }
 
-    // 4. fused_oproj_residual_m1: o_proj + residual add in one kernel.
+    // 4. o_proj + residual add: prefer image2d_t no4 path; fall back to buffer kernel.
     cl_mem attn_out = decode_attn_out_buf_;
-    if (!_set_arg_checked(fused_oproj_res_m1_, 0, sizeof(cl_mem), &attn_out, "attn_out")) return false;
-    if (!_set_arg_checked(fused_oproj_res_m1_, 1, sizeof(cl_mem), &wo_,      "w_o"))      return false;
-    if (!_set_arg_checked(fused_oproj_res_m1_, 2, sizeof(cl_mem), &residual, "residual")) return false;
-    if (!_set_arg_checked(fused_oproj_res_m1_, 3, sizeof(int),    &H,        "H"))        return false;
-    if (!_set_arg_checked(fused_oproj_res_m1_, 4, sizeof(int),    &Q_DIM,    "Q_DIM"))    return false;
-    {
+    if (oproj_img_ready_ && fused_oproj_no4_img_) {
+        if (!_set_arg_checked(fused_oproj_no4_img_, 0, sizeof(cl_mem), &attn_out, "attn_out")) return false;
+        if (!_set_arg_checked(fused_oproj_no4_img_, 1, sizeof(cl_mem), &wo_img_,  "Wo_img"))   return false;
+        if (!_set_arg_checked(fused_oproj_no4_img_, 2, sizeof(cl_mem), &residual, "residual")) return false;
+        if (!_set_arg_checked(fused_oproj_no4_img_, 3, sizeof(int),    &H,        "H"))        return false;
+        const size_t WG = 64;
+        size_t gws = (size_t)(H / 4) * WG;
+        size_t lws = WG;
+        err = nnopt_prof::enqueue(queue, fused_oproj_no4_img_, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("fused_oproj_residual_m1_no4_img failed: %d", err); return false; }
+    } else {
+        if (!_set_arg_checked(fused_oproj_res_m1_, 0, sizeof(cl_mem), &attn_out, "attn_out")) return false;
+        if (!_set_arg_checked(fused_oproj_res_m1_, 1, sizeof(cl_mem), &wo_,      "w_o"))      return false;
+        if (!_set_arg_checked(fused_oproj_res_m1_, 2, sizeof(cl_mem), &residual, "residual")) return false;
+        if (!_set_arg_checked(fused_oproj_res_m1_, 3, sizeof(int),    &H,        "H"))        return false;
+        if (!_set_arg_checked(fused_oproj_res_m1_, 4, sizeof(int),    &Q_DIM,    "Q_DIM"))    return false;
         const size_t WG = 64;
         size_t gws = (size_t)H * WG;
         size_t lws = WG;

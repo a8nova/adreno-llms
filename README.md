@@ -1,4 +1,6 @@
-# adreno-llms
+# adreno-llms 📱⚡
+
+### ⚡ Lightning-fast inference on Adreno ⚡
 
 > All code in this repo was ported and optimized by **NNOpt** — a coding agent for porting and optimizing neural networks for Android embedded targets. **Contact a8nova@gmail.com for early access.**
 
@@ -20,20 +22,20 @@ Each model ships with **hand-written OpenCL kernels tuned for Adreno's WG=64 wav
 
 CLBlast 1.6.3 handles the M>1 prefill GEMMs; the custom `gemv_m1` path takes over for M=1 decode.
 
-## Models
+## 📊 Models
 
-Decode tok/s = 5-run warm median, fp16, greedy, 32-token generation on Motorola Razr 2020 (Adreno 618), measured 2026-05-06.
+Decode tok/s = 5-run warm median, fp16, greedy, 32-token generation, measured 2026-05-06.
 
-| Model | Params | Architecture | Decode tok/s | TTFT (s) | Notes |
-|---|---:|---|---:|---:|---|
-| [Mamba2-130M](src/models/mamba2-130m/) | 130M | SSD | 23.18 | 1.53 | State-space duality |
-| [Mamba-130M](src/models/mamba-130m/) | 130M | SSM | 22.15 | 1.60 | No attention |
-| [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | 135M | LLaMA + GQA | 14.57 | 1.61 | Instruct-tuned |
-| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | 350M | Hybrid conv+attn | 10.20 | 3.72 | Liquid AI hybrid |
-| [Qwen2.5-0.5B](src/models/qwen2-5-0-5b/) | 500M | LLaMA + GQA | 8.45 | 2.59 | Largest in the repo; ~80% of memory ceiling |
-| [OpenELM-270M](src/models/openelm-270m/) | 270M | LLaMA-style | 4.47 | 2.13 | Apple weights — fetch script only |
+| Model | Params | Architecture | Device | Decode tok/s | TTFT (s) | Notes |
+|---|---:|---|---|---:|---:|---|
+| [Mamba2-130M](src/models/mamba2-130m/) | 130M | SSD | Razr 2020 (Adreno 618) | 23.18 | 1.53 | State-space duality |
+| [Mamba-130M](src/models/mamba-130m/) | 130M | SSM | Razr 2020 (Adreno 618) | 22.15 | 1.60 | No attention |
+| [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | 135M | LLaMA + GQA | Razr 2020 (Adreno 618) | 23.65 | 1.53 | Instruct-tuned; 61% of ceiling |
+| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | 350M | Hybrid conv+attn | Razr 2020 (Adreno 618) | 10.20 | 3.72 | Liquid AI hybrid |
+| [Qwen2.5-0.5B](src/models/qwen2-5-0-5b/) | 500M | LLaMA + GQA | Razr 2020 (Adreno 618) | 8.45 | 2.59 | Largest in the repo; ~80% of memory ceiling |
+| [OpenELM-270M](src/models/openelm-270m/) | 270M | LLaMA-style | Razr 2020 (Adreno 618) | 4.47 | 2.13 | Apple weights — fetch script only |
 
-## Quickstart
+## 🚀 Quickstart
 
 ```bash
 git clone https://github.com/<you>/adreno-llms.git
@@ -50,14 +52,14 @@ NNOPT_DTYPE=fp16 ./scripts/run_android.sh "Once upon a time" 64
 
 Tokens stream to stdout as they decode.
 
-## Hardware target
+## 🎯 Hardware target
 
 - **Verified:** Motorola Razr 2020, Adreno 618, Snapdragon 765G, Android 11+.
 - **Should work:** any arm64-v8a Android device with Adreno 6xx-class GPU (610, 612, 618, 619, 620, 630, 640, 650, 660, 680, 690, 695). Performance characteristics vary — the kernels are tuned around 768-thread Adreno 6xx wave behavior.
 - **Probably works (untested):** Adreno 7xx flagships should run; numbers will be higher but kernels aren't tuned for them.
 - **Won't hit these numbers:** Mali, PowerVR, Apple GPUs. The OpenCL code will run but the optimizations won't transfer.
 
-## Prerequisites
+## 🔧 Prerequisites
 
 | Dependency | Version | How to get it |
 |---|---|---|
@@ -70,20 +72,7 @@ Tokens stream to stdout as they decode.
 
 Cross-compiled on macOS (canonical path). Linux host should work — `build.sh` is bash-portable, the Android NDK toolchain is host-agnostic — but is currently untested.
 
-## Tokenizer correctness
-
-Each model ships a Python reference script at `src/models/<m>/reference/_run_reference.py`. Run it to capture HuggingFace's expected output, then diff against the C++ binary's stdout.
-
-| Model | Reference parity script | Test inputs | Status |
-|---|---|---|---|
-| smollm2-135m-instruct | ✓ | ✓ | Re-runnable |
-| mamba-130m | ✓ | ✓ | Re-runnable |
-| mamba2-130m | ✓ | ✓ | Re-runnable |
-| openelm-270m | — | — | **Not currently re-runnable** (regenerate locally if needed) |
-| lfm2-5-350m | ✓ | ✓ | Re-runnable |
-| qwen2-5-0-5b | ✓ | ✓ | Re-runnable |
-
-## Repository layout
+## 📁 Repository layout
 
 ```
 adreno-llms/
@@ -103,15 +92,15 @@ adreno-llms/
     └── weights/                  # tokenizer + meta (committed); model.bin (downloaded)
 ```
 
-## How was this ported?
+## 🤖 How was this ported?
 
 By **NNOpt**, a coding agent that takes a HuggingFace repo URL and a target device and produces a port like the ones in this repo — kernel selection, weight layout, fp32/fp16 paths, deploy scripts, benchmark harness, all of it. None of this was hand-written.
 
 If you have a model you want running on Adreno, Snapdragon, Mali, or any Android device with this kind of polish, **email a8nova@gmail.com** for early access.
 
-## Contributing
+## 🤝 Contributing
 
-## License
+## 📜 License
 
 - **Code:** Apache 2.0 — see [LICENSE](LICENSE).
 - **Weights:** carry their own upstream licenses, listed per-model:
@@ -119,6 +108,6 @@ If you have a model you want running on Adreno, Snapdragon, Mali, or any Android
   - LFM2.5 — Liquid AI's open license
   - **OpenELM — Apple Sample Code License (NOT redistributed in this repo; fetch script pulls from Apple's HF repo)**
 
-## Contact
+## 📧 Contact
 
 For NNOpt early access, custom ports, or commercial licensing: **a8nova@gmail.com**.

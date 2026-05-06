@@ -103,4 +103,19 @@ private:
     cl_mem wk_ = nullptr;
     cl_mem wv_ = nullptr;
     cl_mem wo_ = nullptr;
+
+    // ── Image2d_t-backed weight views (Adreno texture cache).
+    //   Built once in initialize() under fp16. K=576 = H = HIDDEN_SIZE,
+    //   so all four weights fit a single image (Wq is [576,576], Wk/Wv are
+    //   [192,576], Wo is [576,576] — none exceed image-height limit).
+    //   nullptr if image creation failed; layer falls back to buffer kernel.
+    cl_mem wq_img_ = nullptr;
+    cl_mem wk_img_ = nullptr;
+    cl_mem wv_img_ = nullptr;
+    cl_mem wo_img_ = nullptr;
+    cl_kernel fused_qkv_no4_img_      = nullptr;  // (deprecated, kept for compile)
+    cl_kernel gemv_k576_no4_img_      = nullptr;  // generic k=576 no4 image GEMV (used 3× for Q/K/V)
+    cl_kernel fused_oproj_no4_img_    = nullptr;  // fused_oproj_residual_m1_no4_img
+    bool      qkv_img_ready_   = false;
+    bool      oproj_img_ready_ = false;
 };

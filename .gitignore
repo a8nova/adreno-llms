@@ -26,6 +26,7 @@ layer_dumps_fixed/
 layer_dumps_new/
 reference/layers/
 logs/
+kernel_cache/
 
 # Python
 __pycache__/

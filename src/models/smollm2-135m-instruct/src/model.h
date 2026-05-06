@@ -48,6 +48,13 @@ public:
     // kernels in kernels/block_fused.cl. Agent fills in the body.
     std::vector<float> forward_decode(int32_t token_id, int start_pos);
 
+    // Greedy decode fast path: skips the V=49152 fp16 logits readback
+    // (98 KB GPU→CPU per token, blocking) by running argmax on-GPU and
+    // reading back a single int. Only valid when temperature <= 0 AND
+    // repetition_penalty == 1.0. Returns -1 on failure; caller falls back
+    // to forward_decode + Sampler.
+    int32_t forward_decode_greedy(int32_t token_id, int start_pos);
+
     // Streaming callback: invoked once per newly-generated token (NOT for
     // prompt tokens). Use this to print/decode tokens live as they are
     // produced. Runs synchronously on the generate() thread between tokens —
@@ -71,6 +78,18 @@ private:
     std::unique_ptr<Embedding> embed_tokens_;
     std::unique_ptr<LayerNorm> final_norm_;
     std::unique_ptr<LmHead> lm_head_;
+
+    // GPU argmax fast path (greedy decode only). Lazy-initialized on first call.
+    cl_program argmax_prog_      = nullptr;
+    cl_kernel  argmax_partial_   = nullptr;
+    cl_kernel  argmax_final_     = nullptr;
+    cl_mem     argmax_scratch_v_ = nullptr;  // float[NUM_WG]
+    cl_mem     argmax_scratch_i_ = nullptr;  // int[NUM_WG]
+    cl_mem     argmax_out_idx_   = nullptr;  // int[1]
+    cl_mem     argmax_cur_token_ = nullptr;  // int[1]
+    bool       argmax_ready_     = false;
+    bool       argmax_tried_     = false;
+    bool ensure_argmax_program(cl_command_queue queue);
 
     std::unique_ptr<LayerNorm> input_layernorm_[MODEL_CONFIG::NUM_HIDDEN_LAYERS];
     std::unique_ptr<Attention> self_attn_[MODEL_CONFIG::NUM_HIDDEN_LAYERS];
