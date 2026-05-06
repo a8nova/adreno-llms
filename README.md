@@ -2,6 +2,10 @@
 
 ### ⚡ Lightning-fast inference on Qualcomm Adreno 6xx GPUs ⚡
 
+
+https://github.com/user-attachments/assets/8ed4d05b-150b-45f7-953c-f1260c053c42
+
+
 > All code in this repo was ported and optimized by **NNOpt** — a coding agent for porting and optimizing neural networks for Android embedded targets. **Contact a8nova@gmail.com for early access.**
 
 State-of-the-art small language models running on **Adreno 6xx GPUs** — the GPU class found in mid-range Android phones. Pure C++/OpenCL inference, cross-compiled on macOS, deployed via `adb` to `/data/local/tmp/`.
