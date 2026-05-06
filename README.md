@@ -38,7 +38,7 @@ Decode tok/s = 5-run warm median, fp16, greedy, 32-token generation, measured 20
 ## 🚀 Quickstart
 
 ```bash
-git clone https://github.com/<you>/adreno-llms.git
+git clone https://github.com/a8nova/adreno-llms.git
 cd adreno-llms
 
 # Pick any model — example: SmolLM2-135M-Instruct
@@ -65,7 +65,7 @@ Tokens stream to stdout as they decode.
 |---|---|---|
 | Android NDK | r25+ (any recent) | `sdkmanager 'ndk;26.1.10909125'` or Android Studio SDK Manager |
 | CMake | 3.18+ | `brew install cmake` |
-| OpenCL headers | 1.2 (Khronos) | Auto-fetched by build into `~/.nnopt/deps/opencl/` |
+| OpenCL headers + Android `libOpenCL.so` link stub | Khronos | Run `scripts/setup_deps.sh` once — downloads headers and pulls `libOpenCL.so` from your connected device into `~/.cache/adreno-llms/` |
 | CLBlast | 1.6.3 | Pinned via CMake `FetchContent` — built on first `build.sh` |
 | Python | 3.10+ | For tokenizer parity checks |
 | `adb` | platform-tools | `brew install --cask android-platform-tools` |
