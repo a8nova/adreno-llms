@@ -1,6 +1,6 @@
 # adreno-llms 📱⚡
 
-### ⚡ Lightning-fast inference on Adreno ⚡
+### ⚡ Lightning-fast inference on Qualcomm Adreno 6xx GPUs ⚡
 
 > All code in this repo was ported and optimized by **NNOpt** — a coding agent for porting and optimizing neural networks for Android embedded targets. **Contact a8nova@gmail.com for early access.**
 
