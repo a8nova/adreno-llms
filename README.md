@@ -1,12 +1,27 @@
 # adreno-llms 📱⚡
+> All code in this repo was ported and optimized by **NNOpt** — a coding agent for porting and optimizing neural networks for Android embedded targets. **Contact a8nova@gmail.com for early access.**
 
 ### ⚡ Lightning-fast inference on Qualcomm Adreno 6xx GPUs ⚡
 
 
-https://github.com/user-attachments/assets/8ed4d05b-150b-45f7-953c-f1260c053c42
+
+https://github.com/user-attachments/assets/e5a1d009-3196-4435-9341-b769d983cbee
 
 
-> All code in this repo was ported and optimized by **NNOpt** — a coding agent for porting and optimizing neural networks for Android embedded targets. **Contact a8nova@gmail.com for early access.**
+
+## 📊 Models
+
+Decode tok/s = 5-run warm median (OpenELM-270M is 10-run), fp16, greedy, 32-token generation, measured 2026-05-07.
+
+| Model | Params | Architecture | Device | Decode tok/s | TTFT (s) | Notes |
+|---|---:|---|---|---:|---:|---|
+| [Mamba2-130M](src/models/mamba2-130m/) | 130M | SSD | Razr 2020 (Adreno 618) | 23.18 | 1.53 | State-space duality |
+| [Mamba-130M](src/models/mamba-130m/) | 130M | SSM | Razr 2020 (Adreno 618) | 22.15 | 1.60 | No attention |
+| [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | 135M | LLaMA + GQA | Razr 2020 (Adreno 618) | 23.65 | 1.53 | Instruct-tuned; 61% of ceiling |
+| [OpenELM-270M](src/models/openelm-270m/) | 270M | LLaMA-style + tied lm_head | Razr 2020 (Adreno 618) | **14.81** (32 tok) / **15.22** (40 tok) | 1.93 | **3.31× over prior 4.47**; 78.9% of 10 GB/s ceiling at 40-token median |
+| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | 350M | Hybrid conv+attn | Razr 2020 (Adreno 620) | **11.51** | 3.73 | Liquid AI hybrid; 58% of texture ceiling, conv-block fused decode + `__constant` x in no8_img GEMV |
+| [Qwen2.5-0.5B](src/models/qwen2-5-0-5b/) | 500M | LLaMA + GQA | Razr 2020 (Adreno 618) | **10.41** | 2.59 | Largest in the repo; chained cl_mem decode + fused QKV → 70% of 14 GB/s ceiling |
+
 
 State-of-the-art small language models running on **Adreno 6xx GPUs** — the GPU class found in mid-range Android phones. Pure C++/OpenCL inference, cross-compiled on macOS, deployed via `adb` to `/data/local/tmp/`.
 
@@ -32,19 +47,6 @@ Decode-loop techniques that compound on top of the kernels:
 - **Persistent activation buffers** for every per-layer scratch: qkv, q/k norm output, attention scores, ctx, projection output, MLP gate, MLP outputs — plus the residual-stream embedding output, RMSNorm outputs, and lm_head logits at the model level. Eliminates per-decode-token `clCreateBuffer`/`clReleaseMemObject` round-trips entirely on the hot path.
 - **GPU-side argmax** (`argmax.cl`): single-WG cooperative tree-reduction over the vocab, returning a 4-byte int32 instead of a 50K–150K-element fp16 readback + host scan.
 - **Pre-built RoPE tables sized to MAX_CONTEXT_LENGTH at init** — eliminates the per-decode-step host-side trig recompute + buffer regrowth.
-
-## 📊 Models
-
-Decode tok/s = 5-run warm median (OpenELM-270M is 10-run), fp16, greedy, 32-token generation, measured 2026-05-07.
-
-| Model | Params | Architecture | Device | Decode tok/s | TTFT (s) | Notes |
-|---|---:|---|---|---:|---:|---|
-| [Mamba2-130M](src/models/mamba2-130m/) | 130M | SSD | Razr 2020 (Adreno 618) | 23.18 | 1.53 | State-space duality |
-| [Mamba-130M](src/models/mamba-130m/) | 130M | SSM | Razr 2020 (Adreno 618) | 22.15 | 1.60 | No attention |
-| [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | 135M | LLaMA + GQA | Razr 2020 (Adreno 618) | 23.65 | 1.53 | Instruct-tuned; 61% of ceiling |
-| [OpenELM-270M](src/models/openelm-270m/) | 270M | LLaMA-style + tied lm_head | Razr 2020 (Adreno 618) | **14.81** (32 tok) / **15.22** (40 tok) | 1.93 | **3.31× over prior 4.47**; 78.9% of 10 GB/s ceiling at 40-token median |
-| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | 350M | Hybrid conv+attn | Razr 2020 (Adreno 620) | **11.51** | 3.73 | Liquid AI hybrid; 58% of texture ceiling, conv-block fused decode + `__constant` x in no8_img GEMV |
-| [Qwen2.5-0.5B](src/models/qwen2-5-0-5b/) | 500M | LLaMA + GQA | Razr 2020 (Adreno 618) | **10.41** | 2.59 | Largest in the repo; chained cl_mem decode + fused QKV → 70% of 14 GB/s ceiling |
 
 ## 🚀 Quickstart
 
