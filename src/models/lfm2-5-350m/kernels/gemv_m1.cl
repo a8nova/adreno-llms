@@ -29,6 +29,17 @@
   #define STORE(p, i, v) ((p)[(i)] = (v))
 #endif
 
+// EXPERIMENT (2026-05-07, lfm2): tried sub_group_reduce_add with
+// qcom_reqd_sub_group_size("full") to replace the local-mem tree reduce.
+// With the attribute, tokens were ID-for-ID correct but the kernels
+// regressed 7× (11.2 → 1.5 tok/s) — full-wave forcing on a 50-fp32-acc
+// no8_img kernel either spilled registers or halved active lanes when
+// wave_size > 64. Without the attribute, sub_group_reduce_add with the
+// compiler's heuristic-picked subgroup size produced wrong tokens (only
+// half-wave summed, leaving GEMV outputs at ~1/2 of true value). Reverted;
+// the existing barrier-tree reduce stays — it's intra-wave on WG=64 so
+// the barriers compile to ~no-ops.
+
 #ifndef WG_SIZE
 #define WG_SIZE 64
 #endif
@@ -303,7 +314,6 @@ void gemv_m1_k1024_no4_img(
   const int tid    = (int)get_local_id(0);
   if (n_base >= N) return;
 
-  __local float partial[4][64];
   __global const half* xh = (__global const half*)x;
   float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
 
@@ -319,6 +329,7 @@ void gemv_m1_k1024_no4_img(
     acc0 += dot(xv, w0); acc1 += dot(xv, w1);
     acc2 += dot(xv, w2); acc3 += dot(xv, w3);
   }
+  __local float partial[4][64];
   partial[0][tid] = acc0; partial[1][tid] = acc1;
   partial[2][tid] = acc2; partial[3][tid] = acc3;
   barrier(CLK_LOCAL_MEM_FENCE);
@@ -351,7 +362,6 @@ void gemv_m1_k1024_no2_img(
   const int tid    = (int)get_local_id(0);
   if (n_base >= N) return;
 
-  __local float partial[2][64];
   __global const half* xh = (__global const half*)x;
   float acc0 = 0.0f, acc1 = 0.0f;
 
@@ -364,6 +374,7 @@ void gemv_m1_k1024_no2_img(
     float4 w1 = convert_float4(read_imageh(W_img, kImgSampler, (int2)(pix, n_base + 1)));
     acc0 += dot(xv, w0); acc1 += dot(xv, w1);
   }
+  __local float partial[2][64];
   partial[0][tid] = acc0; partial[1][tid] = acc1;
   barrier(CLK_LOCAL_MEM_FENCE);
   for (int s = 32; s > 0; s >>= 1) {
@@ -376,6 +387,84 @@ void gemv_m1_k1024_no2_img(
     __global half* oh = (__global half*)out;
     vstore_half(partial[0][0], 0, oh + n_base + 0);
     vstore_half(partial[1][0], 0, oh + n_base + 1);
+  }
+}
+
+// K=1024, image-backed W, 8 outputs per WG. WG=64.
+// Doubles the per-thread arithmetic density vs no4 (32 dot products vs 16),
+// which gives the texture engine more in-flight reads to hide latency.
+// Required because K=1024 no4_img stalls at ~60% of texture ceiling (vs
+// K=4608 no4_img at 85%) — the difference is exactly per-thread work count.
+//
+// Per thread: 4 K-iterations × (1 x vec4 + 8 W vec4) = 36 vec4 reads = 288 B.
+// Register: 8 fp32 acc + 9 fp16x4 in flight = ~50 fp32-equivalent regs. Fits
+// the wave's register file in the image path (the texture engine has its
+// own pipeline that doesn't compete for VGPRs the way buffer reads do).
+// EXPERIMENT (lever #4 from Adreno OpenCL guide §6.4 / §7.1.3): promote
+// the activation x to on-chip __constant memory. x is 1024 fp16 = 2048 B,
+// well under the per-kernel constant cache budget. Each K-iteration reads
+// the same x[off..off+3] vec4 across all 64 lanes — exactly the
+// "uniform broadcast" pattern the constant cache is designed for ("can
+// broadcast into ALUs in no time"). Without max_constant_size the compiler
+// falls back to off-chip system memory.
+__kernel
+__attribute__((reqd_work_group_size(64, 1, 1)))
+void gemv_m1_k1024_no8_img(
+    __constant storage_t* x __attribute__((max_constant_size(2048))),
+    __read_only image2d_t W_img,
+    __global storage_t* out,
+    const int N) {
+  const int n_base = (int)get_group_id(0) * 8;
+  const int tid    = (int)get_local_id(0);
+  if (n_base >= N) return;
+
+  __constant const half* xh = (__constant const half*)x;
+  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+  float acc4 = 0.0f, acc5 = 0.0f, acc6 = 0.0f, acc7 = 0.0f;
+
+  #pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    const int x_off = j * (64 * 4) + tid * 4;
+    const int pix   = j * 64 + tid;
+    float4 xv = vload_half4(0, xh + x_off);
+    float4 w0 = convert_float4(read_imageh(W_img, kImgSampler, (int2)(pix, n_base + 0)));
+    float4 w1 = convert_float4(read_imageh(W_img, kImgSampler, (int2)(pix, n_base + 1)));
+    float4 w2 = convert_float4(read_imageh(W_img, kImgSampler, (int2)(pix, n_base + 2)));
+    float4 w3 = convert_float4(read_imageh(W_img, kImgSampler, (int2)(pix, n_base + 3)));
+    float4 w4 = convert_float4(read_imageh(W_img, kImgSampler, (int2)(pix, n_base + 4)));
+    float4 w5 = convert_float4(read_imageh(W_img, kImgSampler, (int2)(pix, n_base + 5)));
+    float4 w6 = convert_float4(read_imageh(W_img, kImgSampler, (int2)(pix, n_base + 6)));
+    float4 w7 = convert_float4(read_imageh(W_img, kImgSampler, (int2)(pix, n_base + 7)));
+    acc0 += dot(xv, w0); acc1 += dot(xv, w1);
+    acc2 += dot(xv, w2); acc3 += dot(xv, w3);
+    acc4 += dot(xv, w4); acc5 += dot(xv, w5);
+    acc6 += dot(xv, w6); acc7 += dot(xv, w7);
+  }
+  __local float partial[8][64];
+  partial[0][tid] = acc0; partial[1][tid] = acc1;
+  partial[2][tid] = acc2; partial[3][tid] = acc3;
+  partial[4][tid] = acc4; partial[5][tid] = acc5;
+  partial[6][tid] = acc6; partial[7][tid] = acc7;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int s = 32; s > 0; s >>= 1) {
+    if (tid < s) {
+      partial[0][tid] += partial[0][tid + s]; partial[1][tid] += partial[1][tid + s];
+      partial[2][tid] += partial[2][tid + s]; partial[3][tid] += partial[3][tid + s];
+      partial[4][tid] += partial[4][tid + s]; partial[5][tid] += partial[5][tid + s];
+      partial[6][tid] += partial[6][tid + s]; partial[7][tid] += partial[7][tid + s];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (tid == 0) {
+    __global half* oh = (__global half*)out;
+    vstore_half(partial[0][0], 0, oh + n_base + 0);
+    vstore_half(partial[1][0], 0, oh + n_base + 1);
+    vstore_half(partial[2][0], 0, oh + n_base + 2);
+    vstore_half(partial[3][0], 0, oh + n_base + 3);
+    vstore_half(partial[4][0], 0, oh + n_base + 4);
+    vstore_half(partial[5][0], 0, oh + n_base + 5);
+    vstore_half(partial[6][0], 0, oh + n_base + 6);
+    vstore_half(partial[7][0], 0, oh + n_base + 7);
   }
 }
 
@@ -392,7 +481,6 @@ void gemv_m1_k4608_no4_img(
   const int tid    = (int)get_local_id(0);
   if (n_base >= N) return;
 
-  __local float partial[4][64];
   __global const half* xh = (__global const half*)x;
   float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
 
@@ -408,6 +496,7 @@ void gemv_m1_k4608_no4_img(
     acc0 += dot(xv, w0); acc1 += dot(xv, w1);
     acc2 += dot(xv, w2); acc3 += dot(xv, w3);
   }
+  __local float partial[4][64];
   partial[0][tid] = acc0; partial[1][tid] = acc1;
   partial[2][tid] = acc2; partial[3][tid] = acc3;
   barrier(CLK_LOCAL_MEM_FENCE);
@@ -493,3 +582,10 @@ void gemv_stream_img(
 }
 
 #endif  // USE_FP16
+
+// Tiny kernel for the recordable-queues probe (cl_qcom_recordable_queues).
+// Does almost nothing per dispatch so per-launch CPU overhead dominates,
+// exposing any bookkeeping savings the recording API provides.
+__kernel void probe_noop(__global int* counter, const int incr) {
+  if (get_global_id(0) == 0) atomic_add(counter, incr);
+}

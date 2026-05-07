@@ -3,6 +3,7 @@
 #include "layers/mlp.h"
 
 #include "debug_utils.h"
+#include "kernel_profiler.h"
 #include "layers/layer_norm.h"
 #include "model_config.h"
 #include "utils.h"
@@ -137,7 +138,8 @@ cl_mem Mlp::forward(cl_command_queue queue, cl_mem input, int seq_len) {
   }
   {
     const size_t gws = (size_t)seq_len * (size_t)I;
-    err = clEnqueueNDRangeKernel(queue, kernel_swiglu_, 1, nullptr, &gws, nullptr, 0, nullptr, nullptr);
+    cl_event* evt = KernelProfiler::event_for("swiglu");
+    err = clEnqueueNDRangeKernel(queue, kernel_swiglu_, 1, nullptr, &gws, nullptr, 0, nullptr, evt);
     if (err != CL_SUCCESS) {
       NNOPT_ERROR_FMT("Mlp[%d]: swiglu_forward launch failed (%d)", layer_idx_, (int)err);
       return nullptr;
@@ -149,7 +151,18 @@ cl_mem Mlp::forward(cl_command_queue queue, cl_mem input, int seq_len) {
     NNOPT_LAYER_CHECK("block0_sub_ffn_proj_2_in", queue, buf_gate_, (size_t)seq_len * (size_t)I);
   }
 
-  // proj_2: [M,I] x [H,I]^T -> [M,H]
+  // proj_2: [M,I] x [H,I]^T -> [M,H]. When pending_residual_inout_ is set
+  // (Step 5), try the fused-radd path: residual += proj_2(gate). Falls back
+  // to un-fused write if shape ineligible.
+  if (pending_residual_inout_ != nullptr) {
+    if (pytorch_linear_radd(queue, seq_len, H, I, buf_gate_, proj2_w_, pending_residual_inout_)) {
+      if (layer_idx_ == 0) {
+        NNOPT_LAYER_CHECK("block0_sub_ffn_proj_2_out", queue, pending_residual_inout_, (size_t)seq_len * (size_t)H);
+      }
+      return pending_residual_inout_;
+    }
+    // Fallthrough — radd ineligible.
+  }
   if (!pytorch_linear(queue, seq_len, H, I, buf_gate_, proj2_w_, buf_proj2_out_)) {
     NNOPT_ERROR_FMT("Mlp[%d]: pytorch_linear proj_2 failed", layer_idx_);
     return nullptr;
@@ -161,4 +174,14 @@ cl_mem Mlp::forward(cl_command_queue queue, cl_mem input, int seq_len) {
 
   // BORROWED handle — caller must NOT release. Owned by *this until next call.
   return buf_proj2_out_;
+}
+
+cl_mem Mlp::forward_with_residual(cl_command_queue queue,
+                                  cl_mem input,
+                                  int seq_len,
+                                  cl_mem residual_inout) {
+  pending_residual_inout_ = residual_inout;
+  cl_mem result = forward(queue, input, seq_len);
+  pending_residual_inout_ = nullptr;
+  return result;
 }

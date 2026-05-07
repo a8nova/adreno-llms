@@ -36,6 +36,19 @@ public:
     // Caller must have called set_decode_token first.
     bool forward_into_decode(cl_command_queue queue, cl_mem dest, int start_pos);
 
+    // Chained-decode entry: copies a single int32 token id from the GPU
+    // buffer `token_ids_dev` (at byte offset dev_offset_bytes) into the
+    // persistent ids_buf_decode_ on the queue, then dispatches the
+    // embedding kernel — same as forward_into_decode but with the token
+    // sourced from device memory (typically argmax_out_buf_ from the
+    // previous decode step) instead of host. Eliminates the round-trip
+    // host write that set_decode_token would otherwise perform.
+    bool forward_into_decode_from_device_token(cl_command_queue queue,
+                                               cl_mem token_ids_dev,
+                                               size_t dev_offset_bytes,
+                                               cl_mem dest,
+                                               int start_pos);
+
     // Accessor for the embedding kernel handle (for recording arg overrides).
     cl_kernel kernel() const { return kernel_; }
 

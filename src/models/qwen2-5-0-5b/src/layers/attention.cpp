@@ -43,6 +43,13 @@ Attention::~Attention() {
     if (buf_scores_)  clReleaseMemObject(buf_scores_);
     if (buf_attn_o_)  clReleaseMemObject(buf_attn_o_);
     if (buf_proj_)    clReleaseMemObject(buf_proj_);
+    // Step 18 fused-QKV resources.
+    if (sub_q_qkv_)   clReleaseMemObject(sub_q_qkv_);
+    if (sub_k_qkv_)   clReleaseMemObject(sub_k_qkv_);
+    if (sub_v_qkv_)   clReleaseMemObject(sub_v_qkv_);
+    if (buf_qkv_)     clReleaseMemObject(buf_qkv_);
+    if (wqkv_)        clReleaseMemObject(wqkv_);
+    if (bqkv_)        clReleaseMemObject(bqkv_);
 }
 
 bool Attention::ensure_activation_buffers_(int seq_q, int seq_k) {
@@ -275,6 +282,50 @@ bool Attention::set_weights() {
         NNOPT_ERROR_FMT("Attention[%d]: missing q/k/v/o weights or q/k/v bias buffers", layer_idx_);
         return false;
     }
+
+    // Step 18: build the stacked QKV weight + bias for the fused decode path.
+    // Layout: rows [0..Q_DIM) = q_proj, [Q_DIM..Q_DIM+KV_DIM) = k_proj,
+    // [Q_DIM+KV_DIM..Q_DIM+2*KV_DIM) = v_proj. Same fp16 storage as the
+    // individual buffers — three clEnqueueCopyBuffer's at init.
+    {
+        const int H      = MODEL_CONFIG::HIDDEN_SIZE;
+        const int Q_DIM  = MODEL_CONFIG::NUM_ATTENTION_HEADS * MODEL_CONFIG::HEAD_DIM;
+        const int KV_DIM = MODEL_CONFIG::NUM_KEY_VALUE_HEADS * MODEL_CONFIG::HEAD_DIM;
+        const size_t kElem  = sizeof(nnopt_storage_t);
+        const size_t kQwBytes = (size_t)Q_DIM  * (size_t)H * kElem;
+        const size_t kKwBytes = (size_t)KV_DIM * (size_t)H * kElem;
+        const size_t kVwBytes = kKwBytes;
+        const size_t kQbBytes = (size_t)Q_DIM  * kElem;
+        const size_t kKbBytes = (size_t)KV_DIM * kElem;
+        const size_t kVbBytes = kKbBytes;
+
+        cl_int werr = CL_SUCCESS;
+        wqkv_ = clCreateBuffer(cl_ctx_.context(), CL_MEM_READ_ONLY,
+                               kQwBytes + kKwBytes + kVwBytes, nullptr, &werr);
+        bqkv_ = clCreateBuffer(cl_ctx_.context(), CL_MEM_READ_ONLY,
+                               kQbBytes + kKbBytes + kVbBytes, nullptr, &werr);
+        if (!wqkv_ || !bqkv_) {
+            NNOPT_ERROR_FMT("Attention[%d]: alloc wqkv_/bqkv_ failed", layer_idx_);
+            qkv_fused_ok_ = false;
+        } else {
+            cl_command_queue q = cl_ctx_.queue();
+            cl_int e1 = clEnqueueCopyBuffer(q, wq_, wqkv_, 0, 0, kQwBytes, 0, nullptr, nullptr);
+            cl_int e2 = clEnqueueCopyBuffer(q, wk_, wqkv_, 0, kQwBytes, kKwBytes, 0, nullptr, nullptr);
+            cl_int e3 = clEnqueueCopyBuffer(q, wv_, wqkv_, 0, kQwBytes + kKwBytes, kVwBytes, 0, nullptr, nullptr);
+            cl_int e4 = clEnqueueCopyBuffer(q, bq_, bqkv_, 0, 0, kQbBytes, 0, nullptr, nullptr);
+            cl_int e5 = clEnqueueCopyBuffer(q, bk_, bqkv_, 0, kQbBytes, kKbBytes, 0, nullptr, nullptr);
+            cl_int e6 = clEnqueueCopyBuffer(q, bv_, bqkv_, 0, kQbBytes + kKbBytes, kVbBytes, 0, nullptr, nullptr);
+            if (e1 == CL_SUCCESS && e2 == CL_SUCCESS && e3 == CL_SUCCESS &&
+                e4 == CL_SUCCESS && e5 == CL_SUCCESS && e6 == CL_SUCCESS) {
+                qkv_fused_ok_ = true;
+            } else {
+                NNOPT_ERROR_FMT("Attention[%d]: stacked QKV copy failed (%d %d %d %d %d %d)",
+                                layer_idx_, e1, e2, e3, e4, e5, e6);
+                qkv_fused_ok_ = false;
+            }
+        }
+    }
+
     return true;
 }
 
@@ -324,6 +375,70 @@ cl_mem Attention::forward(cl_command_queue queue,
         return nullptr;
     };
 
+    // Step 18: fused QKV decode path. Allocate buf_qkv_ + sub-buffers lazily
+    // on first decode forward, then dispatch a single GEMV (N=1152) plus a
+    // single bias_add (cols=1152). Falls through to unfused below if any
+    // step fails (kept buf_q_/k_/v_ writes intact in the unfused branch).
+    bool qkv_done = false;
+    if (qkv_fused_ok_ && wqkv_ && bqkv_ && seq_q == 1) {
+        const int N_FUSED = Q_DIM + 2 * KV_DIM;  // 1152 for Qwen2.5-0.5B
+        if (!buf_qkv_) {
+            cl_int eb = CL_SUCCESS;
+            buf_qkv_ = clCreateBuffer(ctx, CL_MEM_READ_WRITE,
+                                       (size_t)N_FUSED * sizeof(nnopt_storage_t),
+                                       nullptr, &eb);
+            if (eb != CL_SUCCESS || !buf_qkv_) {
+                NNOPT_ERROR_FMT("Attention[%d]: alloc buf_qkv_ failed: %d", layer_idx_, eb);
+                qkv_fused_ok_ = false;
+            } else {
+                cl_buffer_region rq{0, (size_t)Q_DIM  * sizeof(nnopt_storage_t)};
+                cl_buffer_region rk{(size_t)Q_DIM         * sizeof(nnopt_storage_t),
+                                    (size_t)KV_DIM * sizeof(nnopt_storage_t)};
+                cl_buffer_region rv{(size_t)(Q_DIM + KV_DIM) * sizeof(nnopt_storage_t),
+                                    (size_t)KV_DIM * sizeof(nnopt_storage_t)};
+                cl_int es = CL_SUCCESS;
+                sub_q_qkv_ = clCreateSubBuffer(buf_qkv_, CL_MEM_READ_WRITE,
+                                               CL_BUFFER_CREATE_TYPE_REGION, &rq, &es);
+                if (es == CL_SUCCESS) sub_k_qkv_ = clCreateSubBuffer(buf_qkv_, CL_MEM_READ_WRITE,
+                                                   CL_BUFFER_CREATE_TYPE_REGION, &rk, &es);
+                if (es == CL_SUCCESS) sub_v_qkv_ = clCreateSubBuffer(buf_qkv_, CL_MEM_READ_WRITE,
+                                                   CL_BUFFER_CREATE_TYPE_REGION, &rv, &es);
+                if (es != CL_SUCCESS) {
+                    NNOPT_ERROR_FMT("Attention[%d]: sub-buffer creation failed: %d", layer_idx_, es);
+                    qkv_fused_ok_ = false;
+                }
+            }
+        }
+        if (qkv_fused_ok_ && sub_q_qkv_ && sub_k_qkv_ && sub_v_qkv_) {
+            // Single GEMV: out[N=1152] = hidden_states @ wqkv_[1152, H]^T
+            if (!pytorch_linear(queue, seq_q, N_FUSED, H, hidden_states, wqkv_, buf_qkv_)) {
+                NNOPT_ERROR_FMT("Attention[%d]: fused QKV pytorch_linear failed", layer_idx_);
+                qkv_fused_ok_ = false;
+            } else {
+                // Single bias_add over the full [1152].
+                int rows = seq_q;
+                int cols = N_FUSED;
+                if (!_set_arg_checked(bias_kernel_, 0, sizeof(cl_mem), &buf_qkv_, "out")) return fail_qkv();
+                if (!_set_arg_checked(bias_kernel_, 1, sizeof(cl_mem), &bqkv_,    "bias")) return fail_qkv();
+                if (!_set_arg_checked(bias_kernel_, 2, sizeof(int),    &rows,     "rows")) return fail_qkv();
+                if (!_set_arg_checked(bias_kernel_, 3, sizeof(int),    &cols,     "cols")) return fail_qkv();
+                size_t gws = ((size_t)rows * (size_t)cols) >> 2;
+                cl_int eb = nnopt_prof::enqueue(queue, bias_kernel_, 1, nullptr, &gws, nullptr, 0, nullptr, nullptr);
+                if (eb != CL_SUCCESS) {
+                    NNOPT_ERROR_FMT("Attention[%d]: fused QKV bias_add failed: %d", layer_idx_, eb);
+                    return fail_qkv();
+                }
+                // q/k/v point at sub-buffers of buf_qkv_; downstream RoPE,
+                // KV-write, scores, attn_out treat them as before.
+                q = sub_q_qkv_;
+                k = sub_k_qkv_;
+                v = sub_v_qkv_;
+                qkv_done = true;
+            }
+        }
+    }
+    if (!qkv_done) { /* fall through to unfused 3-call path below */ }
+
     // ── Q/K/V projections.
     //   This template assumes nn.Linear separate projections (Llama, Mistral, etc.).
     //   If (model metadata) says
@@ -333,9 +448,11 @@ cl_mem Attention::forward(cl_command_queue queue,
     //   and adapt the architecture: GPT-2 / GPT-Neo / OPT use a SINGLE fused
     //   c_attn projection [H -> 3H] then split (NOT three separate calls).
     //   Build will REFUSE pytorch_linear() on a Conv1D-stored weight.
-    if (!pytorch_linear(queue, seq_q, Q_DIM,  H, hidden_states, wq_, q)) return fail_qkv();
-    if (!pytorch_linear(queue, seq_q, KV_DIM, H, hidden_states, wk_, k)) return fail_qkv();
-    if (!pytorch_linear(queue, seq_q, KV_DIM, H, hidden_states, wv_, v)) return fail_qkv();
+    if (!qkv_done) {
+        if (!pytorch_linear(queue, seq_q, Q_DIM,  H, hidden_states, wq_, q)) return fail_qkv();
+        if (!pytorch_linear(queue, seq_q, KV_DIM, H, hidden_states, wk_, k)) return fail_qkv();
+        if (!pytorch_linear(queue, seq_q, KV_DIM, H, hidden_states, wv_, v)) return fail_qkv();
+    }
 
     // Bias add (Qwen2Attention has bias on q/k/v).
     auto bias_add = [&](cl_mem out, cl_mem bias, int rows, int cols) -> bool {
@@ -355,9 +472,11 @@ cl_mem Attention::forward(cl_command_queue queue,
         return true;
     };
 
-    if (!bias_add(q, bq_, seq_q, Q_DIM)) return fail_qkv();
-    if (!bias_add(k, bk_, seq_q, KV_DIM)) return fail_qkv();
-    if (!bias_add(v, bv_, seq_q, KV_DIM)) return fail_qkv();
+    if (!qkv_done) {
+        if (!bias_add(q, bq_, seq_q, Q_DIM)) return fail_qkv();
+        if (!bias_add(k, bk_, seq_q, KV_DIM)) return fail_qkv();
+        if (!bias_add(v, bv_, seq_q, KV_DIM)) return fail_qkv();
+    }
 
     // PREFILL-DUMP: pre-RoPE Q/K and V are useful for SxS bisection.
     // Names match HF Llama's local-var names (query_states / key_states /

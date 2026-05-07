@@ -182,3 +182,62 @@ __kernel void conv_mul_C(
   if (gid >= total) return;
   STORE(y, gid, LOAD(C, gid) * LOAD(conv, gid));
 }
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// conv_block_decode — fused per-channel kernel for seq_len==1 (decode).
+//
+// Replaces this 7-launch sequence (per layer × 10 conv layers × 32 tokens
+// = 2240 dispatches in a 32-token decode):
+//   conv_copy_transpose / conv_split_chunk3 / conv_pointwise_mul (Bx) /
+//   conv1d_causal_with_cache / conv_copy_transpose_back_state /
+//   conv_update_state / conv_mul_C / conv_copy_transpose_back
+// with ONE kernel: 1 work-item per channel does B/C/X read, Bx, conv1d
+// against `state` and conv_w, multiply by C, write y_out, then shift+append
+// the state for the next step.
+//
+// For seq_len=1 the four transpose steps in the unfused path are no-ops
+// (single-token tensors don't reshape), so collapsing everything into a
+// per-channel kernel produces bit-identical math while killing 80
+// kernel launches and 6 intermediate buffers' worth of L2 traffic per
+// decoded token.
+//
+// Launch: gws=H, lws=64.
+__kernel void conv_block_decode(
+    __global const storage_t* in_proj,    // [3H]: B(H) | C(H) | X(H)
+    __global const storage_t* conv_w,     // [H, L]
+    __global storage_t* state,            // [H, L-1]; read prev, write updated
+    __global storage_t* y_out,            // [H]
+    const int H,
+    const int L) {
+  const int c = (int)get_global_id(0);
+  if (c >= H) return;
+
+  const float B  = LOAD(in_proj, c);
+  const float C  = LOAD(in_proj, H + c);
+  const float X  = LOAD(in_proj, 2 * H + c);
+  const float Bx = B * X;
+
+  const int state_len = L - 1;
+  const int wbase = c * L;
+  const int sbase = c * state_len;
+
+  // Read state into a small local array — used both for the conv1d MAC
+  // below AND for the in-place state shift after. Capped at 8 (covers
+  // any practical kernel size).
+  float state_buf[8];
+  float acc = 0.0f;
+  for (int j = 0; j < state_len; ++j) {
+    state_buf[j] = LOAD(state, sbase + j);
+    acc += state_buf[j] * LOAD(conv_w, wbase + j);
+  }
+  acc += Bx * LOAD(conv_w, wbase + state_len);  // wbase + (L-1)
+
+  STORE(y_out, c, C * acc);
+
+  // Shift state left by 1, append Bx at the new tail.
+  for (int j = 0; j + 1 < state_len; ++j) {
+    STORE(state, sbase + j, state_buf[j + 1]);
+  }
+  STORE(state, sbase + state_len - 1, Bx);
+}

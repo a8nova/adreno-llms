@@ -358,6 +358,86 @@ int32_t Model::forward_greedy(const std::vector<int32_t>& input_ids, int start_p
   return result;
 }
 
+// Step 10: chained-decode forward. Mirrors forward_greedy at seq_len=1, but
+// (a) reads the input token from argmax_out_idx_ via embedding_->forward_from_device_token,
+// (b) skips the per-call sub-buffer (offset=0 at seq_len=1, so logits_buf_
+//     itself is the row), and (c) does NOT block on a host readback.
+// Caller pipelines an async readback of argmax_out_buffer().
+bool Model::forward_greedy_chained_enqueue(int start_pos) {
+  if (!ensure_argmax_resources_()) return false;
+
+  const int seq_len = 1;
+  cl_command_queue queue = cl_ctx_.queue();
+
+  cl_mem hidden = embedding_->forward_from_device_token(queue, argmax_out_idx_, /*offset=*/0);
+  if (!hidden) { NNOPT_ERROR("chained: embedding forward failed"); return false; }
+
+  for (int i = 0; i < MODEL_CONFIG::NUM_LAYERS; ++i) {
+    cl_mem op_norm = operator_norm_[i]->forward(queue, hidden, seq_len);
+    cl_mem op_out = nullptr;
+    if (layer_has_attention(i)) {
+      op_out = attn_[i]->forward(queue, op_norm, seq_len, start_pos);
+    } else if (layer_has_convolution(i)) {
+      op_out = conv_[i]->forward(queue, op_norm, seq_len, start_pos);
+    } else {
+      NNOPT_ERROR_FMT("chained: layer %d has no op", i);
+      return false;
+    }
+    if (!op_out) { NNOPT_ERROR_FMT("chained: op forward null at layer %d", i); return false; }
+
+    element_add_inplace(queue, utils_program_, hidden, op_out, (size_t)seq_len * MODEL_CONFIG::HIDDEN_SIZE);
+
+    cl_mem ffn_norm = ffn_norm_[i]->forward(queue, hidden, seq_len);
+    cl_mem mlp_out = mlp_[i]->forward(queue, ffn_norm, seq_len);
+    if (!mlp_out) { NNOPT_ERROR_FMT("chained: mlp null at layer %d", i); return false; }
+
+    element_add_inplace(queue, utils_program_, hidden, mlp_out, (size_t)seq_len * MODEL_CONFIG::HIDDEN_SIZE);
+  }
+
+  hidden = embedding_norm_->forward(queue, hidden, seq_len);
+  if (!hidden) { NNOPT_ERROR("chained: embedding_norm failed"); return false; }
+
+  cl_mem W = weights_.get_buffer("model.embed_tokens.weight");
+  if (!W) return false;
+  cl_mem logits_buf = ensure_logits_buf(cl_ctx_.context(), buf_logits_, buf_logits_seq_capacity_, seq_len);
+  if (!logits_buf) return false;
+
+  if (!pytorch_linear(queue, seq_len, MODEL_CONFIG::VOCAB_SIZE, MODEL_CONFIG::HIDDEN_SIZE,
+                      hidden, W, logits_buf)) {
+    return false;
+  }
+
+  // At seq_len=1, the (only) row begins at offset 0, so logits_buf is itself
+  // the "last row" — no sub-buffer needed.
+  const int V = MODEL_CONFIG::VOCAB_SIZE;
+  const int CHUNK = 1024;
+  const int num_wg = (V + CHUNK - 1) / CHUNK;
+
+  cl_int err = clSetKernelArg(argmax_block_kernel_, 0, sizeof(cl_mem), &logits_buf);
+  err |= clSetKernelArg(argmax_block_kernel_, 1, sizeof(cl_mem), &argmax_partials_val_);
+  err |= clSetKernelArg(argmax_block_kernel_, 2, sizeof(cl_mem), &argmax_partials_idx_);
+  err |= clSetKernelArg(argmax_block_kernel_, 3, sizeof(int),    &V);
+  if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("chained: argmax_block setArgs: %d", err); return false; }
+  size_t gws_b = (size_t)num_wg * 64;
+  size_t lws_b = 64;
+  err = clEnqueueNDRangeKernel(queue, argmax_block_kernel_, 1, nullptr, &gws_b, &lws_b, 0, nullptr,
+                               KernelProfiler::event_for("argmax_block_chained"));
+  if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("chained: argmax_block dispatch: %d", err); return false; }
+
+  err = clSetKernelArg(argmax_final_kernel_, 0, sizeof(cl_mem), &argmax_partials_val_);
+  err |= clSetKernelArg(argmax_final_kernel_, 1, sizeof(cl_mem), &argmax_partials_idx_);
+  err |= clSetKernelArg(argmax_final_kernel_, 2, sizeof(cl_mem), &argmax_out_idx_);
+  err |= clSetKernelArg(argmax_final_kernel_, 3, sizeof(int),    &num_wg);
+  if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("chained: argmax_final setArgs: %d", err); return false; }
+  size_t gws_f = 64;
+  size_t lws_f = 64;
+  err = clEnqueueNDRangeKernel(queue, argmax_final_kernel_, 1, nullptr, &gws_f, &lws_f, 0, nullptr,
+                               KernelProfiler::event_for("argmax_final_chained"));
+  if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("chained: argmax_final dispatch: %d", err); return false; }
+
+  return true;
+}
+
 std::vector<int32_t> Model::generate(const std::vector<int32_t>& prompt_ids, int max_new_tokens, SamplerConfig sampler_config, TokenCallback on_token) {
   NNOPT_CHECKPOINT("generate() started");
   Sampler sampler(sampler_config);
@@ -393,6 +473,73 @@ std::vector<int32_t> Model::generate(const std::vector<int32_t>& prompt_ids, int
     return ids;
   }
 
+  // Step 10 fast path: pipelined chained decode. Embedding reads its single
+  // input token directly from argmax_out_idx_ (written by the previous
+  // forward); the host readback runs asynchronously and we wait on it one
+  // iteration LATER, so the readback latency is hidden behind the next
+  // forward's enqueue. After prefill, argmax_out_idx_ already holds the
+  // first generated token, so iteration i=1 generates the second token.
+  if (greedy_fast && max_new_tokens > 1) {
+    cl_command_queue queue = cl_ctx_.queue();
+    int32_t host_int[2] = {0, 0};
+    cl_event readback_event[2] = {nullptr, nullptr};
+    bool slot_pending[2] = {false, false};
+    int prev_slot = -1;
+    bool eos_seen = false;
+
+    for (int i = 1; i < max_new_tokens && !eos_seen; i++) {
+      const int pos = (int)prompt_ids.size() + (i - 1);
+      const int cur_slot = i & 1;
+
+      if (!forward_greedy_chained_enqueue(pos)) {
+        NNOPT_ERROR("chained decode forward failed");
+        break;
+      }
+
+      cl_int rerr = clEnqueueReadBuffer(queue, argmax_out_idx_, CL_FALSE, 0,
+                                        sizeof(int32_t), &host_int[cur_slot],
+                                        0, nullptr, &readback_event[cur_slot]);
+      if (rerr != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("chained async readback enqueue failed (%d)", (int)rerr);
+        break;
+      }
+      slot_pending[cur_slot] = true;
+      clFlush(queue);
+
+      if (prev_slot >= 0 && slot_pending[prev_slot]) {
+        clWaitForEvents(1, &readback_event[prev_slot]);
+        clReleaseEvent(readback_event[prev_slot]);
+        readback_event[prev_slot] = nullptr;
+        slot_pending[prev_slot] = false;
+        int32_t t = host_int[prev_slot];
+        ids.push_back(t);
+        generated.push_back(t);
+        if (on_token) on_token(t, ids);
+        if (sampler_config.eos_token_id >= 0 && t == sampler_config.eos_token_id) {
+          eos_seen = true;
+        }
+      }
+      prev_slot = cur_slot;
+    }
+
+    if (prev_slot >= 0 && slot_pending[prev_slot]) {
+      clWaitForEvents(1, &readback_event[prev_slot]);
+      clReleaseEvent(readback_event[prev_slot]);
+      readback_event[prev_slot] = nullptr;
+      slot_pending[prev_slot] = false;
+      if (!eos_seen) {
+        int32_t t = host_int[prev_slot];
+        ids.push_back(t);
+        generated.push_back(t);
+        if (on_token) on_token(t, ids);
+      }
+    }
+
+    NNOPT_CHECKPOINT("generate() complete (chained)");
+    return ids;
+  }
+
+  // Non-greedy or 1-token decode: original blocking loop.
   for (int i = 1; i < max_new_tokens; i++) {
     const int pos = (int)prompt_ids.size() + (i - 1);
     if (greedy_fast) {

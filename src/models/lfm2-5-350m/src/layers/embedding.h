@@ -17,6 +17,13 @@ public:
   // Returns [seq_len, hidden]
   cl_mem forward(cl_command_queue queue, const int* input_ids, int seq_len);
 
+  // Step 10: chained-decode variant. Reads a single int32 token id from a
+  // GPU-side buffer at byte offset `dev_offset_bytes` (typically the
+  // previous iteration's argmax output) instead of taking host ids. Always
+  // seq_len=1 at decode. Returns [1, hidden] BORROWED.
+  cl_mem forward_from_device_token(cl_command_queue queue, cl_mem token_ids_dev,
+                                   size_t dev_offset_bytes);
+
 private:
   OpenCLContext& cl_ctx_;
   Weights& weights_;

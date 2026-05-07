@@ -18,7 +18,10 @@ class LayerNorm {
   bool initialize();
 
   // input: [seq_len, hidden] storage_t
-  // returns: NEW [seq_len, hidden] cl_mem (caller releases). nullptr on failure.
+  // returns: BORROWED [seq_len, hidden] cl_mem owned by *this. Valid until
+  // the next call. Caller MUST NOT release. Step Z: replaces the per-call
+  // alloc that was here before — saves ~30 µs of driver round-trip per
+  // norm dispatch (33 norms/token at decode = ~1 ms/token).
   cl_mem forward(cl_command_queue queue, cl_mem input, int seq_len);
 
  private:
@@ -27,6 +30,10 @@ class LayerNorm {
   int layer_idx_;
   std::string weight_key_;
   cl_mem weight_ = nullptr;
+
+  // Persistent output buffer. Grown on demand by forward(); released in dtor.
+  cl_mem out_buf_ = nullptr;
+  size_t out_buf_cap_bytes_ = 0;
 };
 
 // Free helper used by Attention (optional q_norm/k_norm) and Mlp (ffn_norm).
@@ -39,3 +46,17 @@ cl_mem rmsnorm_forward(OpenCLContext& cl_ctx,
                        int rows,
                        int cols,
                        float eps);
+
+// Variant that writes into a caller-provided output buffer. No allocation,
+// no return-buffer ownership transfer. Used at attn.q_norm and attn.k_norm
+// where the output is immediately copied into a persistent buf_qn_/buf_kn_;
+// here we eliminate both the alloc and the copy by writing straight into
+// the destination.
+bool rmsnorm_forward_into(OpenCLContext& cl_ctx,
+                          cl_command_queue queue,
+                          cl_mem input,
+                          cl_mem weight,
+                          cl_mem output,
+                          int rows,
+                          int cols,
+                          float eps);

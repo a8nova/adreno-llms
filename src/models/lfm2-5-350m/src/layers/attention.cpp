@@ -37,6 +37,7 @@ Attention::~Attention() {
     if (scores_kernel_) clReleaseKernel(scores_kernel_);
     if (softmax_kernel_) clReleaseKernel(softmax_kernel_);
     if (out_kernel_) clReleaseKernel(out_kernel_);
+    if (kv_write_kernel_) clReleaseKernel(kv_write_kernel_);
     if (attn_program_) clReleaseProgram(attn_program_);
     if (rmsnorm_kernel_) clReleaseKernel(rmsnorm_kernel_);
     if (rmsnorm_program_) clReleaseProgram(rmsnorm_program_);
@@ -242,6 +243,11 @@ bool Attention::initialize() {
         NNOPT_ERROR_FMT("clCreateKernel gqa_attn_out failed: %d", err);
         return false;
     }
+    kv_write_kernel_ = clCreateKernel(attn_program_, "kv_write", &err);
+    if (err != CL_SUCCESS || !kv_write_kernel_) {
+        NNOPT_ERROR_FMT("clCreateKernel kv_write failed: %d", err);
+        return false;
+    }
 
     // Per-head RMSNorm program/kernel — used for Lfm2 q_layernorm/k_layernorm
     // (modeling_lfm2.py:241-242,255-256), applied to per-head [head_dim] slices
@@ -352,13 +358,21 @@ cl_mem Attention::forward(cl_command_queue queue,
     //   contiguous, so dispatching rmsnorm with rows=seq_q*QH, cols=D normalizes
     //   each [head_dim]-vector, matching the PyTorch semantics exactly.
     {
-        auto apply_qk_norm = [&](cl_mem buf, cl_mem tmp, int rows, int cols, cl_mem w, const char* tag) -> bool {
+        // In-place rmsnorm: pass the same buffer as input AND output. Within
+        // each row, the kernel performs all reads (sum-of-squares + element
+        // load for write) before storing — and each thread strides over
+        // disjoint columns (lid + k*WG_SIZE), so no work-item ever reads a
+        // column another work-item has already written. Safe in-place ⇒ kills
+        // the per-call clEnqueueCopyBuffer (non-recordable). buf_q_norm_tmp_
+        // / buf_k_norm_tmp_ are now unused on this path; kept allocated for
+        // any future code that needs an out-of-place workspace.
+        auto apply_qk_norm = [&](cl_mem buf, int rows, int cols, cl_mem w, const char* tag) -> bool {
             const float eps = MODEL_CONFIG::NORM_EPS;
             cl_int e = CL_SUCCESS;
             int arg = 0;
             e  = clSetKernelArg(rmsnorm_kernel_, arg++, sizeof(cl_mem), &buf);
             e |= clSetKernelArg(rmsnorm_kernel_, arg++, sizeof(cl_mem), &w);
-            e |= clSetKernelArg(rmsnorm_kernel_, arg++, sizeof(cl_mem), &tmp);
+            e |= clSetKernelArg(rmsnorm_kernel_, arg++, sizeof(cl_mem), &buf);  // out = buf (in-place)
             e |= clSetKernelArg(rmsnorm_kernel_, arg++, sizeof(int), &rows);
             e |= clSetKernelArg(rmsnorm_kernel_, arg++, sizeof(int), &cols);
             e |= clSetKernelArg(rmsnorm_kernel_, arg++, sizeof(float), &eps);
@@ -369,14 +383,10 @@ cl_mem Attention::forward(cl_command_queue queue,
             e = clEnqueueNDRangeKernel(queue, rmsnorm_kernel_, 1, nullptr, &gws, &lws, 0, nullptr,
                                        KernelProfiler::event_for("attn_qk_rmsnorm"));
             if (e != CL_SUCCESS) { NNOPT_ERROR_FMT("%s dispatch failed: %d", tag, e); return false; }
-            // Copy normalized values back into the original q/k buffer.
-            const size_t bytes = (size_t)rows * (size_t)cols * sizeof(nnopt_storage_t);
-            e = clEnqueueCopyBuffer(queue, tmp, buf, 0, 0, bytes, 0, nullptr, nullptr);
-            if (e != CL_SUCCESS) { NNOPT_ERROR_FMT("%s copy back failed: %d", tag, e); return false; }
             return true;
         };
-        if (!apply_qk_norm(q, buf_q_norm_tmp_, seq_q * QH,  D, q_ln_w_, "q_layernorm")) return fail_qkv();
-        if (!apply_qk_norm(k, buf_k_norm_tmp_, seq_q * KVH, D, k_ln_w_, "k_layernorm")) return fail_qkv();
+        if (!apply_qk_norm(q, seq_q * QH,  D, q_ln_w_, "q_layernorm")) return fail_qkv();
+        if (!apply_qk_norm(k, seq_q * KVH, D, k_ln_w_, "k_layernorm")) return fail_qkv();
     }
     NNOPT_LAYER_CHECK_FMT("block%d_sub_attn_query_states_post_qnorm", layer_idx_, queue, q, (size_t)seq_q * Q_DIM);
     NNOPT_LAYER_CHECK_FMT("block%d_sub_attn_key_states_post_knorm",   layer_idx_, queue, k, (size_t)seq_q * KV_DIM);
@@ -423,7 +433,33 @@ cl_mem Attention::forward(cl_command_queue queue,
     NNOPT_LAYER_CHECK_FMT("block%d_sub_attn_key_states",   layer_idx_, queue, k, (size_t)seq_q * KV_DIM);
 
     // ── Append rotated K and V into the persistent cache at start_pos.
-    {
+    //
+    // Decode hot path (seq_q==1) uses a kv_write NDRange kernel so the
+    // dispatch is recordable by cl_qcom_recordable_queues — only
+    // clEnqueueNDRangeKernel can be inside a recording per Programming Guide
+    // §9.1.3. Prefill (seq_q>1) keeps clEnqueueCopyBuffer because one big
+    // contiguous copy is faster than seq_q × per-row kernel launches and
+    // prefill isn't on the recordable hot path.
+    if (seq_q == 1) {
+        auto kv_write = [&](cl_mem src, cl_mem cache, const char* tag) -> bool {
+            cl_int e = CL_SUCCESS;
+            int kv_dim_arg = KV_DIM;
+            e  = clSetKernelArg(kv_write_kernel_, 0, sizeof(cl_mem), &src);
+            e |= clSetKernelArg(kv_write_kernel_, 1, sizeof(cl_mem), &cache);
+            e |= clSetKernelArg(kv_write_kernel_, 2, sizeof(int),    &start_pos);
+            e |= clSetKernelArg(kv_write_kernel_, 3, sizeof(int),    &kv_dim_arg);
+            if (e != CL_SUCCESS) { NNOPT_ERROR_FMT("kv_write setArg %s: %d", tag, e); return false; }
+            const size_t WG = 64;
+            size_t gws = (size_t)KV_DIM;
+            size_t lws = WG;
+            e = clEnqueueNDRangeKernel(queue, kv_write_kernel_, 1, nullptr, &gws, &lws, 0, nullptr,
+                                       KernelProfiler::event_for("kv_write"));
+            if (e != CL_SUCCESS) { NNOPT_ERROR_FMT("kv_write dispatch %s: %d", tag, e); return false; }
+            return true;
+        };
+        if (!kv_write(k, k_cache_, "k")) return fail_qkv();
+        if (!kv_write(v, v_cache_, "v")) return fail_qkv();
+    } else {
         const size_t dst_off_bytes = (size_t)start_pos * (size_t)KV_DIM * sizeof(nnopt_storage_t);
         const size_t kv_bytes = (size_t)seq_q * (size_t)KV_DIM * sizeof(nnopt_storage_t);
         err = clEnqueueCopyBuffer(queue, k, k_cache_, 0, dst_off_bytes, kv_bytes, 0, nullptr, nullptr);

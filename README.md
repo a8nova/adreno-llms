@@ -12,8 +12,8 @@ State-of-the-art small language models running on **Adreno 6xx GPUs** — the GP
 
 Each model ships with **hand-written OpenCL kernels tuned for Adreno's WG=64 wave size, vec4 fp16 ALUs, and image-cache texture path:**
 
-- **`gemv_m1.cl`** — cooperative-WG=64 GEMV with vec4 fp16 + fp32 accumulator + `__local`-mem tree reduce. The decode-path workhorse, replacing CLBlast HGemm at every M=1 site (q/k/v/o-proj, gate/up/down-proj, lm_head). A `_no8` multi-output variant produces 4 output columns per WG when N is divisible by 4.
-- **`block_fused.cl`** — fused-residual GEMV variants that write `out[i] = sum + residual[i]` in a single launch (kills the separate `element_add` kernel after attn out-proj and MLP down-proj).
+- **`gemv_m1.cl`** — cooperative-WG=64 GEMV with vec4 fp16 + fp32 accumulator + `__local`-mem tree reduce. The decode-path workhorse, replacing CLBlast HGemm at every M=1 site (q/k/v/o-proj, gate/up/down-proj, lm_head). Hand-unrolled K-specialized variants (`_k768`, `_k1280`, `_k1536`) plus a generic-K **`_no4_coalesced`** path (vec4-strided across the warp for coalesced 256-byte DRAM reads) that hits 9–12 GB/s on Adreno 618. Adding the K=1280 specialization + coalesced generic to OpenELM-270M was the single largest unlock — **2.3× decode-throughput jump (4.60 → 10.59 tok/s)** before any other host-side work landed.
+- **`block_fused.cl`** — fused-residual GEMV variants (`gemv_m1_no4_radd`, `gemv_m1_k1280_no4_radd`, `gemv_m1_no4_radd_coalesced`) that write `hidden[i] += sum` in a single launch, killing the separate `element_add` kernel after attn out-proj and MLP down-proj.
 - **`attention.cl`** — grouped-query attention scores + softmax + out-proj.
 - **`mlp.cl` / `mlp_swiglu.cl`** — fused gate × silu × up.
 - **`rope.cl`** — rotary position embedding.
@@ -26,18 +26,25 @@ Each model ships with **hand-written OpenCL kernels tuned for Adreno's WG=64 wav
 
 CLBlast 1.6.3 handles the M>1 prefill GEMMs; the custom `gemv_m1` path takes over for M=1 decode.
 
+Decode-loop techniques that compound on top of the kernels:
+
+- **Chained cl_mem decode + ping-pong async readback** (OpenELM-270M, mamba2): the next iteration's embedding reads its token id directly from the previous iteration's GPU-side `argmax_result_` buffer (no host roundtrip). Async `clEnqueueReadBuffer(CL_FALSE)` of the int32 token is overlapped with the next forward's enqueue via a two-slot ping-pong. Closed a 33% wall-vs-GPU gap, **+1.38× on OpenELM (10.59 → 14.62 tok/s)**.
+- **Persistent activation buffers** for every per-layer scratch: qkv, q/k norm output, attention scores, ctx, projection output, MLP gate, MLP outputs — plus the residual-stream embedding output, RMSNorm outputs, and lm_head logits at the model level. Eliminates per-decode-token `clCreateBuffer`/`clReleaseMemObject` round-trips entirely on the hot path.
+- **GPU-side argmax** (`argmax.cl`): single-WG cooperative tree-reduction over the vocab, returning a 4-byte int32 instead of a 50K–150K-element fp16 readback + host scan.
+- **Pre-built RoPE tables sized to MAX_CONTEXT_LENGTH at init** — eliminates the per-decode-step host-side trig recompute + buffer regrowth.
+
 ## 📊 Models
 
-Decode tok/s = 5-run warm median, fp16, greedy, 32-token generation, measured 2026-05-06.
+Decode tok/s = 5-run warm median (OpenELM-270M is 10-run), fp16, greedy, 32-token generation, measured 2026-05-07.
 
 | Model | Params | Architecture | Device | Decode tok/s | TTFT (s) | Notes |
 |---|---:|---|---|---:|---:|---|
 | [Mamba2-130M](src/models/mamba2-130m/) | 130M | SSD | Razr 2020 (Adreno 618) | 23.18 | 1.53 | State-space duality |
 | [Mamba-130M](src/models/mamba-130m/) | 130M | SSM | Razr 2020 (Adreno 618) | 22.15 | 1.60 | No attention |
 | [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | 135M | LLaMA + GQA | Razr 2020 (Adreno 618) | 23.65 | 1.53 | Instruct-tuned; 61% of ceiling |
-| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | 350M | Hybrid conv+attn | Razr 2020 (Adreno 618) | 10.20 | 3.72 | Liquid AI hybrid |
-| [Qwen2.5-0.5B](src/models/qwen2-5-0-5b/) | 500M | LLaMA + GQA | Razr 2020 (Adreno 618) | 8.45 | 2.59 | Largest in the repo; ~80% of memory ceiling |
-| [OpenELM-270M](src/models/openelm-270m/) | 270M | LLaMA-style | Razr 2020 (Adreno 618) | 4.47 | 2.13 | Apple weights — fetch script only |
+| [OpenELM-270M](src/models/openelm-270m/) | 270M | LLaMA-style + tied lm_head | Razr 2020 (Adreno 618) | **14.81** (32 tok) / **15.22** (40 tok) | 1.93 | **3.31× over prior 4.47**; 78.9% of 10 GB/s ceiling at 40-token median |
+| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | 350M | Hybrid conv+attn | Razr 2020 (Adreno 620) | **11.51** | 3.73 | Liquid AI hybrid; 58% of texture ceiling, conv-block fused decode + `__constant` x in no8_img GEMV |
+| [Qwen2.5-0.5B](src/models/qwen2-5-0-5b/) | 500M | LLaMA + GQA | Razr 2020 (Adreno 618) | **10.41** | 2.59 | Largest in the repo; chained cl_mem decode + fused QKV → 70% of 14 GB/s ceiling |
 
 ## 🚀 Quickstart
 

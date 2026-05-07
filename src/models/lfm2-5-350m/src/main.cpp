@@ -18,6 +18,8 @@
 #include <vector>
 #include <chrono>
 #include <fstream>
+#include <dlfcn.h>
+#include <CL/cl.h>
 
 // STREAM-style microbenchmark — measures the practical streaming-read
 // ceiling on this device for both buffer-cache and texture-cache reads.
@@ -135,6 +137,222 @@ static int run_bw_probe(OpenCLContext& cl_ctx) {
     return 0;
 }
 
+// cl_qcom_recordable_queues probe — proves we can record the per-token
+// decode dispatch sequence once and replay it cheaply, attacking the
+// ~16 ms/token host gap. Triggered via NNOPT_RECORD_PROBE=1; exits before
+// LLM work. Mirrors qwen2.5-0.5B/src/main.cpp:run_record_probe.
+//
+// On Razr 2020 / Adreno 620 (driver E031.37.12.07): bit 30
+// (CL_QUEUE_RECORDABLE_QCOM = 0x40000000) on clCreateCommandQueue, ALONE
+// (NOT combined with CL_QUEUE_PROFILING_ENABLE), creates a queue that
+// clNewRecordingQCOM accepts. The probe iterates many candidates so the
+// finding remains evidence-based on other devices.
+static int run_record_probe(OpenCLContext& cl_ctx) {
+    using namespace std::chrono;
+    cl_context  ctx = cl_ctx.context();
+    cl_command_queue q = cl_ctx.queue();
+    cl_int err = CL_SUCCESS;
+
+    typedef void* cl_recording_qcom;
+    typedef cl_recording_qcom (CL_API_CALL *clNewRecordingQCOM_fn)(
+        cl_command_queue, cl_int*);
+    typedef cl_int (CL_API_CALL *clEndRecordingQCOM_fn)(cl_recording_qcom);
+    typedef cl_int (CL_API_CALL *clReleaseRecordingQCOM_fn)(cl_recording_qcom);
+    struct cl_array_arg_qcom {
+        cl_kernel    kernel;
+        cl_uint      arg_indx;
+        size_t       arg_size;
+        const void*  arg_value;
+    };
+    struct cl_array_kernel_exec_info_qcom {
+        cl_kernel       kernel;
+        cl_uint         indx;
+        size_t          param_value_size;
+        const void*     param_value;
+    };
+    typedef cl_int (CL_API_CALL *clEnqueueRecordingQCOM_fn)(
+        cl_command_queue queue,
+        cl_recording_qcom recording,
+        size_t num_args,
+        const cl_array_arg_qcom* args,
+        size_t num_global_offsets,
+        const cl_array_kernel_exec_info_qcom* global_offsets,
+        size_t num_global_work_sizes,
+        const cl_array_kernel_exec_info_qcom* global_work_sizes,
+        size_t num_local_work_sizes,
+        const cl_array_kernel_exec_info_qcom* local_work_sizes,
+        cl_uint num_events_in_wait_list,
+        const cl_event* event_wait_list,
+        cl_event* event);
+
+    auto fnNew     = (clNewRecordingQCOM_fn)    dlsym(RTLD_DEFAULT, "clNewRecordingQCOM");
+    auto fnEnd     = (clEndRecordingQCOM_fn)    dlsym(RTLD_DEFAULT, "clEndRecordingQCOM");
+    auto fnRelease = (clReleaseRecordingQCOM_fn)dlsym(RTLD_DEFAULT, "clReleaseRecordingQCOM");
+    auto fnEnqueue = (clEnqueueRecordingQCOM_fn)dlsym(RTLD_DEFAULT, "clEnqueueRecordingQCOM");
+    if (!fnNew || !fnEnd || !fnRelease || !fnEnqueue) {
+        std::cerr << "Record: missing one or more entry points\n";
+        return 1;
+    }
+
+    cl_device_id dev = cl_ctx.device();
+    cl_command_queue probe_q = nullptr;
+    cl_recording_qcom winning_rec = nullptr;
+    int win_attempt = -1;
+    cl_command_queue live_q = q;
+
+    auto try_recording = [&](cl_command_queue qq, int attempt_id) -> bool {
+        cl_int e = 0;
+        cl_recording_qcom h = fnNew(qq, &e);
+        std::cerr << "  attempt " << attempt_id << ": clNewRecordingQCOM err="
+                  << e << " handle=" << h << "\n";
+        if (e == CL_SUCCESS && h) {
+            probe_q = qq;
+            fnEnd(h);
+            fnRelease(h);
+            win_attempt = attempt_id;
+            winning_rec = (cl_recording_qcom)1;
+            return true;
+        }
+        return false;
+    };
+
+    {
+        cl_command_queue_properties supp = 0;
+        clGetDeviceInfo(dev, CL_DEVICE_QUEUE_PROPERTIES, sizeof(supp), &supp, nullptr);
+        std::cerr << "  CL_DEVICE_QUEUE_PROPERTIES = 0x" << std::hex << supp << std::dec
+                  << " (bit 30=CL_QUEUE_RECORDABLE_QCOM)\n";
+    }
+
+    // Direct candidates per Snapdragon Programming Guide §9.1.3 — clCreateCommandQueue.
+    constexpr cl_command_queue_properties RECORD_BIT = (cl_command_queue_properties)1 << 30;
+    cl_command_queue_properties direct_candidates[] = {
+        RECORD_BIT,
+        RECORD_BIT | CL_QUEUE_PROFILING_ENABLE,
+        RECORD_BIT | CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE,
+        RECORD_BIT | CL_QUEUE_PROFILING_ENABLE | CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE,
+    };
+    for (size_t i = 0; i < sizeof(direct_candidates)/sizeof(direct_candidates[0]); ++i) {
+        if (winning_rec) break;
+        cl_int qerr = 0;
+        cl_command_queue qq = clCreateCommandQueue(ctx, dev, direct_candidates[i], &qerr);
+        std::cerr << "  direct: props=0x" << std::hex << direct_candidates[i] << std::dec
+                  << " qerr=" << qerr << " qq=" << qq << "\n";
+        if (qerr == CL_SUCCESS && qq) {
+            if (!try_recording(qq, 400 + (int)i)) clReleaseCommandQueue(qq);
+        }
+    }
+
+    if (!winning_rec) {
+        std::cerr << "Record: no candidate worked. Aborting.\n";
+        return 1;
+    }
+    std::cerr << "Record: WIN attempt " << win_attempt
+              << " (probe_q=" << probe_q << ")\n";
+
+    // Build the probe kernel from the gemv_m1.cl program.
+    std::ifstream f("kernels/gemv_m1.cl", std::ios::binary);
+    std::string src_text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    cl_program prog = OpenCLContext::build_cached_program_from_queue(q, src_text, "");
+    if (!prog) { std::cerr << "build kernels fail\n"; return 1; }
+    cl_kernel k = clCreateKernel(prog, "probe_noop", &err);
+    if (err != CL_SUCCESS) { std::cerr << "createKernel fail " << err << "\n"; return 1; }
+
+    cl_mem counter = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_int), nullptr, &err);
+    if (err != CL_SUCCESS) { std::cerr << "alloc counter fail\n"; return 1; }
+    int incr = 1;
+    clSetKernelArg(k, 0, sizeof(cl_mem), &counter);
+    clSetKernelArg(k, 1, sizeof(int),    &incr);
+
+    constexpr int N_DISPATCH_PER_RECORDING = 100;
+    constexpr int N_REPLAYS                = 100;
+    constexpr int N_BASELINE_DISPATCHES    = N_DISPATCH_PER_RECORDING * N_REPLAYS;
+
+    auto reset_counter = [&]() {
+        cl_int zero = 0;
+        clEnqueueWriteBuffer(live_q, counter, CL_TRUE, 0, sizeof(int), &zero, 0, nullptr, nullptr);
+    };
+    auto read_counter = [&]() {
+        cl_int v = 0;
+        clEnqueueReadBuffer(live_q, counter, CL_TRUE, 0, sizeof(int), &v, 0, nullptr, nullptr);
+        return v;
+    };
+
+    // Baseline: N_BASELINE_DISPATCHES sequential clEnqueueNDRangeKernel on live_q.
+    reset_counter();
+    size_t gws = 1, lws = 1;
+    auto t0 = high_resolution_clock::now();
+    for (int i = 0; i < N_BASELINE_DISPATCHES; ++i) {
+        clEnqueueNDRangeKernel(live_q, k, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+    }
+    clFinish(live_q);
+    auto t1 = high_resolution_clock::now();
+    double base_ms = duration<double, std::milli>(t1 - t0).count();
+    int base_val = read_counter();
+    std::cerr << "Baseline: " << N_BASELINE_DISPATCHES << " sequential dispatches → "
+              << base_ms << " ms, counter=" << base_val << "\n";
+
+    // Recording: capture N_DISPATCH_PER_RECORDING enqueues on probe_q.
+    reset_counter();
+    cl_int new_err = 0;
+    cl_recording_qcom rec = fnNew(probe_q, &new_err);
+    if (new_err != CL_SUCCESS || !rec) {
+        std::cerr << "Record: clNewRecordingQCOM failed err=" << new_err << "\n";
+        return 1;
+    }
+    for (int i = 0; i < N_DISPATCH_PER_RECORDING; ++i) {
+        cl_int e = clEnqueueNDRangeKernel(probe_q, k, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+        if (e != CL_SUCCESS) {
+            std::cerr << "Record: enqueue during record failed at i=" << i << " err=" << e << "\n";
+            fnRelease(rec);
+            return 1;
+        }
+    }
+    cl_int end_err = fnEnd(rec);
+    if (end_err != CL_SUCCESS) {
+        std::cerr << "Record: end failed err=" << end_err << "\n";
+        fnRelease(rec);
+        return 1;
+    }
+
+    // Replay: N_REPLAYS × N_DISPATCH_PER_RECORDING dispatches on live_q.
+    reset_counter();
+    auto t2 = high_resolution_clock::now();
+    for (int r = 0; r < N_REPLAYS; ++r) {
+        cl_int e = fnEnqueue(live_q, rec,
+            0, nullptr, 0, nullptr, 0, nullptr, 0, nullptr,
+            0, nullptr, nullptr);
+        if (e != CL_SUCCESS) {
+            std::cerr << "Record: replay failed at r=" << r << " err=" << e << "\n";
+            fnRelease(rec);
+            return 1;
+        }
+    }
+    clFinish(live_q);
+    auto t3 = high_resolution_clock::now();
+    double replay_ms = duration<double, std::milli>(t3 - t2).count();
+    int replay_val = read_counter();
+    std::cerr << "Replay: " << N_BASELINE_DISPATCHES << " dispatches → "
+              << replay_ms << " ms, counter=" << replay_val << "\n";
+
+    if (replay_val != base_val) {
+        std::cerr << "Record: COUNTER MISMATCH (replay isn't equivalent)\n";
+    } else {
+        double speedup = base_ms / replay_ms;
+        double per_baseline = base_ms / N_BASELINE_DISPATCHES * 1000.0;
+        double per_replay   = replay_ms / N_BASELINE_DISPATCHES * 1000.0;
+        std::cerr << "Record: speedup = " << speedup << "× ("
+                  << per_baseline << " µs/dispatch baseline → "
+                  << per_replay   << " µs/dispatch replay)\n";
+    }
+
+    fnRelease(rec);
+    clReleaseMemObject(counter);
+    clReleaseKernel(k);
+    clReleaseProgram(prog);
+    clReleaseCommandQueue(probe_q);
+    return 0;
+}
+
 static std::vector<int> load_token_ids_from_file(const std::string& path) {
     std::vector<int> ids;
     FILE* f = fopen(path.c_str(), "rb");
@@ -203,12 +421,16 @@ int main(int argc, char* argv[]) {
         std::cerr << "Failed to initialize OpenCL" << std::endl;
         return 1;
     }
-    std::cerr << "Device: " << cl_ctx.device_name() << std::endl;
+    std::cerr << "Device: " << cl_ctx.device_description() << std::endl;
     NNOPT_CHECKPOINT("OpenCL initialized");
 
     // Bandwidth probe — exits before LLM work. Toggle with NNOPT_BW_PROBE=1.
     if (const char* bw = std::getenv("NNOPT_BW_PROBE"); bw && bw[0] == '1') {
         return run_bw_probe(cl_ctx);
+    }
+    // cl_qcom_recordable_queues probe — exits before LLM work. Toggle with NNOPT_RECORD_PROBE=1.
+    if (const char* rp = std::getenv("NNOPT_RECORD_PROBE"); rp && rp[0] == '1') {
+        return run_record_probe(cl_ctx);
     }
 
     // Load tokenizer (still needed for decoding output)
@@ -391,8 +613,6 @@ int main(int argc, char* argv[]) {
 
     // Generate
     NNOPT_CHECKPOINT("starting generation");
-    Timer timer;
-    timer.start();
 
     // Print the prompt prefix (decoded back through the tokenizer for
     // round-trip parity), then stream each new token's text as it's
@@ -431,7 +651,6 @@ int main(int argc, char* argv[]) {
     bench.mark_prefill_start();
     auto output_ids = model.generate(input_ids, max_tokens, sampler_config, on_token);
     bench.mark_end();
-    double elapsed = timer.elapsed_ms();
     int gen_tokens = output_ids.size() - input_ids.size();
     NNOPT_CHECKPOINT("generation complete");
 
@@ -448,11 +667,6 @@ int main(int argc, char* argv[]) {
         }
         std::cout << std::endl;
     }
-
-    // Stats (human-readable summary — kept for backward compat with old parsers)
-    std::cerr << "Generated " << gen_tokens << " tokens in "
-              << elapsed << " ms ("
-              << (gen_tokens * 1000.0 / elapsed) << " tokens/sec)" << std::endl;
 
     // Structured baseline metrics for FinalizePort / README generation.
     bench.print_summary((int)input_ids.size(), gen_tokens);

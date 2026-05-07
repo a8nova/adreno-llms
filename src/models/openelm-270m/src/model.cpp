@@ -5,6 +5,7 @@
 #include "sampler.h"
 #include "debug_utils.h"
 #include "benchmark.h"
+#include "kernel_profiler.h"
 #include "model_config.h"
 #include "utils.h"
 #include <iostream>
@@ -23,6 +24,23 @@ Model::~Model() {
     if (argmax_kernel_)  clReleaseKernel(argmax_kernel_);
     if (argmax_program_) clReleaseProgram(argmax_program_);
     if (argmax_result_)  clReleaseMemObject(argmax_result_);
+    if (logits_buf_)     clReleaseMemObject(logits_buf_);
+}
+
+bool Model::ensure_logits_buf_(int seq_len) {
+    const size_t needed = (size_t)seq_len * (size_t)MODEL_CONFIG::VOCAB_SIZE * sizeof(nnopt_storage_t);
+    if (logits_buf_cap_bytes_ >= needed && logits_buf_) return true;
+    if (logits_buf_) clReleaseMemObject(logits_buf_);
+    cl_int err = CL_SUCCESS;
+    logits_buf_ = clCreateBuffer(cl_ctx_.context(), CL_MEM_READ_WRITE, needed, nullptr, &err);
+    if (err != CL_SUCCESS || !logits_buf_) {
+        NNOPT_ERROR_FMT("Model: persistent logits_buf_ alloc failed (%d)", (int)err);
+        logits_buf_ = nullptr;
+        logits_buf_cap_bytes_ = 0;
+        return false;
+    }
+    logits_buf_cap_bytes_ = needed;
+    return true;
 }
 
 bool Model::ensure_argmax_resources_() {
@@ -262,125 +280,116 @@ std::vector<float> Model::forward(const std::vector<int32_t>& input_ids, int sta
         return {};
     }
 
-    // Transformer blocks
+    // Transformer blocks. Step Z: pre/post norm outputs are BORROWED from
+    // the LayerNorm instance. Track whether `hidden` is the embedding's
+    // persistent buffer (pristine == true) or a fallback-allocated buffer.
+    bool hidden_is_pristine = true;
     for (int i = 0; i < MODEL_CONFIG::NUM_TRANSFORMER_LAYERS; i++) {
         cl_mem residual = hidden;
+        const bool residual_is_pristine = hidden_is_pristine;
 
         cl_mem normed = pre_attn_norm_[i]->forward(queue, residual, seq_len);
         if (!normed) {
             NNOPT_ERROR_FMT("pre_attn_norm forward nullptr at layer %d", i);
-            clReleaseMemObject(residual);
+            if (!residual_is_pristine) clReleaseMemObject(residual);
             return {};
         }
 
-        // Attention returns a BORROWED handle (owned by attn_[i]). DO NOT release.
-        cl_mem attn_out = attn_[i]->forward(queue, normed, seq_len, start_pos);
-        clReleaseMemObject(normed);
-        if (!attn_out) {
-            NNOPT_ERROR_FMT("attn forward nullptr at layer %d", i);
-            clReleaseMemObject(residual);
+        cl_mem after_attn_handle = attn_[i]->forward_with_residual(queue, normed, seq_len, start_pos, residual);
+        if (!after_attn_handle) {
+            NNOPT_ERROR_FMT("attn forward_with_residual nullptr at layer %d", i);
+            if (!residual_is_pristine) clReleaseMemObject(residual);
             return {};
         }
-
-        cl_mem after_attn = element_add(queue, cl_ctx_.utils_program(), residual, attn_out,
-            (size_t)seq_len * MODEL_CONFIG::HIDDEN_SIZE);
-        clReleaseMemObject(residual);
-        // attn_out NOT released — borrowed.
-        if (!after_attn) {
-            NNOPT_ERROR_FMT("residual add failed at layer %d", i);
-            return {};
+        cl_mem after_attn = residual;
+        bool after_attn_is_pristine = residual_is_pristine;
+        if (after_attn_handle != residual) {
+            // Rare radd-ineligible path (e.g. prefill M>1). Allocates a new buffer.
+            after_attn = element_add(queue, cl_ctx_.utils_program(), residual, after_attn_handle,
+                (size_t)seq_len * MODEL_CONFIG::HIDDEN_SIZE);
+            if (!residual_is_pristine) clReleaseMemObject(residual);
+            after_attn_is_pristine = false;
+            if (!after_attn) {
+                NNOPT_ERROR_FMT("attn fallback residual add failed at layer %d", i);
+                return {};
+            }
         }
 
         cl_mem normed2 = post_attn_norm_[i]->forward(queue, after_attn, seq_len);
         if (!normed2) {
             NNOPT_ERROR_FMT("post_attn_norm forward nullptr at layer %d", i);
-            clReleaseMemObject(after_attn);
+            if (!after_attn_is_pristine) clReleaseMemObject(after_attn);
             return {};
         }
 
-        // Mlp returns a BORROWED handle (owned by mlp_[i]). DO NOT release.
-        cl_mem mlp_out = mlp_[i]->forward(queue, normed2, seq_len);
-        clReleaseMemObject(normed2);
-        if (!mlp_out) {
-            NNOPT_ERROR_FMT("mlp forward nullptr at layer %d", i);
-            clReleaseMemObject(after_attn);
+        cl_mem after_mlp_handle = mlp_[i]->forward_with_residual(queue, normed2, seq_len, after_attn);
+        if (!after_mlp_handle) {
+            NNOPT_ERROR_FMT("mlp forward_with_residual nullptr at layer %d", i);
+            if (!after_attn_is_pristine) clReleaseMemObject(after_attn);
             return {};
         }
-
-        cl_mem after_mlp = element_add(queue, cl_ctx_.utils_program(), after_attn, mlp_out,
-            (size_t)seq_len * MODEL_CONFIG::HIDDEN_SIZE);
-        clReleaseMemObject(after_attn);
-        // mlp_out NOT released — borrowed.
-        if (!after_mlp) {
-            NNOPT_ERROR_FMT("mlp residual add failed at layer %d", i);
-            return {};
+        cl_mem after_mlp = after_attn;
+        bool after_mlp_is_pristine = after_attn_is_pristine;
+        if (after_mlp_handle != after_attn) {
+            after_mlp = element_add(queue, cl_ctx_.utils_program(), after_attn, after_mlp_handle,
+                (size_t)seq_len * MODEL_CONFIG::HIDDEN_SIZE);
+            if (!after_attn_is_pristine) clReleaseMemObject(after_attn);
+            after_mlp_is_pristine = false;
+            if (!after_mlp) {
+                NNOPT_ERROR_FMT("mlp fallback residual add failed at layer %d", i);
+                return {};
+            }
         }
 
         hidden = after_mlp;
+        hidden_is_pristine = after_mlp_is_pristine;
     }
 
-    // Final norm
+    // Final norm — BORROWED from final_norm_ persistent buffer.
     cl_mem final_hidden = final_norm_->forward(queue, hidden, seq_len);
-    clReleaseMemObject(hidden);
+    if (!hidden_is_pristine) clReleaseMemObject(hidden);
     if (!final_hidden) {
         NNOPT_ERROR("final_norm forward nullptr");
         return {};
     }
 
-    // LM head (tied embeddings). Use embedding weights as output projection.
-    // W shape is [vocab, hidden] in our exported weights.
     cl_mem lm_w = weights_.get_buffer("transformer.token_embeddings.weight");
     if (!lm_w) {
         NNOPT_ERROR("missing transformer.token_embeddings.weight");
-        clReleaseMemObject(final_hidden);
         return {};
     }
 
-    cl_context ctx = cl_ctx_.context();
+    if (!ensure_logits_buf_(seq_len)) return {};
     cl_int err = CL_SUCCESS;
-    cl_mem logits = clCreateBuffer(ctx, CL_MEM_READ_WRITE,
-        (size_t)seq_len * MODEL_CONFIG::VOCAB_SIZE * sizeof(nnopt_storage_t), nullptr, &err);
-    if (err != CL_SUCCESS || !logits) {
-        NNOPT_ERROR_FMT("clCreateBuffer logits failed (%d)", err);
-        clReleaseMemObject(final_hidden);
-        return {};
-    }
 
     if (!pytorch_linear(queue, seq_len, MODEL_CONFIG::VOCAB_SIZE, MODEL_CONFIG::HIDDEN_SIZE,
-            final_hidden, lm_w, logits)) {
+            final_hidden, lm_w, logits_buf_)) {
         NNOPT_ERROR("pytorch_linear lm_head failed");
-        clReleaseMemObject(final_hidden);
-        clReleaseMemObject(logits);
         return {};
     }
-    clReleaseMemObject(final_hidden);
 
-    // Read back last-token logits only
     const size_t vocab = (size_t)MODEL_CONFIG::VOCAB_SIZE;
     std::vector<float> host_logits(vocab);
     const size_t offset_bytes = (size_t)(seq_len - 1) * vocab * sizeof(nnopt_storage_t);
 
 #ifdef NNOPT_USE_FP16
     std::vector<nnopt_storage_t> tmp(vocab);
-    err = clEnqueueReadBuffer(queue, logits, CL_TRUE, offset_bytes,
+    err = clEnqueueReadBuffer(queue, logits_buf_, CL_TRUE, offset_bytes,
         vocab * sizeof(nnopt_storage_t), tmp.data(), 0, nullptr, nullptr);
     if (err != CL_SUCCESS) {
         NNOPT_ERROR_FMT("Read logits failed (%d)", err);
-        clReleaseMemObject(logits);
         return {};
     }
     for (size_t i = 0; i < vocab; i++) host_logits[i] = nnopt_f16_to_f32(tmp[i]);
 #else
-    err = clEnqueueReadBuffer(queue, logits, CL_TRUE, offset_bytes,
+    err = clEnqueueReadBuffer(queue, logits_buf_, CL_TRUE, offset_bytes,
         vocab * sizeof(float), host_logits.data(), 0, nullptr, nullptr);
     if (err != CL_SUCCESS) {
         NNOPT_ERROR_FMT("Read logits failed (%d)", err);
-        clReleaseMemObject(logits);
         return {};
     }
 #endif
 
-    clReleaseMemObject(logits);
     NNOPT_CHECKPOINT("forward() complete");
     return host_logits;
 }
@@ -404,104 +413,98 @@ int32_t Model::forward_argmax_greedy(const std::vector<int32_t>& input_ids, int 
     cl_mem hidden = embedding_->forward(queue, input_ids.data(), seq_len, start_pos);
     if (!hidden) { NNOPT_ERROR("embedding->forward returned nullptr"); return -1; }
 
-    // Transformer blocks
+    // Transformer blocks. Step Z: pre/post norm outputs are BORROWED.
+    bool hidden_is_pristine = true;
     for (int i = 0; i < MODEL_CONFIG::NUM_TRANSFORMER_LAYERS; i++) {
         cl_mem residual = hidden;
+        const bool residual_is_pristine = hidden_is_pristine;
 
         cl_mem normed = pre_attn_norm_[i]->forward(queue, residual, seq_len);
         if (!normed) {
             NNOPT_ERROR_FMT("pre_attn_norm forward nullptr at layer %d", i);
-            clReleaseMemObject(residual);
+            if (!residual_is_pristine) clReleaseMemObject(residual);
             return -1;
         }
 
-        cl_mem attn_out = attn_[i]->forward(queue, normed, seq_len, start_pos);
-        clReleaseMemObject(normed);
-        if (!attn_out) {
-            NNOPT_ERROR_FMT("attn forward nullptr at layer %d", i);
-            clReleaseMemObject(residual);
+        cl_mem after_attn_handle = attn_[i]->forward_with_residual(queue, normed, seq_len, start_pos, residual);
+        if (!after_attn_handle) {
+            NNOPT_ERROR_FMT("attn forward_with_residual nullptr at layer %d", i);
+            if (!residual_is_pristine) clReleaseMemObject(residual);
             return -1;
         }
-
-        cl_mem after_attn = element_add(queue, cl_ctx_.utils_program(), residual, attn_out,
-            (size_t)seq_len * MODEL_CONFIG::HIDDEN_SIZE);
-        clReleaseMemObject(residual);
-        if (!after_attn) { NNOPT_ERROR_FMT("residual add failed at layer %d", i); return -1; }
+        cl_mem after_attn = residual;
+        bool after_attn_is_pristine = residual_is_pristine;
+        if (after_attn_handle != residual) {
+            after_attn = element_add(queue, cl_ctx_.utils_program(), residual, after_attn_handle,
+                (size_t)seq_len * MODEL_CONFIG::HIDDEN_SIZE);
+            if (!residual_is_pristine) clReleaseMemObject(residual);
+            after_attn_is_pristine = false;
+            if (!after_attn) { NNOPT_ERROR_FMT("attn fallback residual add failed at layer %d", i); return -1; }
+        }
 
         cl_mem normed2 = post_attn_norm_[i]->forward(queue, after_attn, seq_len);
         if (!normed2) {
             NNOPT_ERROR_FMT("post_attn_norm forward nullptr at layer %d", i);
-            clReleaseMemObject(after_attn);
+            if (!after_attn_is_pristine) clReleaseMemObject(after_attn);
             return -1;
         }
 
-        cl_mem mlp_out = mlp_[i]->forward(queue, normed2, seq_len);
-        clReleaseMemObject(normed2);
-        if (!mlp_out) {
-            NNOPT_ERROR_FMT("mlp forward nullptr at layer %d", i);
-            clReleaseMemObject(after_attn);
+        cl_mem after_mlp_handle = mlp_[i]->forward_with_residual(queue, normed2, seq_len, after_attn);
+        if (!after_mlp_handle) {
+            NNOPT_ERROR_FMT("mlp forward_with_residual nullptr at layer %d", i);
+            if (!after_attn_is_pristine) clReleaseMemObject(after_attn);
             return -1;
         }
-
-        cl_mem after_mlp = element_add(queue, cl_ctx_.utils_program(), after_attn, mlp_out,
-            (size_t)seq_len * MODEL_CONFIG::HIDDEN_SIZE);
-        clReleaseMemObject(after_attn);
-        if (!after_mlp) { NNOPT_ERROR_FMT("mlp residual add failed at layer %d", i); return -1; }
+        cl_mem after_mlp = after_attn;
+        bool after_mlp_is_pristine = after_attn_is_pristine;
+        if (after_mlp_handle != after_attn) {
+            after_mlp = element_add(queue, cl_ctx_.utils_program(), after_attn, after_mlp_handle,
+                (size_t)seq_len * MODEL_CONFIG::HIDDEN_SIZE);
+            if (!after_attn_is_pristine) clReleaseMemObject(after_attn);
+            after_mlp_is_pristine = false;
+            if (!after_mlp) { NNOPT_ERROR_FMT("mlp fallback residual add failed at layer %d", i); return -1; }
+        }
 
         hidden = after_mlp;
+        hidden_is_pristine = after_mlp_is_pristine;
     }
 
-    // Final norm
     cl_mem final_hidden = final_norm_->forward(queue, hidden, seq_len);
-    clReleaseMemObject(hidden);
+    if (!hidden_is_pristine) clReleaseMemObject(hidden);
     if (!final_hidden) { NNOPT_ERROR("final_norm forward nullptr"); return -1; }
 
-    // LM head (tied embeddings)
     cl_mem lm_w = weights_.get_buffer("transformer.token_embeddings.weight");
     if (!lm_w) {
         NNOPT_ERROR("missing transformer.token_embeddings.weight");
-        clReleaseMemObject(final_hidden);
         return -1;
     }
 
+    if (!ensure_logits_buf_(seq_len)) return -1;
     cl_int err = CL_SUCCESS;
-    cl_mem logits = clCreateBuffer(cl_ctx_.context(), CL_MEM_READ_WRITE,
-        (size_t)seq_len * MODEL_CONFIG::VOCAB_SIZE * sizeof(nnopt_storage_t), nullptr, &err);
-    if (err != CL_SUCCESS || !logits) {
-        NNOPT_ERROR_FMT("clCreateBuffer logits failed (%d)", err);
-        clReleaseMemObject(final_hidden);
-        return -1;
-    }
 
     if (!pytorch_linear(queue, seq_len, MODEL_CONFIG::VOCAB_SIZE, MODEL_CONFIG::HIDDEN_SIZE,
-            final_hidden, lm_w, logits)) {
+            final_hidden, lm_w, logits_buf_)) {
         NNOPT_ERROR("pytorch_linear lm_head failed");
-        clReleaseMemObject(final_hidden);
-        clReleaseMemObject(logits);
         return -1;
     }
-    clReleaseMemObject(final_hidden);
 
-    // GPU argmax over the LAST token's logits row only. Pass offset_elements
-    // instead of clCreateSubBuffer (Adreno alignment quirks).
     const int vocab = MODEL_CONFIG::VOCAB_SIZE;
     const int offset_elements = (seq_len - 1) * vocab;
 
-    if (clSetKernelArg(argmax_kernel_, 0, sizeof(cl_mem), &logits) != CL_SUCCESS ||
+    if (clSetKernelArg(argmax_kernel_, 0, sizeof(cl_mem), &logits_buf_) != CL_SUCCESS ||
         clSetKernelArg(argmax_kernel_, 1, sizeof(cl_mem), &argmax_result_) != CL_SUCCESS ||
         clSetKernelArg(argmax_kernel_, 2, sizeof(int),    &vocab) != CL_SUCCESS ||
         clSetKernelArg(argmax_kernel_, 3, sizeof(int),    &offset_elements) != CL_SUCCESS) {
         NNOPT_ERROR("argmax setKernelArg failed");
-        clReleaseMemObject(logits);
         return -1;
     }
     {
         const size_t lws = 256;
         const size_t gws = 256;
-        err = clEnqueueNDRangeKernel(queue, argmax_kernel_, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+        cl_event* evt = KernelProfiler::event_for("argmax");
+        err = clEnqueueNDRangeKernel(queue, argmax_kernel_, 1, nullptr, &gws, &lws, 0, nullptr, evt);
         if (err != CL_SUCCESS) {
             NNOPT_ERROR_FMT("argmax dispatch failed: %d", (int)err);
-            clReleaseMemObject(logits);
             return -1;
         }
     }
@@ -509,13 +512,88 @@ int32_t Model::forward_argmax_greedy(const std::vector<int32_t>& input_ids, int 
     int32_t result = -1;
     err = clEnqueueReadBuffer(queue, argmax_result_, CL_TRUE, 0,
                               sizeof(int32_t), &result, 0, nullptr, nullptr);
-    clReleaseMemObject(logits);
     if (err != CL_SUCCESS) {
         NNOPT_ERROR_FMT("Read argmax result failed (%d)", err);
         return -1;
     }
     NNOPT_CHECKPOINT("forward_argmax_greedy() complete");
     return result;
+}
+
+// Step 9: chained-decode forward. Embedding reads from argmax_result_
+// (written by the previous forward); argmax writes back to argmax_result_.
+// No host readback inside this function — caller pipelines a CL_FALSE
+// readback of argmax_result_buffer() and waits on the event when needed.
+bool Model::forward_argmax_greedy_chained_enqueue(int start_pos) {
+    const int seq_len = 1;
+    if (!ensure_argmax_resources_()) return false;
+    cl_command_queue queue = cl_ctx_.queue();
+
+    cl_mem hidden = embedding_->forward_from_device_token(
+        queue, argmax_result_, /*dev_offset_bytes=*/0, start_pos);
+    if (!hidden) return false;
+
+    for (int i = 0; i < MODEL_CONFIG::NUM_TRANSFORMER_LAYERS; i++) {
+        cl_mem residual = hidden;
+        cl_mem normed = pre_attn_norm_[i]->forward(queue, residual, seq_len);
+        if (!normed) { clReleaseMemObject(residual); return false; }
+
+        cl_mem after_attn_handle = attn_[i]->forward_with_residual(queue, normed, seq_len, start_pos, residual);
+        if (!after_attn_handle) return false;
+        // At decode (seq_len=1) the radd path always fires, so after_attn ==
+        // residual every iteration. We don't bother with the fallback element_add
+        // path here (it's covered by forward()/forward_argmax_greedy for prefill
+        // and non-greedy paths). Keep the branch as a defensive sanity check.
+        if (after_attn_handle != residual) {
+            NNOPT_ERROR_FMT("chained decode hit unexpected radd-ineligible path at layer %d", i);
+            return false;
+        }
+        cl_mem after_attn = residual;
+
+        cl_mem normed2 = post_attn_norm_[i]->forward(queue, after_attn, seq_len);
+        if (!normed2) return false;
+
+        cl_mem after_mlp_handle = mlp_[i]->forward_with_residual(queue, normed2, seq_len, after_attn);
+        if (!after_mlp_handle) return false;
+        if (after_mlp_handle != after_attn) {
+            NNOPT_ERROR_FMT("chained decode hit unexpected mlp-radd-ineligible path at layer %d", i);
+            return false;
+        }
+        cl_mem after_mlp = after_attn;
+
+        hidden = after_mlp;
+    }
+
+    cl_mem final_hidden = final_norm_->forward(queue, hidden, seq_len);
+    if (!final_hidden) return false;
+
+    cl_mem lm_w = weights_.get_buffer("transformer.token_embeddings.weight");
+    if (!lm_w) return false;
+
+    if (!ensure_logits_buf_(seq_len)) return false;
+    cl_int err = CL_SUCCESS;
+
+    if (!pytorch_linear(queue, seq_len, MODEL_CONFIG::VOCAB_SIZE, MODEL_CONFIG::HIDDEN_SIZE,
+            final_hidden, lm_w, logits_buf_)) {
+        return false;
+    }
+
+    const int vocab = MODEL_CONFIG::VOCAB_SIZE;
+    const int offset_elements = (seq_len - 1) * vocab;
+    if (clSetKernelArg(argmax_kernel_, 0, sizeof(cl_mem), &logits_buf_) != CL_SUCCESS ||
+        clSetKernelArg(argmax_kernel_, 1, sizeof(cl_mem), &argmax_result_) != CL_SUCCESS ||
+        clSetKernelArg(argmax_kernel_, 2, sizeof(int),    &vocab) != CL_SUCCESS ||
+        clSetKernelArg(argmax_kernel_, 3, sizeof(int),    &offset_elements) != CL_SUCCESS) {
+        return false;
+    }
+    {
+        const size_t lws = 256;
+        const size_t gws = 256;
+        cl_event* evt = KernelProfiler::event_for("argmax_chained");
+        err = clEnqueueNDRangeKernel(queue, argmax_kernel_, 1, nullptr, &gws, &lws, 0, nullptr, evt);
+        if (err != CL_SUCCESS) return false;
+    }
+    return true;
 }
 
 // ── Decode fast path (OPTIONAL — single-token forward) ──────────────────
@@ -636,7 +714,80 @@ std::vector<int32_t> Model::generate(
         return ids;
     }
 
-    // Decode loop: each step processes ONE new token.
+    // Step 9 fast path: pipelined chained decode. Embedding reads its token
+    // directly from argmax_result_ (written by the previous step), and the
+    // host readback is async — we wait on iteration N's readback only after
+    // enqueueing iteration N+1's GPU work, hiding the readback latency
+    // behind the next forward's enqueue.
+    if (greedy_fast && max_new_tokens > 1) {
+        cl_command_queue queue = cl_ctx_.queue();
+        // Two-slot ping-pong host buffer + events for async readback. The
+        // value written by readback at slot s captures argmax_result_'s state
+        // at the time the readback was *enqueued* (in-order queue), which is
+        // immediately after the corresponding forward's argmax kernel.
+        int32_t host_int[2] = {0, 0};
+        cl_event readback_event[2] = {nullptr, nullptr};
+        bool slot_pending[2] = {false, false};
+        int prev_slot = -1;
+
+        bool eos_seen = false;
+        for (int i = 1; i < max_new_tokens && !eos_seen; i++) {
+            const int start_pos = (int)prompt_ids.size() + (i - 1);
+            const int cur_slot = i & 1;
+
+            if (!forward_argmax_greedy_chained_enqueue(start_pos)) {
+                NNOPT_ERROR("chained decode forward failed");
+                break;
+            }
+
+            // Async readback of the value just written by argmax.
+            cl_int rerr = clEnqueueReadBuffer(queue, argmax_result_, CL_FALSE, 0,
+                                              sizeof(int32_t), &host_int[cur_slot],
+                                              0, nullptr, &readback_event[cur_slot]);
+            if (rerr != CL_SUCCESS) {
+                NNOPT_ERROR_FMT("chained async readback enqueue failed (%d)", (int)rerr);
+                break;
+            }
+            slot_pending[cur_slot] = true;
+            // Make sure the GPU starts working — flush after enqueue.
+            clFlush(queue);
+
+            // Drain the previous iteration's int32: this is the token we just
+            // generated one step ago.
+            if (prev_slot >= 0 && slot_pending[prev_slot]) {
+                clWaitForEvents(1, &readback_event[prev_slot]);
+                clReleaseEvent(readback_event[prev_slot]);
+                readback_event[prev_slot] = nullptr;
+                slot_pending[prev_slot] = false;
+                int32_t t = host_int[prev_slot];
+                ids.push_back(t);
+                generated.push_back(t);
+                if (on_token) on_token(t);
+                if (sampler_config.eos_token_id >= 0 && t == sampler_config.eos_token_id) {
+                    eos_seen = true;
+                }
+            }
+            prev_slot = cur_slot;
+        }
+
+        // Drain the in-flight final readback.
+        if (prev_slot >= 0 && slot_pending[prev_slot]) {
+            clWaitForEvents(1, &readback_event[prev_slot]);
+            clReleaseEvent(readback_event[prev_slot]);
+            readback_event[prev_slot] = nullptr;
+            slot_pending[prev_slot] = false;
+            if (!eos_seen) {
+                int32_t t = host_int[prev_slot];
+                ids.push_back(t);
+                generated.push_back(t);
+                if (on_token) on_token(t);
+            }
+        }
+        NNOPT_CHECKPOINT("generate() complete (chained)");
+        return ids;
+    }
+
+    // Decode loop: each step processes ONE new token (non-greedy or 1-token).
     for (int i = 1; i < max_new_tokens; i++) {
         const int start_pos = (int)prompt_ids.size() + (i - 1);
         std::vector<int32_t> single = { next_token };

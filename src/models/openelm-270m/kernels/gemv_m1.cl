@@ -747,3 +747,380 @@ void gemv_m1_no4(
     STORE(out, n0 + tid, ls[tid * WG_SIZE]);
   }
 }
+
+// ───── Generic 4-output multi-output WITH FUSED RESIDUAL ADD ─────
+// Same structure as gemv_m1_no4 but writes hidden[n] = sum + hidden[n]
+// instead of out[n] = sum. Fuses the per-layer out_proj/proj_2 GEMV with
+// the residual element_add into a single launch + a single read+write of
+// the hidden buffer (vs. two reads + two writes in the un-fused path).
+//
+// Caller guarantees: M=1, K >= WG_SIZE, K % WG_SIZE == 0, N % 4 == 0.
+// hidden is read+write, sized N elements; caller populates it with the
+// residual-stream contents before calling.
+__kernel __attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
+void gemv_m1_no4_radd(
+    __global const storage_t* x,      // [K]
+    __global const storage_t* W,      // [N, K]
+    __global       storage_t* hidden, // [N] — read for residual, write sum+residual
+    const int K,
+    const int N) {
+  __local float ls[WG_SIZE * 4];
+
+  const int wg  = get_group_id(0);
+  const int tid = get_local_id(0);
+  const int n0  = wg * 4;
+  if (n0 >= N) return;
+
+  const int kp      = K / WG_SIZE;
+  const int k_start = tid * kp;
+  const int base0   = (n0 + 0) * K;
+  const int base1   = (n0 + 1) * K;
+  const int base2   = (n0 + 2) * K;
+  const int base3   = (n0 + 3) * K;
+
+  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+
+#ifdef USE_FP16
+  int j = 0;
+  for (; j + 3 < kp; j += 4) {
+    const int off = k_start + j;
+    float4 xv = vload_half4(0, x + off);
+    float4 w0 = vload_half4(0, W + base0 + off);
+    float4 w1 = vload_half4(0, W + base1 + off);
+    float4 w2 = vload_half4(0, W + base2 + off);
+    float4 w3 = vload_half4(0, W + base3 + off);
+    acc0 += dot(xv, w0);
+    acc1 += dot(xv, w1);
+    acc2 += dot(xv, w2);
+    acc3 += dot(xv, w3);
+  }
+  for (; j < kp; ++j) {
+    const int k = k_start + j;
+    float xv = LOAD(x, k);
+    acc0 += xv * LOAD(W, base0 + k);
+    acc1 += xv * LOAD(W, base1 + k);
+    acc2 += xv * LOAD(W, base2 + k);
+    acc3 += xv * LOAD(W, base3 + k);
+  }
+#else
+  for (int j = 0; j < kp; ++j) {
+    const int k = k_start + j;
+    float xv = LOAD(x, k);
+    acc0 += xv * LOAD(W, base0 + k);
+    acc1 += xv * LOAD(W, base1 + k);
+    acc2 += xv * LOAD(W, base2 + k);
+    acc3 += xv * LOAD(W, base3 + k);
+  }
+#endif
+
+  ls[tid + 0 * WG_SIZE] = acc0;
+  ls[tid + 1 * WG_SIZE] = acc1;
+  ls[tid + 2 * WG_SIZE] = acc2;
+  ls[tid + 3 * WG_SIZE] = acc3;
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
+    if (tid < s) {
+      ls[tid + 0 * WG_SIZE] += ls[tid + 0 * WG_SIZE + s];
+      ls[tid + 1 * WG_SIZE] += ls[tid + 1 * WG_SIZE + s];
+      ls[tid + 2 * WG_SIZE] += ls[tid + 2 * WG_SIZE + s];
+      ls[tid + 3 * WG_SIZE] += ls[tid + 3 * WG_SIZE + s];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+
+  // First 4 threads write the 4 outputs with fused residual add.
+  if (tid < 4) {
+    const int n = n0 + tid;
+    const float r = LOAD(hidden, n);
+    STORE(hidden, n, ls[tid * WG_SIZE] + r);
+  }
+}
+
+// ───── Specialized: K = 1280, 4 outputs per WG ─────
+// OpenELM-270M's hidden size is 1280, so K=1280 hits at qkv_proj (all
+// layers), proj_1 (all layers), late-layer out_proj, and lm_head — together
+// ~78% of decode-time GEMV bytes. Static unroll over 5 vec4 iterations
+// (1280 / (WG_SIZE * 4) = 5) lets the compiler hoist all base-pointer math
+// and pipeline the dot-products across the unrolled iterations.
+__kernel __attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
+void gemv_m1_k1280_no4(
+    __global const storage_t* x,    // [1280]
+    __global const storage_t* W,    // [N, 1280]
+    __global storage_t* out,        // [N]
+    const int N) {
+  __local float ls[WG_SIZE * 4];
+  const int wg  = get_group_id(0);
+  const int tid = get_local_id(0);
+  const int n0  = wg * 4;
+  if (n0 >= N) return;
+
+  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+
+#ifdef USE_FP16
+  const int base0 = (n0 + 0) * 1280;
+  const int base1 = (n0 + 1) * 1280;
+  const int base2 = (n0 + 2) * 1280;
+  const int base3 = (n0 + 3) * 1280;
+
+  #pragma unroll
+  for (int j = 0; j < 5; ++j) {
+    const int off = j * (WG_SIZE * 4) + tid * 4;
+    float4 xv = vload_half4(0, x + off);
+    float4 w0 = vload_half4(0, W + base0 + off);
+    float4 w1 = vload_half4(0, W + base1 + off);
+    float4 w2 = vload_half4(0, W + base2 + off);
+    float4 w3 = vload_half4(0, W + base3 + off);
+    acc0 += dot(xv, w0);
+    acc1 += dot(xv, w1);
+    acc2 += dot(xv, w2);
+    acc3 += dot(xv, w3);
+  }
+#else
+  for (int j = 0; j < 20; ++j) {
+    const int k = j * WG_SIZE + tid;
+    float xv = LOAD(x, k);
+    acc0 += xv * LOAD(W, (n0+0)*1280 + k);
+    acc1 += xv * LOAD(W, (n0+1)*1280 + k);
+    acc2 += xv * LOAD(W, (n0+2)*1280 + k);
+    acc3 += xv * LOAD(W, (n0+3)*1280 + k);
+  }
+#endif
+
+  ls[tid + 0 * WG_SIZE] = acc0;
+  ls[tid + 1 * WG_SIZE] = acc1;
+  ls[tid + 2 * WG_SIZE] = acc2;
+  ls[tid + 3 * WG_SIZE] = acc3;
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
+    if (tid < s) {
+      ls[tid + 0 * WG_SIZE] += ls[tid + 0 * WG_SIZE + s];
+      ls[tid + 1 * WG_SIZE] += ls[tid + 1 * WG_SIZE + s];
+      ls[tid + 2 * WG_SIZE] += ls[tid + 2 * WG_SIZE + s];
+      ls[tid + 3 * WG_SIZE] += ls[tid + 3 * WG_SIZE + s];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+
+  if (tid < 4) {
+    STORE(out, n0 + tid, ls[tid * WG_SIZE]);
+  }
+}
+
+// ───── Specialized: K = 1280, 4 outputs per WG, FUSED RESIDUAL ADD ─────
+// Same structure as gemv_m1_k1280_no4 but writes hidden[n] = sum + hidden[n].
+// Used at out_proj sites where K = QH * HEAD_DIM = 20 * 64 = 1280
+// (layers 12-15) and proj_2 sites where intermediate = 1280 (layer 2).
+__kernel __attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
+void gemv_m1_k1280_no4_radd(
+    __global const storage_t* x,      // [1280]
+    __global const storage_t* W,      // [N, 1280]
+    __global       storage_t* hidden, // [N] — read for residual, write sum+residual
+    const int N) {
+  __local float ls[WG_SIZE * 4];
+  const int wg  = get_group_id(0);
+  const int tid = get_local_id(0);
+  const int n0  = wg * 4;
+  if (n0 >= N) return;
+
+  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+
+#ifdef USE_FP16
+  const int base0 = (n0 + 0) * 1280;
+  const int base1 = (n0 + 1) * 1280;
+  const int base2 = (n0 + 2) * 1280;
+  const int base3 = (n0 + 3) * 1280;
+
+  #pragma unroll
+  for (int j = 0; j < 5; ++j) {
+    const int off = j * (WG_SIZE * 4) + tid * 4;
+    float4 xv = vload_half4(0, x + off);
+    float4 w0 = vload_half4(0, W + base0 + off);
+    float4 w1 = vload_half4(0, W + base1 + off);
+    float4 w2 = vload_half4(0, W + base2 + off);
+    float4 w3 = vload_half4(0, W + base3 + off);
+    acc0 += dot(xv, w0);
+    acc1 += dot(xv, w1);
+    acc2 += dot(xv, w2);
+    acc3 += dot(xv, w3);
+  }
+#else
+  for (int j = 0; j < 20; ++j) {
+    const int k = j * WG_SIZE + tid;
+    float xv = LOAD(x, k);
+    acc0 += xv * LOAD(W, (n0+0)*1280 + k);
+    acc1 += xv * LOAD(W, (n0+1)*1280 + k);
+    acc2 += xv * LOAD(W, (n0+2)*1280 + k);
+    acc3 += xv * LOAD(W, (n0+3)*1280 + k);
+  }
+#endif
+
+  ls[tid + 0 * WG_SIZE] = acc0;
+  ls[tid + 1 * WG_SIZE] = acc1;
+  ls[tid + 2 * WG_SIZE] = acc2;
+  ls[tid + 3 * WG_SIZE] = acc3;
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
+    if (tid < s) {
+      ls[tid + 0 * WG_SIZE] += ls[tid + 0 * WG_SIZE + s];
+      ls[tid + 1 * WG_SIZE] += ls[tid + 1 * WG_SIZE + s];
+      ls[tid + 2 * WG_SIZE] += ls[tid + 2 * WG_SIZE + s];
+      ls[tid + 3 * WG_SIZE] += ls[tid + 3 * WG_SIZE + s];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+
+  if (tid < 4) {
+    const int n = n0 + tid;
+    const float r = LOAD(hidden, n);
+    STORE(hidden, n, ls[tid * WG_SIZE] + r);
+  }
+}
+
+// ───── Generic 4-output, COALESCED vec4 (requires K % 256 == 0) ─────
+// Same as gemv_m1_no4 but with the K=768/1280/1536-style memory access
+// pattern: each thread reads vec4-strided across the K dim, with
+// stride = WG_SIZE * 4. Across threads in a warp, this yields coalesced
+// reads of 256 consecutive bytes per iteration. The original gemv_m1_no4
+// had each thread read kp consecutive elements (un-coalesced across the
+// warp), which on Adreno halved the achieved DRAM bandwidth.
+//
+// All OpenELM decode-path GEMV K values are multiples of 256:
+//   K ∈ {768, 1024, 1280, 1536, 1792, 2048, 2560, 2816, 3072, 3328,
+//        3584, 3840, 4352, 4608, 4864, 5120}.
+__kernel __attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
+void gemv_m1_no4_coalesced(
+    __global const storage_t* x,    // [K]
+    __global const storage_t* W,    // [N, K]
+    __global storage_t* out,        // [N]
+    const int K,
+    const int N) {
+  __local float ls[WG_SIZE * 4];
+  const int wg  = get_group_id(0);
+  const int tid = get_local_id(0);
+  const int n0  = wg * 4;
+  if (n0 >= N) return;
+
+  const int kpv = K / (WG_SIZE * 4);
+  const int base0 = (n0 + 0) * K;
+  const int base1 = (n0 + 1) * K;
+  const int base2 = (n0 + 2) * K;
+  const int base3 = (n0 + 3) * K;
+
+  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+
+#ifdef USE_FP16
+  for (int j = 0; j < kpv; ++j) {
+    const int off = j * (WG_SIZE * 4) + tid * 4;
+    float4 xv = vload_half4(0, x + off);
+    float4 w0 = vload_half4(0, W + base0 + off);
+    float4 w1 = vload_half4(0, W + base1 + off);
+    float4 w2 = vload_half4(0, W + base2 + off);
+    float4 w3 = vload_half4(0, W + base3 + off);
+    acc0 += dot(xv, w0);
+    acc1 += dot(xv, w1);
+    acc2 += dot(xv, w2);
+    acc3 += dot(xv, w3);
+  }
+#else
+  for (int j = 0; j < kpv * 4; ++j) {
+    const int k = j * WG_SIZE + tid;
+    float xv = LOAD(x, k);
+    acc0 += xv * LOAD(W, base0 + k);
+    acc1 += xv * LOAD(W, base1 + k);
+    acc2 += xv * LOAD(W, base2 + k);
+    acc3 += xv * LOAD(W, base3 + k);
+  }
+#endif
+
+  ls[tid + 0 * WG_SIZE] = acc0;
+  ls[tid + 1 * WG_SIZE] = acc1;
+  ls[tid + 2 * WG_SIZE] = acc2;
+  ls[tid + 3 * WG_SIZE] = acc3;
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
+    if (tid < s) {
+      ls[tid + 0 * WG_SIZE] += ls[tid + 0 * WG_SIZE + s];
+      ls[tid + 1 * WG_SIZE] += ls[tid + 1 * WG_SIZE + s];
+      ls[tid + 2 * WG_SIZE] += ls[tid + 2 * WG_SIZE + s];
+      ls[tid + 3 * WG_SIZE] += ls[tid + 3 * WG_SIZE + s];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+
+  if (tid < 4) {
+    STORE(out, n0 + tid, ls[tid * WG_SIZE]);
+  }
+}
+
+// ───── Generic 4-output, COALESCED, FUSED RESIDUAL ADD (K % 256 == 0) ─────
+__kernel __attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
+void gemv_m1_no4_radd_coalesced(
+    __global const storage_t* x,      // [K]
+    __global const storage_t* W,      // [N, K]
+    __global       storage_t* hidden, // [N]
+    const int K,
+    const int N) {
+  __local float ls[WG_SIZE * 4];
+  const int wg  = get_group_id(0);
+  const int tid = get_local_id(0);
+  const int n0  = wg * 4;
+  if (n0 >= N) return;
+
+  const int kpv = K / (WG_SIZE * 4);
+  const int base0 = (n0 + 0) * K;
+  const int base1 = (n0 + 1) * K;
+  const int base2 = (n0 + 2) * K;
+  const int base3 = (n0 + 3) * K;
+
+  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+
+#ifdef USE_FP16
+  for (int j = 0; j < kpv; ++j) {
+    const int off = j * (WG_SIZE * 4) + tid * 4;
+    float4 xv = vload_half4(0, x + off);
+    float4 w0 = vload_half4(0, W + base0 + off);
+    float4 w1 = vload_half4(0, W + base1 + off);
+    float4 w2 = vload_half4(0, W + base2 + off);
+    float4 w3 = vload_half4(0, W + base3 + off);
+    acc0 += dot(xv, w0);
+    acc1 += dot(xv, w1);
+    acc2 += dot(xv, w2);
+    acc3 += dot(xv, w3);
+  }
+#else
+  for (int j = 0; j < kpv * 4; ++j) {
+    const int k = j * WG_SIZE + tid;
+    float xv = LOAD(x, k);
+    acc0 += xv * LOAD(W, base0 + k);
+    acc1 += xv * LOAD(W, base1 + k);
+    acc2 += xv * LOAD(W, base2 + k);
+    acc3 += xv * LOAD(W, base3 + k);
+  }
+#endif
+
+  ls[tid + 0 * WG_SIZE] = acc0;
+  ls[tid + 1 * WG_SIZE] = acc1;
+  ls[tid + 2 * WG_SIZE] = acc2;
+  ls[tid + 3 * WG_SIZE] = acc3;
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
+    if (tid < s) {
+      ls[tid + 0 * WG_SIZE] += ls[tid + 0 * WG_SIZE + s];
+      ls[tid + 1 * WG_SIZE] += ls[tid + 1 * WG_SIZE + s];
+      ls[tid + 2 * WG_SIZE] += ls[tid + 2 * WG_SIZE + s];
+      ls[tid + 3 * WG_SIZE] += ls[tid + 3 * WG_SIZE + s];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+
+  if (tid < 4) {
+    const int n = n0 + tid;
+    const float r = LOAD(hidden, n);
+    STORE(hidden, n, ls[tid * WG_SIZE] + r);
+  }
+}

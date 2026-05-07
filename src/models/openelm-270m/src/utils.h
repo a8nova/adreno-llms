@@ -119,6 +119,25 @@ bool pytorch_linear(cl_command_queue queue,
                     cl_mem x, cl_mem W, cl_mem out);
 
 // ──────────────────────────────────────────────
+// pytorch_linear_radd: nn.Linear GEMM with FUSED RESIDUAL ADD
+// ──────────────────────────────────────────────
+// Computes: hidden[i] += x @ W[i]^T   (in-place; hidden is the residual stream)
+//
+// Mathematically equivalent to:
+//   pytorch_linear(queue, M=1, N, K, x, W, tmp);
+//   element_add_inplace(queue, ..., hidden, tmp, N);
+// but as a single launch + a single read+write of `hidden`. Eligible only at
+// M==1 with K%64==0 and N%4==0 (the gemv_m1_no4_radd kernel constraint). For
+// any other shape, returns false; caller falls back to pytorch_linear +
+// element_add_inplace.
+//
+// Use this at attn.out_proj and ffn.proj_2 — the two GEMV sites whose output
+// is immediately added to the residual stream.
+bool pytorch_linear_radd(cl_command_queue queue,
+                         int M, int N, int K,
+                         cl_mem x, cl_mem W, cl_mem hidden);
+
+// ──────────────────────────────────────────────
 // pytorch_conv1d: dtype-templated GEMM wrapper for HF Conv1D layout
 // ──────────────────────────────────────────────
 // Computes: out[M, N] = x[M, K] @ W[K, N]

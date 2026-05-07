@@ -1,11 +1,13 @@
 #include "utils.h"
 #include "debug_utils.h"   // NNOPT_ERROR_FMT — used by element_add / pytorch_linear / etc.
+#include "kernel_profiler.h"
 
 #include <clblast.h>       // clblast::Gemm — used by pytorch_linear (dtype-templated dispatch).
 
 #include <fstream>
 #include <sstream>
 #include <cstring>
+#include <cstdio>
 #include <algorithm>
 #include <numeric>
 #include <cstdint>
@@ -27,6 +29,13 @@
 static bool try_gemv_m1_fast_path(cl_command_queue queue,
                                   int N, int K,
                                   cl_mem x, cl_mem W, cl_mem out);
+
+// gemv_m1 fast path with FUSED RESIDUAL ADD. See pytorch_linear_radd().
+// Reads `hidden[n]`, computes the dot product, writes `hidden[n] = sum + r`.
+// Returns false if the K/N pair is not eligible (M=1 implied, K%64==0, N%4==0).
+static bool try_gemv_m1_radd_fast_path(cl_command_queue queue,
+                                       int N, int K,
+                                       cl_mem x, cl_mem W, cl_mem hidden);
 
 // ──────────────────────────────────────────────
 // IEEE 754 binary16 codec (host-side).
@@ -212,7 +221,8 @@ bool element_add_inplace(cl_command_queue queue, cl_program utils_program,
     err = clSetKernelArg(s_cached_kernel, 2, sizeof(int), &n_int);
     if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("element_add_inplace arg2: %d", err); return false; }
     size_t gws = n;
-    err = clEnqueueNDRangeKernel(queue, s_cached_kernel, 1, nullptr, &gws, nullptr, 0, nullptr, nullptr);
+    cl_event* evt = KernelProfiler::event_for("element_add_inplace");
+    err = clEnqueueNDRangeKernel(queue, s_cached_kernel, 1, nullptr, &gws, nullptr, 0, nullptr, evt);
     if (err != CL_SUCCESS) {
         NNOPT_ERROR_FMT("element_add_inplace: clEnqueueNDRangeKernel failed (%d)", err);
         return false;
@@ -254,7 +264,8 @@ cl_mem element_add(cl_command_queue queue, cl_program utils_program, cl_mem a, c
     clSetKernelArg(kernel, 2, sizeof(int), &n_int);
 
     size_t global_size = n;
-    err = clEnqueueNDRangeKernel(queue, kernel, 1, nullptr, &global_size, nullptr, 0, nullptr, nullptr);
+    cl_event* evt = KernelProfiler::event_for("element_add");
+    err = clEnqueueNDRangeKernel(queue, kernel, 1, nullptr, &global_size, nullptr, 0, nullptr, evt);
     if (err != CL_SUCCESS) {
         NNOPT_ERROR_FMT("element_add: clEnqueueNDRangeKernel failed (%d)", err);
     }
@@ -280,7 +291,8 @@ bool split_last_dim_2(cl_command_queue queue, cl_program utils_program,
     clSetKernelArg(kernel, 4, sizeof(int), &half_cols);
 
     size_t global_size = (size_t)rows * (size_t)half_cols;
-    err = clEnqueueNDRangeKernel(queue, kernel, 1, nullptr, &global_size, nullptr, 0, nullptr, nullptr);
+    cl_event* evt = KernelProfiler::event_for("split_last_dim_2");
+    err = clEnqueueNDRangeKernel(queue, kernel, 1, nullptr, &global_size, nullptr, 0, nullptr, evt);
     if (err != CL_SUCCESS) {
         NNOPT_ERROR_FMT("split_last_dim_2: clEnqueueNDRangeKernel failed (%d)", err);
         clReleaseKernel(kernel);
@@ -366,6 +378,15 @@ bool pytorch_linear(cl_command_queue queue,
     return true;
 }
 
+bool pytorch_linear_radd(cl_command_queue queue,
+                         int M, int N, int K,
+                         cl_mem x, cl_mem W, cl_mem hidden) {
+    // Eligibility: M=1, K%64==0, N%4==0. Anything else falls back to caller's
+    // pytorch_linear + element_add_inplace path.
+    if (M != 1 || K < 64 || (K % 64) != 0 || (N % 4) != 0) return false;
+    return try_gemv_m1_radd_fast_path(queue, N, K, x, W, hidden);
+}
+
 bool pytorch_conv1d(cl_command_queue queue,
                     int M, int N, int K,
                     cl_mem x, cl_mem W, cl_mem out) {
@@ -428,76 +449,93 @@ bool pytorch_conv1d(cl_command_queue queue,
 // ──────────────────────────────────────────────
 // gemv_m1 fast-path implementation. See declaration above pytorch_linear.
 // ──────────────────────────────────────────────
+// Shared program for all gemv_m1 kernels (fast-path + radd). Building the
+// program once per process eliminates a per-program-pair scheduling cost on
+// Adreno where switching kernel objects across cl_program boundaries
+// appears to flush some driver state.
+static cl_program s_gemv_program = nullptr;
+static bool s_gemv_init_failed = false;
+static cl_kernel s_k_768           = nullptr;
+static cl_kernel s_k_1536          = nullptr;
+static cl_kernel s_k_768_no4       = nullptr;
+static cl_kernel s_k_1280_no4      = nullptr;
+static cl_kernel s_k_1536_no4      = nullptr;
+static cl_kernel s_k_generic       = nullptr;
+static cl_kernel s_k_generic_no4   = nullptr;
+static cl_kernel s_k_generic_no4_coalesced = nullptr;
+static cl_kernel s_k_1280_no4_radd    = nullptr;
+static cl_kernel s_k_generic_no4_radd = nullptr;
+static cl_kernel s_k_generic_no4_radd_coalesced = nullptr;
+
+static bool ensure_gemv_program(cl_command_queue queue) {
+    if (s_gemv_init_failed) return false;
+    if (s_gemv_program) return true;
+
+    cl_context ctx = nullptr;
+    cl_device_id dev = nullptr;
+    clGetCommandQueueInfo(queue, CL_QUEUE_CONTEXT, sizeof(ctx), &ctx, nullptr);
+    clGetCommandQueueInfo(queue, CL_QUEUE_DEVICE, sizeof(dev), &dev, nullptr);
+    if (!ctx || !dev) { s_gemv_init_failed = true; return false; }
+
+    std::ifstream f("kernels/gemv_m1.cl");
+    if (!f.is_open()) {
+        NNOPT_ERROR("gemv_m1: cannot open kernels/gemv_m1.cl");
+        s_gemv_init_failed = true;
+        return false;
+    }
+    std::stringstream buf; buf << f.rdbuf();
+    std::string src = buf.str();
+    const char* src_ptr = src.c_str();
+    size_t src_len = src.size();
+
+    cl_int err = CL_SUCCESS;
+    s_gemv_program = clCreateProgramWithSource(ctx, 1, &src_ptr, &src_len, &err);
+    if (err != CL_SUCCESS || !s_gemv_program) {
+        NNOPT_ERROR_FMT("gemv_m1: clCreateProgramWithSource failed (%d)", (int)err);
+        s_gemv_init_failed = true;
+        return false;
+    }
+#ifdef NNOPT_USE_FP16
+    const char* opts = "-D USE_FP16=1";
+#else
+    const char* opts = "";
+#endif
+    err = clBuildProgram(s_gemv_program, 1, &dev, opts, nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        size_t log_size = 0;
+        clGetProgramBuildInfo(s_gemv_program, dev, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
+        std::vector<char> log(log_size + 1, 0);
+        clGetProgramBuildInfo(s_gemv_program, dev, CL_PROGRAM_BUILD_LOG, log_size, log.data(), nullptr);
+        NNOPT_ERROR_FMT("gemv_m1: build failed (%d): %s", (int)err, log.data());
+        clReleaseProgram(s_gemv_program);
+        s_gemv_program = nullptr;
+        s_gemv_init_failed = true;
+        return false;
+    }
+
+    s_k_768              = clCreateKernel(s_gemv_program, "gemv_m1_k768",       &err);
+    s_k_1536             = clCreateKernel(s_gemv_program, "gemv_m1_k1536",      &err);
+    s_k_768_no4          = clCreateKernel(s_gemv_program, "gemv_m1_k768_no4",   &err);
+    s_k_1280_no4         = clCreateKernel(s_gemv_program, "gemv_m1_k1280_no4",  &err);
+    s_k_1536_no4         = clCreateKernel(s_gemv_program, "gemv_m1_k1536_no4",  &err);
+    s_k_generic          = clCreateKernel(s_gemv_program, "gemv_m1",            &err);
+    s_k_generic_no4      = clCreateKernel(s_gemv_program, "gemv_m1_no4",        &err);
+    s_k_generic_no4_coalesced       = clCreateKernel(s_gemv_program, "gemv_m1_no4_coalesced",       &err);
+    s_k_1280_no4_radd    = clCreateKernel(s_gemv_program, "gemv_m1_k1280_no4_radd", &err);
+    s_k_generic_no4_radd = clCreateKernel(s_gemv_program, "gemv_m1_no4_radd",   &err);
+    s_k_generic_no4_radd_coalesced  = clCreateKernel(s_gemv_program, "gemv_m1_no4_radd_coalesced",  &err);
+    if (!s_k_generic || !s_k_generic_no4 || !s_k_generic_no4_radd) {
+        NNOPT_ERROR("gemv_m1: clCreateKernel for one of the generic kernels failed");
+        s_gemv_init_failed = true;
+        return false;
+    }
+    return true;
+}
+
 static bool try_gemv_m1_fast_path(cl_command_queue queue,
                                   int N, int K,
                                   cl_mem x, cl_mem W, cl_mem out) {
-    static cl_program s_program = nullptr;
-    static cl_kernel s_k_768       = nullptr;
-    static cl_kernel s_k_1536      = nullptr;
-    static cl_kernel s_k_768_no4   = nullptr;
-    static cl_kernel s_k_1536_no4  = nullptr;
-    static cl_kernel s_k_generic   = nullptr;
-    static cl_kernel s_k_generic_no4 = nullptr;
-    static bool s_init_failed = false;
-    if (s_init_failed) return false;
-
-    if (!s_program) {
-        // Bootstrap context+device from the queue (pytorch_linear's signature
-        // doesn't pass an OpenCLContext handle, so we self-discover here once).
-        cl_context ctx = nullptr;
-        cl_device_id dev = nullptr;
-        clGetCommandQueueInfo(queue, CL_QUEUE_CONTEXT, sizeof(ctx), &ctx, nullptr);
-        clGetCommandQueueInfo(queue, CL_QUEUE_DEVICE, sizeof(dev), &dev, nullptr);
-        if (!ctx || !dev) { s_init_failed = true; return false; }
-
-        std::ifstream f("kernels/gemv_m1.cl");
-        if (!f.is_open()) {
-            NNOPT_ERROR("gemv_m1: cannot open kernels/gemv_m1.cl");
-            s_init_failed = true;
-            return false;
-        }
-        std::stringstream buf; buf << f.rdbuf();
-        std::string src = buf.str();
-        const char* src_ptr = src.c_str();
-        size_t src_len = src.size();
-
-        cl_int err = CL_SUCCESS;
-        s_program = clCreateProgramWithSource(ctx, 1, &src_ptr, &src_len, &err);
-        if (err != CL_SUCCESS || !s_program) {
-            NNOPT_ERROR_FMT("gemv_m1: clCreateProgramWithSource failed (%d)", (int)err);
-            s_init_failed = true;
-            return false;
-        }
-#ifdef NNOPT_USE_FP16
-        const char* opts = "-D USE_FP16=1";
-#else
-        const char* opts = "";
-#endif
-        err = clBuildProgram(s_program, 1, &dev, opts, nullptr, nullptr);
-        if (err != CL_SUCCESS) {
-            size_t log_size = 0;
-            clGetProgramBuildInfo(s_program, dev, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
-            std::vector<char> log(log_size + 1, 0);
-            clGetProgramBuildInfo(s_program, dev, CL_PROGRAM_BUILD_LOG, log_size, log.data(), nullptr);
-            NNOPT_ERROR_FMT("gemv_m1: build failed (%d): %s", (int)err, log.data());
-            clReleaseProgram(s_program);
-            s_program = nullptr;
-            s_init_failed = true;
-            return false;
-        }
-
-        s_k_768          = clCreateKernel(s_program, "gemv_m1_k768",      &err);
-        s_k_1536         = clCreateKernel(s_program, "gemv_m1_k1536",     &err);
-        s_k_768_no4      = clCreateKernel(s_program, "gemv_m1_k768_no4",  &err);
-        s_k_1536_no4     = clCreateKernel(s_program, "gemv_m1_k1536_no4", &err);
-        s_k_generic      = clCreateKernel(s_program, "gemv_m1",           &err);
-        s_k_generic_no4  = clCreateKernel(s_program, "gemv_m1_no4",       &err);
-        if (!s_k_generic || !s_k_generic_no4) {
-            NNOPT_ERROR("gemv_m1: clCreateKernel for generic kernels failed");
-            s_init_failed = true;
-            return false;
-        }
-    }
+    if (!ensure_gemv_program(queue)) return false;
 
     // Pick the most specialized kernel for this (K, N) pair.
     //   K=768  with N%4==0 → gemv_m1_k768_no4
@@ -509,10 +547,12 @@ static bool try_gemv_m1_fast_path(cl_command_queue queue,
     bool is_no4 = (N % 4 == 0);
     bool needs_K_arg = false;
 
-    if (K == 768  && is_no4) { kernel = s_k_768_no4;  }
+    if (K == 768  && is_no4)      { kernel = s_k_768_no4;  }
+    else if (K == 1280 && is_no4) { kernel = s_k_1280_no4; }
     else if (K == 1536 && is_no4) { kernel = s_k_1536_no4; }
     else if (K == 768)            { kernel = s_k_768;      }
     else if (K == 1536)           { kernel = s_k_1536;     }
+    else if (is_no4 && (K % 256 == 0)) { kernel = s_k_generic_no4_coalesced; needs_K_arg = true; }
     else if (is_no4)              { kernel = s_k_generic_no4; needs_K_arg = true; }
     else                          { kernel = s_k_generic;     needs_K_arg = true; }
 
@@ -532,14 +572,75 @@ static bool try_gemv_m1_fast_path(cl_command_queue queue,
 
     constexpr size_t WG = 64;
     size_t gws, lws = WG;
-    if (kernel == s_k_768_no4 || kernel == s_k_1536_no4 || kernel == s_k_generic_no4) {
+    if (kernel == s_k_768_no4 || kernel == s_k_1280_no4 || kernel == s_k_1536_no4 ||
+        kernel == s_k_generic_no4 || kernel == s_k_generic_no4_coalesced) {
         gws = (size_t)(N / 4) * WG;
     } else {
         gws = (size_t)N * WG;
     }
-    err = clEnqueueNDRangeKernel(queue, kernel, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+    char prof_label[48];
+    std::snprintf(prof_label, sizeof(prof_label), "gemv_m1_K%d_N%d", K, N);
+    cl_event* evt = KernelProfiler::event_for(prof_label);
+    err = clEnqueueNDRangeKernel(queue, kernel, 1, nullptr, &gws, &lws, 0, nullptr, evt);
     if (err != CL_SUCCESS) {
         NNOPT_ERROR_FMT("gemv_m1: clEnqueueNDRangeKernel failed (%d) (K=%d N=%d)", (int)err, K, N);
+        return false;
+    }
+    NNOPT_DEBUG_SYNC(queue);
+    return true;
+}
+
+// ──────────────────────────────────────────────
+// gemv_m1 fused-residual-add fast-path implementation. Shares the same
+// cl_program as try_gemv_m1_fast_path so successive launches don't bounce
+// across program objects (Adreno appears to flush some scheduler state
+// when alternating cl_kernels from different programs).
+// ──────────────────────────────────────────────
+static bool try_gemv_m1_radd_fast_path(cl_command_queue queue,
+                                       int N, int K,
+                                       cl_mem x, cl_mem W, cl_mem hidden) {
+    if (!ensure_gemv_program(queue)) return false;
+
+    // Pick the K-specialized radd variant when available; otherwise prefer
+    // the coalesced generic when K%256==0; fall back to the un-coalesced
+    // generic only for K%64==0 && K%256!=0 (no decode-path K hits this on
+    // OpenELM, but keep the path for safety).
+    cl_kernel kernel = nullptr;
+    bool needs_K_arg = false;
+    if (K == 1280) {
+        kernel = s_k_1280_no4_radd;
+    } else if (K % 256 == 0) {
+        kernel = s_k_generic_no4_radd_coalesced;
+        needs_K_arg = true;
+    } else {
+        kernel = s_k_generic_no4_radd;
+        needs_K_arg = true;
+    }
+
+    cl_int err = CL_SUCCESS;
+    cl_uint a = 0;
+    err |= clSetKernelArg(kernel, a++, sizeof(cl_mem), &x);
+    err |= clSetKernelArg(kernel, a++, sizeof(cl_mem), &W);
+    err |= clSetKernelArg(kernel, a++, sizeof(cl_mem), &hidden);
+    if (needs_K_arg) {
+        err |= clSetKernelArg(kernel, a++, sizeof(int), &K);
+    }
+    err |= clSetKernelArg(kernel, a++, sizeof(int), &N);
+    if (err != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("gemv_m1_radd: clSetKernelArg failed (%d)", (int)err);
+        return false;
+    }
+
+    constexpr size_t WG = 64;
+    const size_t gws = (size_t)(N / 4) * WG;
+    const size_t lws = WG;
+
+    char prof_label[64];
+    std::snprintf(prof_label, sizeof(prof_label), "gemv_m1_K%d_N%d_radd", K, N);
+    cl_event* evt = KernelProfiler::event_for(prof_label);
+    err = clEnqueueNDRangeKernel(queue, kernel, 1, nullptr, &gws, &lws, 0, nullptr, evt);
+    if (err != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("gemv_m1_radd: clEnqueueNDRangeKernel failed (%d) (K=%d N=%d)", (int)err, K, N);
         return false;
     }
     NNOPT_DEBUG_SYNC(queue);

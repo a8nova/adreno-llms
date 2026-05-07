@@ -90,6 +90,7 @@ if [ -n "${NNOPT_RECORD:-}" ]; then EXTRA_ENV="$EXTRA_ENV NNOPT_RECORD=$NNOPT_RE
 if [ -n "${NNOPT_PROFILE:-}" ]; then EXTRA_ENV="$EXTRA_ENV NNOPT_PROFILE=$NNOPT_PROFILE"; fi
 if [ -n "${NNOPT_LMHEAD_BUFFER:-}" ]; then EXTRA_ENV="$EXTRA_ENV NNOPT_LMHEAD_BUFFER=$NNOPT_LMHEAD_BUFFER"; fi
 if [ -n "${NNOPT_GEMV_SG:-}" ]; then EXTRA_ENV="$EXTRA_ENV NNOPT_GEMV_SG=$NNOPT_GEMV_SG"; fi
+if [ -n "${NNOPT_NO_CHAIN:-}" ]; then EXTRA_ENV="$EXTRA_ENV NNOPT_NO_CHAIN=$NNOPT_NO_CHAIN"; fi
 
 # Execute on device — let stdout and stderr flow through adb to host.
 # adb shell merges remote stdout+stderr into host stdout. The Infer tool

@@ -84,7 +84,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "Failed to initialize OpenCL" << std::endl;
         return 1;
     }
-    std::cerr << "Device: " << cl_ctx.device_name() << std::endl;
+    std::cerr << "Device: " << cl_ctx.device_description() << std::endl;
     NNOPT_CHECKPOINT("OpenCL initialized");
 
     // Load tokenizer (still needed for decoding output)
@@ -269,8 +269,6 @@ int main(int argc, char* argv[]) {
 
     // Generate
     NNOPT_CHECKPOINT("starting generation");
-    Timer timer;
-    timer.start();
 
     // Prefill clock starts now — excludes tokenize (see comment block above the
     // mark_inference_start() call for the full metric contract).
@@ -310,7 +308,6 @@ int main(int argc, char* argv[]) {
         std::fflush(stdout);
     }
     bench.mark_end();
-    double elapsed = timer.elapsed_ms();
     int gen_tokens = output_ids.size() - input_ids.size();
     NNOPT_CHECKPOINT("generation complete");
 
@@ -339,11 +336,6 @@ int main(int argc, char* argv[]) {
         }
         std::cout << std::endl;
     }
-
-    // Stats (human-readable summary — kept for backward compat with old parsers)
-    std::cerr << "Generated " << gen_tokens << " tokens in "
-              << elapsed << " ms ("
-              << (gen_tokens * 1000.0 / elapsed) << " tokens/sec)" << std::endl;
 
     // Structured baseline metrics for FinalizePort / README generation.
     bench.print_summary((int)input_ids.size(), gen_tokens);

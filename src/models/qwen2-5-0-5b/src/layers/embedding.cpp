@@ -48,6 +48,35 @@ bool Embedding::set_decode_token(cl_command_queue queue, int32_t token_id) {
     return true;
 }
 
+// Chained-decode entry. Copies one int32 from device buffer (typically
+// argmax_out_buf_ from the previous step) into the persistent
+// ids_buf_decode_, then dispatches the standard embedding kernel.
+// The clEnqueueCopyBuffer is in-order behind the previous step's argmax
+// kernel on the same queue, so no host barrier is needed — the new token
+// id arrives in ids_buf_decode_ exactly when this iteration's embedding
+// kernel begins.
+bool Embedding::forward_into_decode_from_device_token(
+    cl_command_queue queue, cl_mem token_ids_dev,
+    size_t dev_offset_bytes, cl_mem dest, int start_pos) {
+    cl_int err = CL_SUCCESS;
+    if (!ids_buf_decode_) {
+        ids_buf_decode_ = clCreateBuffer(cl_ctx_.context(), CL_MEM_READ_WRITE,
+                                          sizeof(int32_t), nullptr, &err);
+        if (err != CL_SUCCESS || !ids_buf_decode_) {
+            NNOPT_ERROR_FMT("Embedding::forward_into_decode_from_device_token: alloc failed: %d", (int)err);
+            return false;
+        }
+    }
+    err = clEnqueueCopyBuffer(queue, token_ids_dev, ids_buf_decode_,
+                              dev_offset_bytes, 0, sizeof(int32_t),
+                              0, nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("Embedding::forward_into_decode_from_device_token: copy failed: %d", (int)err);
+        return false;
+    }
+    return forward_into_decode(queue, dest, start_pos);
+}
+
 // Recordable kernel-only dispatch. Caller owns dest (Model's persistent
 // hidden buffer). Same arg layout as forward(); no clCreateBuffer here.
 bool Embedding::forward_into_decode(cl_command_queue queue, cl_mem dest, int start_pos) {

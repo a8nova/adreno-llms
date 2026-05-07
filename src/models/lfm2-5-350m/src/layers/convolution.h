@@ -32,6 +32,7 @@ private:
   cl_kernel update_cache_kernel_ = nullptr;       // update ring/shift cache
   cl_kernel elem_mul2_kernel_ = nullptr;          // Y = C * conv_out
   cl_kernel copy_transpose_back_kernel_ = nullptr; // [hidden, seq] -> [seq, hidden]
+  cl_kernel block_decode_kernel_ = nullptr;        // fused per-channel kernel for seq_len==1
 
   // persistent conv state cache: [hidden, L_cache-1]
   cl_mem conv_state_ = nullptr;

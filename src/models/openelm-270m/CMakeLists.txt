@@ -191,6 +191,7 @@ set(SOURCES
     src/weights.cpp
     src/tokenizer.cpp
     src/utils.cpp
+    src/kernel_profiler.cpp
     ${LAYER_SOURCES}
 )
 

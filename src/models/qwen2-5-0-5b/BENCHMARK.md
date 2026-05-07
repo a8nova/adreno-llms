@@ -710,3 +710,112 @@ Extension confirmed present (`cl_qcom_vector_image_ops` ✓). `qcom_read_imagef_
 ### G — W8A16 INT8 weight quantization [~+1.8–2×]
 
 Halve weight bandwidth: quantize to int8 (1 byte vs 2 for fp16), store per-channel scale `float[N]`. GEMV inner loop: `uchar4` → `float4` → FMA. Bandwidth ceiling doubles from ~14.0 to ~29.8 GB/s effective. Predicted landing: 14–16 tok/s. Requires `cl_qcom_dot_product8` (confirmed available) or software int8×fp16 multiply. Project rule change needed (deferred per prior session).
+
+---
+
+## Step 17 — Chained cl_mem decode + ping-pong async readback — MEASURED, SHIPPED (2026-05-07)
+
+**Hypothesis (from root README line 31):** OpenELM-270M shipped this technique for **+1.38× (10.59 → 14.62 tok/s)** on the same Adreno 618 device. Qwen2.5-0.5B was running the same pattern as pre-chained openelm: every decode step ran `forward_greedy(host_token_id)` which (a) host-uploads the new token id via `clEnqueueWriteBuffer` and (b) blocks on a synchronous `clEnqueueReadBuffer(CL_TRUE)` of the int32 argmax result before the next step's enqueue can begin. Both directions of the host roundtrip serialize the GPU.
+
+**Implementation:**
+1. `Embedding::forward_into_decode_from_device_token(queue, token_dev, dev_offset, dest, start_pos)` — single `clEnqueueCopyBuffer` from `argmax_out_buf_` (or any device int32) into the persistent `ids_buf_decode_`, then dispatches the existing embedding kernel. No host roundtrip.
+2. `Model::forward_chained_enqueue(start_pos)` — non-recording layer pipeline (24 layers + final_norm + lm_head + argmax) that reads its input token from `argmax_out_buf_` and writes the new token back to `argmax_out_buf_`. **No synchronous readback at the end** — the produced token sits in device memory until the next step's embedding picks it up.
+3. `Model::generate` chained loop with **2-slot ping-pong async readback**: the first decode step uses `forward_greedy` (which seeds `argmax_out_buf_` and yields the first token via its existing sync readback); subsequent steps enqueue `forward_chained_enqueue` then `clEnqueueReadBuffer(CL_FALSE, &event[slot])` for the int32. The next iteration's enqueue runs while the previous slot's readback drains in the background. Token N is consumed (callback + eos check) only after iteration N+1 has been enqueued.
+
+Disabled when `NNOPT_RECORD=1` (recording path uses its own dispatch) or `NNOPT_NO_CHAIN=1` (A/B knob).
+
+**Same-session A/B (canonical greedy protocol — `--token-ids reference/test_input_ids.bin --temperature 0 --seed 42`, 32-tok decode)**:
+
+| Path | tok/s (3-run runs) | Median |
+|------|--------------------|-------:|
+| `NNOPT_NO_CHAIN=1` (forward_greedy, was the prior baseline) | 8.59, 8.55, 9.04 | **8.59** |
+| chained decode (default) | 10.22, 10.25, 10.30 | **10.25** |
+
+**Gain: +19.3%** (8.59 → 10.25 tok/s) on the SAME binary, SAME run, SAME prompt — only the env knob differs. Closes the wall-vs-GPU gap from ~38 ms/token to ~6 ms/token.
+
+**Greedy token correctness**: first 7 generated tokens against `reference/reference_tokens.json` golden:
+> `[16, 15, 339, 6422, 315, 279, 2906]` → "10th floor of the school" — bit-identical match.
+
+**Per-kernel profile (chained, 32 tokens, NNOPT_PROFILE=1)**:
+
+| Kernel | Calls | Total ms | Avg µs | % |
+|--------|------:|---------:|-------:|--:|
+| gemv_m1_k896_no4_img | 4774 | 2282.2 | 478 | 76.8% |
+| gemv_m1_k4864_no4_img | 744 | 526.3 | 707 | 17.7% |
+| All aux kernels combined | — | 164.8 | — | 5.5% |
+| **Total GPU** | — | **2973.5** | — | — |
+
+Per-token: 92.9 ms GPU vs 98.7 ms wall = **6 ms host gap** (down from ~38 ms before chaining).
+
+**Effective BW: 942 MB / 98.7 ms = 9.54 GB/s = 68.2% of the 14.0 GB/s practical ceiling** (was 60.5% at Step 14's 9.02 tok/s). Per-kernel GEMVs are at ~10.1 GB/s = 72% of ceiling — already near per-kernel saturation, so further wall-clock wins must come from launch consolidation (fused QKV) or kernel fusion.
+
+### Files modified (Step 17)
+- `src/layers/embedding.h`, `src/layers/embedding.cpp` — added `forward_into_decode_from_device_token`
+- `src/model.h` — added `forward_chained_enqueue(start_pos)` and `argmax_result_buffer()` accessor
+- `src/model.cpp` — implemented `forward_chained_enqueue` (mirror of forward_greedy non-recording, no readback) + chained-loop branch in `generate()` with 2-slot ping-pong async readback
+- `scripts/run_android.sh` — forwards `NNOPT_NO_CHAIN` for A/B
+
+### Next steps
+H. ~~**Fused QKV**~~ — **LANDED in Step 18 below.**
+I. **Cross-iteration overlap**: with the chained loop in place, async readback already overlaps. Investigate whether enqueuing 2-3 forward steps before flushing further hides driver overhead.
+J. **Test on warm thermal**: today's session-to-session variance was ±20% wall-clock at fp16. A controlled cool-down pass between A/B runs would tighten the measurement.
+
+---
+
+## Step 18 — Fused QKV projection (stacked weight at init) — MEASURED, SHIPPED (2026-05-07)
+
+**Hypothesis (BENCHMARK.md Step C):** Three separate GEMVs (q_proj, k_proj, v_proj) + three separate bias_adds = 6 dispatches per layer × 24 layers = 144 dispatches/token JUST for QKV. Fusing them into a single GEMV with N=Q_DIM+2*KV_DIM=1152 + a single bias_add cuts that to 48 dispatches/token (saves 96 launches/token).
+
+**Implementation** (single edit in `src/layers/attention.{h,cpp}`):
+- At `set_weights()` time: allocate stacked weight `wqkv_` shape [Q_DIM+2*KV_DIM, H] = [1152, 896] and stacked bias `bqkv_` shape [1152]. Populate via 6 `clEnqueueCopyBuffer` calls — one-time cost at model init.
+- At decode (`seq_q == 1`): allocate `buf_qkv_` [1152] + sub-buffers `sub_q_qkv_`/`sub_k_qkv_`/`sub_v_qkv_` carving it at byte offsets `{0, Q_DIM*2, (Q_DIM+KV_DIM)*2}` (multiples of 128 ✓ — Adreno alignment). Dispatch one `pytorch_linear(seq_q=1, N=1152, K=896, hidden, wqkv_, buf_qkv_)` (routes through the existing `gemv_m1_k896_no4_img` image2d kernel — no new kernel needed!) plus one `bias_add(buf_qkv_, bqkv_, 1, 1152)`. Then `q = sub_q_qkv_; k = sub_k_qkv_; v = sub_v_qkv_;` and downstream RoPE / kv_write / scores / attn_out treat them as before — sub-buffers transparently slice the fused output.
+- Prefill (`seq_q > 1`) keeps the unfused 3-call path (CLBlast HGemm doesn't benefit).
+
+**Same-session A/B (canonical greedy, 32-tok decode, 5 runs each)**:
+
+| Path | runs | Median |
+|------|------|-------:|
+| `NNOPT_NO_CHAIN=1` (forward_greedy, no fused QKV) | 8.59, 8.55, 9.04 | **8.59** (today's "old" baseline) |
+| chained decode only | 10.22, 10.25, 10.30 | **10.25** |
+| **chained + fused QKV (default)** | 10.41, 10.33, 10.41, 10.42, 10.32 | **10.41** |
+
+**Step 18 alone: +1.6% over Step 17 (chained-only).**
+**Cumulative Step 17 + 18: +21.2%** (8.59 → 10.41 tok/s).
+**= 69.9% of the 14.0 GB/s practical fp16 ceiling** (was 60.5% pre-Step-17).
+
+**Greedy token correctness**: same first 7 generated tokens against `reference/reference_tokens.json`:
+> `[16, 15, 339, 6422, 315, 279, 2906]` — bit-identical match.
+
+**Per-kernel profile (fused QKV + chained, 32 tokens)**:
+
+| Kernel | Calls | Δ vs Step 17 | Total ms | Avg µs |
+|--------|------:|-------------:|---------:|-------:|
+| gemv_m1_k896_no4_img | 3286 | **−1488** (2 fewer per layer) | 2257 | 687 |
+| gemv_m1_k4864_no4_img | 744 | 0 | 527 | 708 |
+| bias_add_rowmajor | 744 | **−1488** (2 fewer per layer) | 6.0 | 8.1 |
+| All aux kernels combined | — | — | ~150 | — |
+| **Total GPU** | — | — | **2940** | — |
+
+Per-token: 91.9 ms GPU, 96.1 ms wall = **4.2 ms host gap** (was 6 ms post-chaining, 38 ms pre-chaining).
+
+The fused GEMV is slower per-call (687 µs vs 478 µs) because N=1152 > N=896, but the 2-fewer launches per layer × 24 layers more than compensates. Total k896 GEMV time actually ↓ 25 ms across 32 tokens.
+
+### Files modified (Step 18)
+- `src/layers/attention.h` — added `wqkv_`, `bqkv_`, `buf_qkv_`, `sub_q/k/v_qkv_`, `qkv_fused_ok_` members
+- `src/layers/attention.cpp` — populate `wqkv_/bqkv_` at `set_weights()` via 6 `clEnqueueCopyBuffer`; lazy-allocate `buf_qkv_` + sub-buffers at first decode forward; gate the unfused 3-call path behind `if (!qkv_done)`; add cleanup in dtor
+
+### Cumulative summary (Steps 0 → 18, fp16 only)
+
+| Step | Decode tok/s | × cumulative | Notes |
+|------|-------------:|-------------:|-------|
+| 0  (release fp16 baseline)         | 0.640  | 1.00× | CLBlast HGemm everywhere |
+| 1  (custom gemv_m1)                | 4.46   | 6.97× | replaced HGemm at all M=1 sites |
+| 2  (no4 multi-output GEMV)         | 6.86   | 10.7× | 4 outputs per WG |
+| 6  (binary cache + fast-relaxed)   | 7.11   | 11.1× | TTFT fixed |
+| 8  (image2d weights)               | 7.63   | 11.9× | Adreno texture cache |
+| 9  (tiled image2d for lm_head)     | 7.84   | 12.3× | 10 tiles, lm_head joins texture path |
+| 14 (compile-unit cleanup)          | 9.02   | 14.1× | dead-code removal recovered compiler register pressure |
+| **17 (chained cl_mem decode)**     | **~10.13** | **~15.8×** | host roundtrip eliminated, ping-pong async readback |
+| **18 (fused QKV)**                 | **10.41**  | **16.3×** | 96 launches/token saved |
+
+**Effective BW: 942 MB / 96.1 ms = 9.80 GB/s = 70.0% of 14.0 GB/s ceiling.** Per-kernel GEMVs are now near per-kernel saturation; further fp16 wall-clock wins must come from kernel fusion (norm+matmul, gate+up+silu) or texture-cache wider reads (`cl_qcom_vector_image_ops`). Past 70% utilization at fp16 is approaching the diminishing-returns wall — int8 (deferred) is the next physical lever.
