@@ -24,6 +24,7 @@ Convolution::~Convolution() {
   if (update_cache_kernel_) clReleaseKernel(update_cache_kernel_);
   if (elem_mul2_kernel_) clReleaseKernel(elem_mul2_kernel_);
   if (copy_transpose_back_kernel_) clReleaseKernel(copy_transpose_back_kernel_);
+  if (block_decode_kernel_) clReleaseKernel(block_decode_kernel_);
 
   if (conv_state_) clReleaseMemObject(conv_state_);
 
@@ -147,6 +148,11 @@ bool Convolution::initialize() {
     NNOPT_ERROR_FMT("Convolution[%d]: clCreateKernel(conv_copy_transpose_back) failed: %d", layer_idx_, (int)err);
     return false;
   }
+  block_decode_kernel_ = clCreateKernel(program_, "conv_block_decode", &err);
+  if (err != CL_SUCCESS || !block_decode_kernel_) {
+    NNOPT_ERROR_FMT("Convolution[%d]: clCreateKernel(conv_block_decode) failed: %d", layer_idx_, (int)err);
+    return false;
+  }
 
   // conv_state_ stores last (L-1) Bx values for each channel.
   // Layout: [hidden, L-1]
@@ -191,6 +197,36 @@ cl_mem Convolution::forward(cl_command_queue queue, cl_mem hidden_states, int se
 
   // 1) in_proj: [seq,H] -> [seq,3H]  (writes buf_in_proj_)
   pytorch_linear(queue, seq_len, 3 * H, H, hidden_states, in_proj_w_, buf_in_proj_);
+
+  // ── Decode fast path (seq_len == 1): one fused kernel collapses the next
+  // 7 launches (transposes are no-ops at S=1; split / Bx-mul / conv1d /
+  // state-update / mul-by-C all reduce to per-channel work). Keeps prefill
+  // and any seq_q>1 call on the canonical multi-launch path below for
+  // correctness.
+  if (seq_len == 1 && conv_state_ && (l_cache_ - 1) > 0) {
+    cl_int e = CL_SUCCESS;
+    int H_arg = H;
+    int L_arg = l_cache_;
+    e  = clSetKernelArg(block_decode_kernel_, 0, sizeof(cl_mem), &buf_in_proj_);
+    e |= clSetKernelArg(block_decode_kernel_, 1, sizeof(cl_mem), &conv_w_);
+    e |= clSetKernelArg(block_decode_kernel_, 2, sizeof(cl_mem), &conv_state_);
+    e |= clSetKernelArg(block_decode_kernel_, 3, sizeof(cl_mem), &buf_y_seq_);
+    e |= clSetKernelArg(block_decode_kernel_, 4, sizeof(int),    &H_arg);
+    e |= clSetKernelArg(block_decode_kernel_, 5, sizeof(int),    &L_arg);
+    if (e != CL_SUCCESS) { NNOPT_ERROR_FMT("Convolution[%d]: setArgs(block_decode): %d", layer_idx_, e); return nullptr; }
+    const size_t WG = 64;
+    size_t gws = (size_t)((H + WG - 1) / WG) * WG;  // round-up to lws multiple
+    size_t lws = WG;
+    e = clEnqueueNDRangeKernel(queue, block_decode_kernel_, 1, nullptr, &gws, &lws, 0, nullptr,
+                               KernelProfiler::event_for("conv_block_decode"));
+    if (e != CL_SUCCESS) { NNOPT_ERROR_FMT("Convolution[%d]: dispatch(block_decode): %d", layer_idx_, e); return nullptr; }
+
+    // out_proj: buf_y_seq_ -> buf_out_
+    if (!pytorch_linear(queue, seq_len, H, H, buf_y_seq_, out_proj_w_, buf_out_)) return nullptr;
+    NNOPT_LAYER_CHECK_FMT("conv_%d", layer_idx_, queue, buf_out_, (size_t)seq_len * (size_t)H);
+    (void)start_pos;
+    return buf_out_;
+  }
 
   // 2) transpose buf_in_proj_ -> buf_in_proj_T_: [3H, seq]
   {

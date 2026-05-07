@@ -55,6 +55,7 @@ private:
     cl_kernel scores_kernel_ = nullptr;
     cl_kernel softmax_kernel_ = nullptr;
     cl_kernel out_kernel_ = nullptr;
+    cl_kernel kv_write_kernel_ = nullptr;  // decode-only NDRange replacement for KV-cache copy
 
     // Per-head RMSNorm for query/key (Lfm2 q_layernorm/k_layernorm,
     // applied BEFORE RoPE on the head_dim axis).

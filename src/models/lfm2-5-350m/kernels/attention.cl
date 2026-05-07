@@ -160,3 +160,21 @@ __kernel void gqa_attn_out(
   STORE(out, out_idx + 3, acc3);
 #endif
 }
+
+
+// kv_write — single-row append into the persistent KV cache. Replaces the
+// non-recordable clEnqueueCopyBuffer used in attention.cpp's decode path so
+// the entire forward pass can be captured by cl_qcom_recordable_queues.
+// Only NDRangeKernel is recordable per Snapdragon Programming Guide §9.1.3.
+//
+// One work-item per element in the row. Launch with gws=kv_dim, lws=64
+// (kv_dim is a multiple of 64 in LFM2 — KVH*D = 8*64 = 512).
+__kernel void kv_write(
+    __global const storage_t* src,
+    __global storage_t* cache,
+    const int start_pos,
+    const int kv_dim) {
+  const int gid = (int)get_global_id(0);
+  if (gid >= kv_dim) return;
+  STORE(cache, start_pos * kv_dim + gid, LOAD(src, gid));
+}

@@ -43,7 +43,7 @@ Decode tok/s = 5-run warm median (OpenELM-270M is 10-run), fp16, greedy, 32-toke
 | [Mamba-130M](src/models/mamba-130m/) | 130M | SSM | Razr 2020 (Adreno 618) | 22.15 | 1.60 | No attention |
 | [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | 135M | LLaMA + GQA | Razr 2020 (Adreno 618) | 23.65 | 1.53 | Instruct-tuned; 61% of ceiling |
 | [OpenELM-270M](src/models/openelm-270m/) | 270M | LLaMA-style + tied lm_head | Razr 2020 (Adreno 618) | **14.81** (32 tok) / **15.22** (40 tok) | 1.93 | **3.31× over prior 4.47**; 78.9% of 10 GB/s ceiling at 40-token median |
-| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | 350M | Hybrid conv+attn | Razr 2020 (Adreno 618) | 10.20 | 3.72 | Liquid AI hybrid |
+| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | 350M | Hybrid conv+attn | Razr 2020 (Adreno 620) | **11.51** | 3.73 | Liquid AI hybrid; 58% of texture ceiling, conv-block fused decode + `__constant` x in no8_img GEMV |
 | [Qwen2.5-0.5B](src/models/qwen2-5-0-5b/) | 500M | LLaMA + GQA | Razr 2020 (Adreno 618) | **10.41** | 2.59 | Largest in the repo; chained cl_mem decode + fused QKV → 70% of 14 GB/s ceiling |
 
 ## 🚀 Quickstart

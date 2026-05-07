@@ -105,14 +105,20 @@ cl_mem Embedding::forward_from_device_token(cl_command_queue queue, cl_mem token
     buf_seq_capacity_ = 1;
   }
 
-  // Pull the single int32 token id from the device-side buffer.
-  err = clEnqueueCopyBuffer(queue, token_ids_dev, buf_input_ids_,
-                            dev_offset_bytes, 0, sizeof(int), 0, nullptr, nullptr);
-  if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("Embedding(chained): copy token id: %d", err); return nullptr; }
+  // Bind the device-side token-id buffer directly as kernel arg 0 when there
+  // is no offset — saves a clEnqueueCopyBuffer (non-recordable) per token.
+  // Falls back to the copy path when an offset is required.
+  cl_mem ids_arg = token_ids_dev;
+  if (dev_offset_bytes != 0) {
+    err = clEnqueueCopyBuffer(queue, token_ids_dev, buf_input_ids_,
+                              dev_offset_bytes, 0, sizeof(int), 0, nullptr, nullptr);
+    if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("Embedding(chained): copy token id: %d", err); return nullptr; }
+    ids_arg = buf_input_ids_;
+  }
 
   int hidden = MODEL_CONFIG::HIDDEN_SIZE;
   int seq_len = 1;
-  err  = clSetKernelArg(kernel_, 0, sizeof(cl_mem), &buf_input_ids_);
+  err  = clSetKernelArg(kernel_, 0, sizeof(cl_mem), &ids_arg);
   err |= clSetKernelArg(kernel_, 1, sizeof(cl_mem), &embed_w_);
   err |= clSetKernelArg(kernel_, 2, sizeof(cl_mem), &buf_out_);
   err |= clSetKernelArg(kernel_, 3, sizeof(int),    &seq_len);
