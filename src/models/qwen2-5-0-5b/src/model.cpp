@@ -692,6 +692,168 @@ int32_t Model::forward_greedy(const std::vector<int32_t>& input_ids, int start_p
     return out_id;
 }
 
+// Chained-decode enqueue (Step 17). Mirror of forward_greedy's plain
+// non-recording path, with two differences:
+//   (a) the embedding reads its token id directly from argmax_out_buf_
+//       (written by the previous step's argmax_finalize) instead of from
+//       a host int passed via input_ids — saves one clEnqueueWriteBuffer
+//       and the implicit host barrier it carries.
+//   (b) the final clEnqueueReadBuffer of the produced int32 is OMITTED.
+//       The new token sits in argmax_out_buf_ until the NEXT call's
+//       embedding picks it up. The caller (generate's chained loop) does
+//       async readback in parallel with the next iteration's enqueue.
+//
+// All allocations + lazy-init are shared with forward_greedy so the first
+// chained call must follow at least one forward_greedy call (which seeds
+// argmax_out_buf_ with the first decode token). generate() handles that.
+bool Model::forward_chained_enqueue(int start_pos) {
+    if (!ok_) return false;
+    if (!argmax_partial_ || !argmax_out_buf_) {
+        NNOPT_ERROR("forward_chained_enqueue: argmax kernels not initialized — must call forward_greedy first");
+        return false;
+    }
+
+    constexpr int NUM_PARTIALS = 32;
+
+    cl_command_queue queue = cl_ctx_.queue();
+    const int seq_len = 1;
+    cl_int err = CL_SUCCESS;
+
+    // Allocate persistent decode hidden buffer if needed (shared with the
+    // recording path; it's nullptr at first chained call when recording
+    // is disabled).
+    if (!buf_decode_hidden_) {
+        const size_t bytes = (size_t)MODEL_CONFIG::HIDDEN_SIZE * sizeof(nnopt_storage_t);
+        buf_decode_hidden_ = clCreateBuffer(cl_ctx_.context(), CL_MEM_READ_WRITE, bytes, nullptr, &err);
+        if (err != CL_SUCCESS || !buf_decode_hidden_) {
+            NNOPT_ERROR_FMT("forward_chained_enqueue: alloc buf_decode_hidden_ failed: %d", (int)err);
+            return false;
+        }
+    }
+
+    // 1) Update buf_counter_ before the embedding (read by attention's
+    // RoPE / KV-write / scores / softmax / attn_out kernels at execution
+    // time on this in-order queue).
+    if (buf_counter_) {
+        const int seq_k_val = start_pos + 1;
+        int cdata[2] = { start_pos, seq_k_val };
+        err = clEnqueueWriteBuffer(queue, buf_counter_, CL_FALSE, 0,
+                                    2 * sizeof(int), cdata, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) {
+            NNOPT_ERROR_FMT("forward_chained_enqueue: counter write failed: %d", (int)err);
+            return false;
+        }
+    }
+
+    // 2) Embedding from device token (argmax_out_buf_ from previous step).
+    if (!embedding_->forward_into_decode_from_device_token(
+            queue, argmax_out_buf_, /*dev_offset_bytes=*/0,
+            buf_decode_hidden_, start_pos)) {
+        return false;
+    }
+    cl_mem hidden = buf_decode_hidden_;
+
+    // 3) Layer loop (24 layers). Same pattern as forward_greedy non-recording.
+    for (int i = 0; i < MODEL_CONFIG::NUM_HIDDEN_LAYERS; ++i) {
+        cl_mem norm1 = pre_attn_norm_[i]->forward(queue, hidden, seq_len);
+        if (!norm1) return false;
+
+        cl_mem attn_out = attn_[i]->forward(queue, norm1, /*cos=*/nullptr, /*sin=*/nullptr,
+                                            /*seq_q=*/seq_len, start_pos,
+                                            /*counter=*/buf_counter_,
+                                            /*residual_dest=*/hidden);
+        clReleaseMemObject(norm1);
+        if (!attn_out) return false;
+        if (attn_out != hidden) {
+            if (!element_add_inplace(queue, utils_program_, hidden, attn_out,
+                                     (size_t)seq_len * MODEL_CONFIG::HIDDEN_SIZE)) {
+                clReleaseMemObject(attn_out);
+                return false;
+            }
+        }
+        clReleaseMemObject(attn_out);
+
+        cl_mem norm2 = post_attn_norm_[i]->forward(queue, hidden, seq_len);
+        if (!norm2) return false;
+
+        cl_mem mlp_out = mlp_[i]->forward(queue, norm2, seq_len, /*residual_dest=*/hidden);
+        clReleaseMemObject(norm2);
+        if (!mlp_out) return false;
+        if (mlp_out != hidden) {
+            if (!element_add_inplace(queue, utils_program_, hidden, mlp_out,
+                                     (size_t)seq_len * MODEL_CONFIG::HIDDEN_SIZE)) {
+                clReleaseMemObject(mlp_out);
+                return false;
+            }
+        }
+        clReleaseMemObject(mlp_out);
+    }
+
+    // 4) Final norm.
+    cl_mem norm_f = final_norm_->forward(queue, hidden, seq_len);
+    if (!norm_f) return false;
+
+    // 5) lm_head: pytorch_linear → buf_logits_.
+    if (!buf_logits_) {
+        const size_t bytes = (size_t)MODEL_CONFIG::VOCAB_SIZE * sizeof(nnopt_storage_t);
+        buf_logits_ = clCreateBuffer(cl_ctx_.context(), CL_MEM_READ_WRITE, bytes, nullptr, &err);
+        if (err != CL_SUCCESS || !buf_logits_) {
+            NNOPT_ERROR_FMT("forward_chained_enqueue: alloc buf_logits_ failed: %d", (int)err);
+            clReleaseMemObject(norm_f);
+            return false;
+        }
+        buf_logits_rows_ = 1;
+    }
+    if (!pytorch_linear(queue, /*M=*/1,
+                        /*N=*/MODEL_CONFIG::VOCAB_SIZE,
+                        /*K=*/MODEL_CONFIG::HIDDEN_SIZE,
+                        norm_f, w_lm_head_, buf_logits_)) {
+        clReleaseMemObject(norm_f);
+        return false;
+    }
+    clReleaseMemObject(norm_f);
+
+    // 6) Argmax. Writes int32 → argmax_out_buf_. NO host readback.
+    int N = MODEL_CONFIG::VOCAB_SIZE;
+    int num_partials = NUM_PARTIALS;
+    err = clSetKernelArg(argmax_partial_, 0, sizeof(cl_mem), &buf_logits_);
+    if (err == CL_SUCCESS) err = clSetKernelArg(argmax_partial_, 1, sizeof(cl_mem), &argmax_pv_buf_);
+    if (err == CL_SUCCESS) err = clSetKernelArg(argmax_partial_, 2, sizeof(cl_mem), &argmax_pi_buf_);
+    if (err == CL_SUCCESS) err = clSetKernelArg(argmax_partial_, 3, sizeof(int), &N);
+    if (err == CL_SUCCESS) err = clSetKernelArg(argmax_partial_, 4, sizeof(int), &num_partials);
+    if (err != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("forward_chained_enqueue: argmax_partial setArg failed: %d", err);
+        return false;
+    }
+    {
+        size_t lws = 64;
+        size_t gws = (size_t)NUM_PARTIALS * lws;
+        err = nnopt_prof::enqueue(queue, argmax_partial_, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) {
+            NNOPT_ERROR_FMT("forward_chained_enqueue: argmax_partial enqueue failed: %d", err);
+            return false;
+        }
+    }
+    err = clSetKernelArg(argmax_finalize_, 0, sizeof(cl_mem), &argmax_pv_buf_);
+    if (err == CL_SUCCESS) err = clSetKernelArg(argmax_finalize_, 1, sizeof(cl_mem), &argmax_pi_buf_);
+    if (err == CL_SUCCESS) err = clSetKernelArg(argmax_finalize_, 2, sizeof(cl_mem), &argmax_out_buf_);
+    if (err == CL_SUCCESS) err = clSetKernelArg(argmax_finalize_, 3, sizeof(int), &num_partials);
+    if (err != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("forward_chained_enqueue: argmax_finalize setArg failed: %d", err);
+        return false;
+    }
+    {
+        size_t lws = 64;
+        size_t gws = 64;
+        err = nnopt_prof::enqueue(queue, argmax_finalize_, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) {
+            NNOPT_ERROR_FMT("forward_chained_enqueue: argmax_finalize enqueue failed: %d", err);
+            return false;
+        }
+    }
+    return true;
+}
+
 std::vector<int32_t> Model::generate(
     const std::vector<int32_t>& prompt_ids,
     int max_new_tokens,
@@ -738,6 +900,100 @@ std::vector<int32_t> Model::generate(
     // decode step. Same kernels otherwise; same token IDs guaranteed.
     const bool greedy_path = (sampler_config.temperature <= 0.0f) &&
                              (sampler_config.repetition_penalty == 1.0f);
+
+    // ── Chained-decode fast path (Step 17) ──
+    // When greedy AND we have ≥2 decode steps to do, use the chained
+    // forward_chained_enqueue + ping-pong async readback pattern. The
+    // token id flows from the GPU argmax buffer directly into the next
+    // step's embedding (no host roundtrip), and host readback is
+    // overlapped with the next forward's enqueue.
+    //
+    // The first chained call needs argmax_out_buf_ already seeded with
+    // the first decode token. forward_greedy below does that — its sync
+    // readback also gives us the value to push into ids/generated.
+    //
+    // Disabled if NNOPT_RECORD=1 (recording path uses its own dispatch).
+    const char* nochain_env = std::getenv("NNOPT_NO_CHAIN");
+    const bool chain_enabled = greedy_path && (max_new_tokens > 2)
+                               && !(nochain_env && nochain_env[0] == '1')
+                               && !recordable_q_;
+
+    if (chain_enabled) {
+        // Step 1: seed argmax_out_buf_ with the first decode token by
+        // running forward_greedy once. This both produces the
+        // generated[0] token AND populates argmax_out_buf_ for the next
+        // call's embedding.
+        const int pos0 = (int)prompt_ids.size();
+        int32_t tok0 = forward_greedy(std::vector<int32_t>{next_token}, pos0);
+        if (tok0 < 0) {
+            NNOPT_ERROR("chained decode: seed forward_greedy failed");
+            return ids;
+        }
+        next_token = tok0;
+        ids.push_back(next_token);
+        generated.push_back(next_token);
+        if (on_token) on_token(next_token, ids);
+        bool eos_seen =
+            (sampler_config.eos_token_id >= 0 && next_token == sampler_config.eos_token_id);
+
+        // Step 2+: chained loop with 2-slot ping-pong async readback.
+        cl_command_queue queue = cl_ctx_.queue();
+        int32_t host_int[2] = {0, 0};
+        cl_event readback_event[2] = {nullptr, nullptr};
+        bool slot_pending[2] = {false, false};
+        int prev_slot = -1;
+
+        for (int i = 2; i < max_new_tokens && !eos_seen; i++) {
+            const int pos = (int)prompt_ids.size() + (i - 1);
+            const int cur_slot = i & 1;
+
+            if (!forward_chained_enqueue(pos)) {
+                NNOPT_ERROR("chained decode forward failed");
+                break;
+            }
+            cl_int rerr = clEnqueueReadBuffer(queue, argmax_out_buf_, CL_FALSE, 0,
+                                               sizeof(int32_t), &host_int[cur_slot],
+                                               0, nullptr, &readback_event[cur_slot]);
+            if (rerr != CL_SUCCESS) {
+                NNOPT_ERROR_FMT("chained async readback enqueue failed: %d", (int)rerr);
+                break;
+            }
+            slot_pending[cur_slot] = true;
+            clFlush(queue);
+
+            // Drain the previous iteration's readback (the token from one step ago).
+            if (prev_slot >= 0 && slot_pending[prev_slot]) {
+                clWaitForEvents(1, &readback_event[prev_slot]);
+                clReleaseEvent(readback_event[prev_slot]);
+                readback_event[prev_slot] = nullptr;
+                slot_pending[prev_slot] = false;
+                int32_t t = host_int[prev_slot];
+                ids.push_back(t);
+                generated.push_back(t);
+                if (on_token) on_token(t, ids);
+                if (sampler_config.eos_token_id >= 0 && t == sampler_config.eos_token_id) {
+                    eos_seen = true;
+                }
+            }
+            prev_slot = cur_slot;
+        }
+        // Drain the in-flight final readback.
+        if (prev_slot >= 0 && slot_pending[prev_slot]) {
+            clWaitForEvents(1, &readback_event[prev_slot]);
+            clReleaseEvent(readback_event[prev_slot]);
+            readback_event[prev_slot] = nullptr;
+            slot_pending[prev_slot] = false;
+            if (!eos_seen) {
+                int32_t t = host_int[prev_slot];
+                ids.push_back(t);
+                generated.push_back(t);
+                if (on_token) on_token(t, ids);
+            }
+        }
+        NNOPT_CHECKPOINT("generate() complete (chained)");
+        nnopt_prof::dump(cl_ctx_.queue());
+        return ids;
+    }
 
     for (int i = 1; i < max_new_tokens; i++) {
         const int pos = (int)prompt_ids.size() + (i - 1);

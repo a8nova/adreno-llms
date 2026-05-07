@@ -203,7 +203,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "Failed to initialize OpenCL" << std::endl;
         return 1;
     }
-    std::cerr << "Device: " << cl_ctx.device_name() << std::endl;
+    std::cerr << "Device: " << cl_ctx.device_description() << std::endl;
     NNOPT_CHECKPOINT("OpenCL initialized");
 
     // Bandwidth probe — exits before LLM work. Toggle with NNOPT_BW_PROBE=1.
@@ -391,8 +391,6 @@ int main(int argc, char* argv[]) {
 
     // Generate
     NNOPT_CHECKPOINT("starting generation");
-    Timer timer;
-    timer.start();
 
     // Print the prompt prefix (decoded back through the tokenizer for
     // round-trip parity), then stream each new token's text as it's
@@ -431,7 +429,6 @@ int main(int argc, char* argv[]) {
     bench.mark_prefill_start();
     auto output_ids = model.generate(input_ids, max_tokens, sampler_config, on_token);
     bench.mark_end();
-    double elapsed = timer.elapsed_ms();
     int gen_tokens = output_ids.size() - input_ids.size();
     NNOPT_CHECKPOINT("generation complete");
 
@@ -448,11 +445,6 @@ int main(int argc, char* argv[]) {
         }
         std::cout << std::endl;
     }
-
-    // Stats (human-readable summary — kept for backward compat with old parsers)
-    std::cerr << "Generated " << gen_tokens << " tokens in "
-              << elapsed << " ms ("
-              << (gen_tokens * 1000.0 / elapsed) << " tokens/sec)" << std::endl;
 
     // Structured baseline metrics for FinalizePort / README generation.
     bench.print_summary((int)input_ids.size(), gen_tokens);

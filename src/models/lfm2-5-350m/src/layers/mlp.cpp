@@ -99,19 +99,32 @@ cl_mem Mlp::forward(cl_command_queue queue, cl_mem x, int seq_len) {
 
   // gate = w1(x)  → buf_gate_
   if (!pytorch_linear(queue, seq_len, I, H, x, w1_, buf_gate_)) return nullptr;
-  // up = w3(x)    → buf_up_
-  if (!pytorch_linear(queue, seq_len, I, H, x, w3_, buf_up_))   return nullptr;
-  // buf_gate_ = silu(buf_gate_) * buf_up_
-  const int total = seq_len * I;
-  if (!set_arg_checked(silu_mul_kernel_, 0, sizeof(cl_mem), &buf_gate_, "a") ||
-      !set_arg_checked(silu_mul_kernel_, 1, sizeof(cl_mem), &buf_up_,   "b") ||
-      !set_arg_checked(silu_mul_kernel_, 2, sizeof(cl_mem), &buf_gate_, "out") ||
-      !set_arg_checked(silu_mul_kernel_, 3, sizeof(int),    &total,     "n")) return nullptr;
-  size_t gws[1] = {(size_t)total};
-  cl_int err = clEnqueueNDRangeKernel(queue, silu_mul_kernel_, 1, nullptr, gws, nullptr, 0, nullptr,
-                                      KernelProfiler::event_for("silu_mul"));
-  if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("Mlp[%d]: silu_mul: %d", layer_idx_, err); return nullptr; }
-  NNOPT_DEBUG_SYNC(queue);
+
+  // Step 12 fast path (M=1 decode only, K=1024, N%8==0): fuse w3 GEMV with the
+  // silu_mul on the writeback. Reads gate (=w1·x) inline, computes
+  // silu(gate)*(w3·x), writes back into buf_gate_. Eliminates one silu_mul
+  // kernel launch and the buf_up_ intermediate buffer per MLP layer.
+  bool fused_ok = false;
+  if (false) {  // Step 12 fused path: gain was sub-noise on Adreno 620
+                // (median 10.99 vs Step 11 11.21). Keep code for re-eval but
+                // don't ship the dispatch.
+    fused_ok = pytorch_linear_silu_gate_fused(queue, I, H, x, w3_, buf_gate_);
+  }
+  if (!fused_ok) {
+    // Fallback: separate w3 GEMV + silu_mul (prefill or non-eligible shapes).
+    if (!pytorch_linear(queue, seq_len, I, H, x, w3_, buf_up_)) return nullptr;
+    const int total = seq_len * I;
+    if (!set_arg_checked(silu_mul_kernel_, 0, sizeof(cl_mem), &buf_gate_, "a") ||
+        !set_arg_checked(silu_mul_kernel_, 1, sizeof(cl_mem), &buf_up_,   "b") ||
+        !set_arg_checked(silu_mul_kernel_, 2, sizeof(cl_mem), &buf_gate_, "out") ||
+        !set_arg_checked(silu_mul_kernel_, 3, sizeof(int),    &total,     "n")) return nullptr;
+    size_t gws[1] = {(size_t)total};
+    cl_int err = clEnqueueNDRangeKernel(queue, silu_mul_kernel_, 1, nullptr, gws, nullptr, 0, nullptr,
+                                        KernelProfiler::event_for("silu_mul"));
+    if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("Mlp[%d]: silu_mul: %d", layer_idx_, err); return nullptr; }
+    NNOPT_DEBUG_SYNC(queue);
+  }
+
   // out = w2(gate)  → buf_out_
   if (!pytorch_linear(queue, seq_len, H, I, buf_gate_, w2_, buf_out_)) return nullptr;
   return buf_out_;  // BORROWED

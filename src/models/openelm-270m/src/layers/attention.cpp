@@ -8,6 +8,7 @@
 #include "layers/attention.h"
 
 #include "debug_utils.h"
+#include "kernel_profiler.h"
 #include "layers/layer_norm.h"
 #include "model_config.h"
 #include "opencl_context.h"
@@ -267,11 +268,34 @@ bool Attention::initialize() {
   if (!set_weights()) return false;
   if (!ensure_kv_cache()) return false;
 
+  // Step 4b: pre-build RoPE cos/sin tables to MAX_CONTEXT_LENGTH so the
+  // per-decode-step regrowth + host-side trig recompute never fires in the
+  // hot path. ensure_rope_tables() is idempotent on cap, so subsequent
+  // forward() calls with smaller seq_k just no-op past this.
+  if (!ensure_rope_tables(MODEL_CONFIG::MAX_CONTEXT_LENGTH)) return false;
+
   return true;
 }
 
 cl_mem Attention::forward(cl_command_queue queue, cl_mem input, int seq_q, int start_pos) {
   return forward(queue, input, /*cos=*/nullptr, /*sin=*/nullptr, seq_q, start_pos);
+}
+
+cl_mem Attention::forward_with_residual(cl_command_queue queue,
+                                        cl_mem input,
+                                        int seq_q,
+                                        int start_pos,
+                                        cl_mem residual_inout) {
+  // Step 5: route through forward(...) but signal radd by leaving an
+  // out-of-band hint via thread_local storage — keeps the existing
+  // forward() body the canonical implementation and avoids duplicating it.
+  // Implementation: stash residual_inout in a member, run forward(), then
+  // clear. Simpler than thread_local; not thread-safe but the inference
+  // path is single-threaded by construction.
+  pending_residual_inout_ = residual_inout;
+  cl_mem result = forward(queue, input, /*cos=*/nullptr, /*sin=*/nullptr, seq_q, start_pos);
+  pending_residual_inout_ = nullptr;
+  return result;
 }
 
 cl_mem Attention::forward(cl_command_queue queue, cl_mem input, cl_mem cos, cl_mem sin, int seq_q, int start_pos) {
@@ -336,18 +360,20 @@ cl_mem Attention::forward(cl_command_queue queue, cl_mem input, cl_mem cos, cl_m
       NNOPT_ERROR_FMT("Attention[%d]: normalize_qk_projections but missing q_norm/k_norm weights", layer_idx_);
       return nullptr;
     }
-    cl_mem qn = rmsnorm_forward(cl_ctx_, queue, buf_q_, q_w, /*rows=*/seq_q * QH, /*cols=*/D, MODEL_CONFIG::NORM_EPS);
-    if (!qn) { NNOPT_ERROR_FMT("Attention[%d]: q rmsnorm_forward failed", layer_idx_); return nullptr; }
-    cl_mem kn = rmsnorm_forward(cl_ctx_, queue, buf_k_, k_w, /*rows=*/seq_q * KVH, /*cols=*/D, MODEL_CONFIG::NORM_EPS);
-    if (!kn) { NNOPT_ERROR_FMT("Attention[%d]: k rmsnorm_forward failed", layer_idx_); clReleaseMemObject(qn); return nullptr; }
-    // Copy into the persistent _qn/_kn buffers, release the rmsnorm allocations
-    err = clEnqueueCopyBuffer(queue, qn, buf_qn_, 0, 0, (size_t)seq_q * Q_DIM * sizeof(nnopt_storage_t), 0, nullptr, nullptr);
-    if (err == CL_SUCCESS)
-      err = clEnqueueCopyBuffer(queue, kn, buf_kn_, 0, 0, (size_t)seq_q * KV_DIM * sizeof(nnopt_storage_t), 0, nullptr, nullptr);
+    // Step 7-lite: write rmsnorm output directly into the persistent
+    // buf_qn_/buf_kn_ — eliminates the per-layer per-token alloc + copy +
+    // release round-trips (4 driver round-trips × 16 layers = 64/token).
+    if (!rmsnorm_forward_into(cl_ctx_, queue, buf_q_, q_w, buf_qn_,
+                              /*rows=*/seq_q * QH, /*cols=*/D, MODEL_CONFIG::NORM_EPS)) {
+      NNOPT_ERROR_FMT("Attention[%d]: q rmsnorm_forward_into failed", layer_idx_);
+      return nullptr;
+    }
+    if (!rmsnorm_forward_into(cl_ctx_, queue, buf_k_, k_w, buf_kn_,
+                              /*rows=*/seq_q * KVH, /*cols=*/D, MODEL_CONFIG::NORM_EPS)) {
+      NNOPT_ERROR_FMT("Attention[%d]: k rmsnorm_forward_into failed", layer_idx_);
+      return nullptr;
+    }
     NNOPT_DEBUG_SYNC(queue);
-    clReleaseMemObject(qn);
-    clReleaseMemObject(kn);
-    if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("Attention[%d]: copy qn/kn into persistent bufs failed (%d)", layer_idx_, (int)err); return nullptr; }
     q_for_rope = buf_qn_;
     k_for_rope = buf_kn_;
     if (layer_idx_ == 0) {
@@ -384,7 +410,8 @@ cl_mem Attention::forward(cl_command_queue queue, cl_mem input, cl_mem cos, cl_m
   {
     const int half_dim = D / 2;
     const size_t gws = (size_t)(seq_q * QH * half_dim + seq_q * KVH * half_dim);
-    err = clEnqueueNDRangeKernel(queue, rope_kernel_, 1, nullptr, &gws, nullptr, 0, nullptr, nullptr);
+    cl_event* evt = KernelProfiler::event_for("rope_apply_qk");
+    err = clEnqueueNDRangeKernel(queue, rope_kernel_, 1, nullptr, &gws, nullptr, 0, nullptr, evt);
     if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("rope dispatch failed: %d", (int)err); return nullptr; }
     NNOPT_DEBUG_SYNC(queue);
   }
@@ -419,7 +446,8 @@ cl_mem Attention::forward(cl_command_queue queue, cl_mem input, cl_mem cos, cl_m
   }
   {
     size_t gws_s[3] = {(size_t)QH, (size_t)seq_q, (size_t)seq_k};
-    err = clEnqueueNDRangeKernel(queue, scores_kernel_, 3, nullptr, gws_s, nullptr, 0, nullptr, nullptr);
+    cl_event* evt = KernelProfiler::event_for("gqa_attn_scores");
+    err = clEnqueueNDRangeKernel(queue, scores_kernel_, 3, nullptr, gws_s, nullptr, 0, nullptr, evt);
     if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("scores dispatch failed: %d", (int)err); return nullptr; }
     NNOPT_DEBUG_SYNC(queue);
   }
@@ -434,7 +462,8 @@ cl_mem Attention::forward(cl_command_queue queue, cl_mem input, cl_mem cos, cl_m
       return nullptr;
     }
     size_t gws = (size_t)total_rows;
-    err = clEnqueueNDRangeKernel(queue, softmax_kernel_, 1, nullptr, &gws, nullptr, 0, nullptr, nullptr);
+    cl_event* evt = KernelProfiler::event_for("gqa_softmax");
+    err = clEnqueueNDRangeKernel(queue, softmax_kernel_, 1, nullptr, &gws, nullptr, 0, nullptr, evt);
     if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("softmax dispatch failed: %d", (int)err); return nullptr; }
     NNOPT_DEBUG_SYNC(queue);
   }
@@ -456,7 +485,8 @@ cl_mem Attention::forward(cl_command_queue queue, cl_mem input, cl_mem cos, cl_m
   }
   {
     size_t gws_o[3] = {(size_t)QH, (size_t)seq_q, (size_t)(D / 4)};
-    err = clEnqueueNDRangeKernel(queue, out_kernel_, 3, nullptr, gws_o, nullptr, 0, nullptr, nullptr);
+    cl_event* evt = KernelProfiler::event_for("gqa_attn_out");
+    err = clEnqueueNDRangeKernel(queue, out_kernel_, 3, nullptr, gws_o, nullptr, 0, nullptr, evt);
     if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("attn_out dispatch failed: %d", (int)err); return nullptr; }
     NNOPT_DEBUG_SYNC(queue);
   }
@@ -465,7 +495,19 @@ cl_mem Attention::forward(cl_command_queue queue, cl_mem input, cl_mem cos, cl_m
     NNOPT_LAYER_CHECK("block0_sub_attn_out_proj_in", queue, buf_ctx_out_, (size_t)seq_q * (size_t)Q_DIM);
   }
 
-  // out_proj(ctx_out) — writes directly into the borrowed-handle output buffer.
+  // out_proj(ctx_out). When pending_residual_inout_ is set (Step 5), try the
+  // fused-radd path: residual += out_proj(ctx_out). Falls back to the
+  // un-fused write into buf_proj_ if the radd kernel is ineligible.
+  if (pending_residual_inout_ != nullptr) {
+    if (pytorch_linear_radd(queue, seq_q, H, Q_DIM, buf_ctx_out_, wo_, pending_residual_inout_)) {
+      if (layer_idx_ == 0) {
+        NNOPT_LAYER_CHECK("block0_sub_attn_out_proj_out", queue, pending_residual_inout_, (size_t)seq_q * (size_t)H);
+      }
+      return pending_residual_inout_;
+    }
+    // Fallthrough — radd ineligible (M>1 etc.). The caller must do the
+    // explicit residual add against buf_proj_.
+  }
   if (!pytorch_linear(queue, seq_q, H, Q_DIM, buf_ctx_out_, wo_, buf_proj_)) {
     NNOPT_ERROR_FMT("out_proj gemm failed at layer %d", layer_idx_);
     return nullptr;

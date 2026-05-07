@@ -8,6 +8,9 @@
 #include <cstdint>
 #include <sys/stat.h>
 #include <dlfcn.h>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 
 // ──────────────────────────────────────────────────────────────────────
 // Program binary cache — fixes the cold-start TTFT problem (~30 s
@@ -300,4 +303,101 @@ size_t OpenCLContext::local_mem_size() const {
     cl_ulong size;
     clGetDeviceInfo(device_, CL_DEVICE_LOCAL_MEM_SIZE, sizeof(size), &size, nullptr);
     return (size_t)size;
+}
+
+std::string OpenCLContext::device_description() const {
+    auto str = [&](cl_device_info q) -> std::string {
+        char buf[512] = {0};
+        if (clGetDeviceInfo(device_, q, sizeof(buf), buf, nullptr) != CL_SUCCESS) return "?";
+        return std::string(buf);
+    };
+    auto u32 = [&](cl_device_info q) -> std::string {
+        cl_uint v = 0;
+        if (clGetDeviceInfo(device_, q, sizeof(v), &v, nullptr) != CL_SUCCESS) return "?";
+        return std::to_string(v);
+    };
+    auto u64_bytes = [&](cl_device_info q) -> cl_ulong {
+        cl_ulong v = 0;
+        if (clGetDeviceInfo(device_, q, sizeof(v), &v, nullptr) != CL_SUCCESS) return 0;
+        return v;
+    };
+
+    // Adreno's KGSL driver exposes the actual GPU model at /sys/class/kgsl/...
+    // Older driver builds return only "QUALCOMM Adreno(TM)" via CL_DEVICE_NAME
+    // (no chip number); splice the sysfs model in when CL_DEVICE_NAME lacks digits.
+    std::string name = device_name();
+    bool name_has_digit = false;
+    for (char c : name) if (c >= '0' && c <= '9') { name_has_digit = true; break; }
+    if (!name_has_digit) {
+        std::ifstream f("/sys/class/kgsl/kgsl-3d0/gpu_model");
+        std::string m;
+        if (f.is_open() && std::getline(f, m)) {
+            while (!m.empty() && (m.back() == '\n' || m.back() == '\r' || m.back() == ' ')) m.pop_back();
+            // "Adreno620v2" -> "Adreno 620v2"
+            size_t apos = m.find("Adreno");
+            if (apos != std::string::npos && apos + 6 < m.size() &&
+                m[apos + 6] >= '0' && m[apos + 6] <= '9') {
+                m.insert(apos + 6, " ");
+            }
+            const std::string tm_marker = "Adreno(TM)";
+            size_t tm = name.find(tm_marker);
+            if (!m.empty() && tm != std::string::npos) {
+                name.replace(tm, tm_marker.size(), m);
+            } else if (!m.empty()) {
+                name += " (" + m + ")";
+            }
+        }
+    }
+
+    // CL_DEVICE_VERSION is "OpenCL X.Y <impl details>" — keep just "X.Y".
+    std::string ver = str(CL_DEVICE_VERSION);
+    if (ver.rfind("OpenCL ", 0) == 0) {
+        size_t sp = ver.find(' ', 7);
+        ver = (sp == std::string::npos) ? ver.substr(7) : ver.substr(7, sp - 7);
+    }
+
+    // CL_DRIVER_VERSION on Adreno is a verbose build banner. The only piece
+    // that meaningfully changes between driver releases is the "Compiler EXXX..."
+    // token — extract it; fall back to first whitespace-token otherwise.
+    std::string drv = str(CL_DRIVER_VERSION);
+    {
+        size_t pos = drv.find("Compiler ");
+        if (pos != std::string::npos) drv = drv.substr(pos + 9);
+        size_t end = drv.find_first_of(" \t\r\n");
+        if (end != std::string::npos) drv = drv.substr(0, end);
+    }
+
+    cl_ulong gmem = u64_bytes(CL_DEVICE_GLOBAL_MEM_SIZE);
+    cl_ulong lmem = u64_bytes(CL_DEVICE_LOCAL_MEM_SIZE);
+    char gbuf[32], lbuf[32];
+    snprintf(gbuf, sizeof(gbuf), "%.1f GB", gmem / 1e9);
+    snprintf(lbuf, sizeof(lbuf), "%llu KB", (unsigned long long)(lmem / 1024));
+
+    // Android SoC model + platform codename. OpenCL exposes neither, so this
+    // is the only way to surface the actual chip (e.g. SM7250 / lito).
+    std::string soc;
+#ifdef __ANDROID__
+    {
+        char model[PROP_VALUE_MAX] = {0};
+        char board[PROP_VALUE_MAX] = {0};
+        __system_property_get("ro.soc.model", model);
+        __system_property_get("ro.board.platform", board);
+        if (model[0]) {
+            soc = model;
+            if (board[0]) soc += " (" + std::string(board) + ")";
+        } else if (board[0]) {
+            soc = board;
+        }
+    }
+#endif
+
+    std::ostringstream os;
+    os << name << "\n";
+    if (!soc.empty()) os << "  SoC:    " << soc << "\n";
+    os << "  Memory: " << gbuf << " global / " << lbuf << " local\n"
+       << "  CUs:    " << u32(CL_DEVICE_MAX_COMPUTE_UNITS) << "\n"
+       << "  Clock:  " << u32(CL_DEVICE_MAX_CLOCK_FREQUENCY) << " MHz\n"
+       << "  OpenCL: " << ver << "\n"
+       << "  Driver: " << drv;
+    return os.str();
 }

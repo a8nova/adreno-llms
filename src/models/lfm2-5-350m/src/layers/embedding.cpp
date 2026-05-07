@@ -84,3 +84,44 @@ cl_mem Embedding::forward(cl_command_queue queue, const int* input_ids, int seq_
   NNOPT_DEBUG_SYNC(queue);
   return buf_out_;  // BORROWED
 }
+
+cl_mem Embedding::forward_from_device_token(cl_command_queue queue, cl_mem token_ids_dev,
+                                            size_t dev_offset_bytes) {
+  if (!kernel_ || !embed_w_) return nullptr;
+  if (!token_ids_dev) return nullptr;
+
+  cl_context ctx = cl_ctx_.context();
+  cl_int err = CL_SUCCESS;
+
+  // Reuse the same persistent buffers as forward(). Ensure capacity for 1.
+  if (buf_seq_capacity_ < 1 || !buf_out_) {
+    if (buf_out_) { clReleaseMemObject(buf_out_); buf_out_ = nullptr; }
+    if (buf_input_ids_) { clReleaseMemObject(buf_input_ids_); buf_input_ids_ = nullptr; }
+    buf_out_ = clCreateBuffer(ctx, CL_MEM_READ_WRITE,
+                              (size_t)MODEL_CONFIG::HIDDEN_SIZE * sizeof(nnopt_storage_t), nullptr, &err);
+    if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("Embedding(chained): alloc buf_out: %d", err); return nullptr; }
+    buf_input_ids_ = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(int), nullptr, &err);
+    if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("Embedding(chained): alloc buf_input_ids: %d", err); return nullptr; }
+    buf_seq_capacity_ = 1;
+  }
+
+  // Pull the single int32 token id from the device-side buffer.
+  err = clEnqueueCopyBuffer(queue, token_ids_dev, buf_input_ids_,
+                            dev_offset_bytes, 0, sizeof(int), 0, nullptr, nullptr);
+  if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("Embedding(chained): copy token id: %d", err); return nullptr; }
+
+  int hidden = MODEL_CONFIG::HIDDEN_SIZE;
+  int seq_len = 1;
+  err  = clSetKernelArg(kernel_, 0, sizeof(cl_mem), &buf_input_ids_);
+  err |= clSetKernelArg(kernel_, 1, sizeof(cl_mem), &embed_w_);
+  err |= clSetKernelArg(kernel_, 2, sizeof(cl_mem), &buf_out_);
+  err |= clSetKernelArg(kernel_, 3, sizeof(int),    &seq_len);
+  err |= clSetKernelArg(kernel_, 4, sizeof(int),    &hidden);
+  if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("Embedding(chained): setArgs: %d", err); return nullptr; }
+
+  size_t gws[1] = {1};
+  err = clEnqueueNDRangeKernel(queue, kernel_, 1, nullptr, gws, nullptr, 0, nullptr,
+                               KernelProfiler::event_for("embedding_chained"));
+  if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("Embedding(chained): enqueue: %d", err); return nullptr; }
+  return buf_out_;  // BORROWED
+}

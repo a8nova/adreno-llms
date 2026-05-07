@@ -42,6 +42,21 @@ public:
     // (temperature ≤ 0 AND repetition_penalty == 1.0).
     int32_t forward_greedy(const std::vector<int32_t>& input_ids, int start_pos);
 
+    // Chained-decode enqueue (Step 17): same as forward_greedy(seq=1) but
+    // (a) the embedding reads its token id directly from argmax_out_buf_ —
+    // no host roundtrip — and (b) NO synchronous readback at the end. The
+    // new token id is written to argmax_out_buf_ by argmax_finalize and
+    // is consumed by the NEXT call's embedding. Caller is responsible for
+    // (1) seeding argmax_out_buf_ with the first decode token before the
+    // first call, and (2) reading argmax_out_buf_ asynchronously to
+    // retrieve produced tokens. Returns false on enqueue error.
+    bool forward_chained_enqueue(int start_pos);
+
+    // Accessor for the device-side argmax output buffer. Used by the
+    // chained-decode loop in main.cpp to async-readback produced tokens
+    // and to seed the buffer with the first token.
+    cl_mem argmax_result_buffer() const { return argmax_out_buf_; }
+
     std::vector<int32_t> generate(
         const std::vector<int32_t>& prompt_ids,
         int max_new_tokens = 64,

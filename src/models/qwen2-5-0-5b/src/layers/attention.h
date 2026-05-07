@@ -103,6 +103,22 @@ private:
     cl_mem bk_ = nullptr;
     cl_mem bv_ = nullptr;
 
+    // Step 18: fused QKV. At decode (seq_q==1), q+k+v projections collapse
+    // to a single GEMV with N=Q_DIM+2*KV_DIM=1152 against a stacked weight
+    // [1152, H], plus one bias_add of [1152]. Saves 2 GEMV launches + 2
+    // bias_add launches per layer × 24 layers = 96 launches/token. Output
+    // is sub-buffered into q/k/v at byte offsets {0, Q_DIM*2,
+    // (Q_DIM+KV_DIM)*2} — both multiples of CL_DEVICE_MEM_BASE_ADDR_ALIGN
+    // (128 bytes on Adreno) for Qwen's H=896, KV_DIM=128. Built once at
+    // set_weights() time. qkv_fused_ok_=false ⇒ fall back to unfused path.
+    cl_mem wqkv_      = nullptr;   // [1152, H] stacked fp16 weights (col-major nn.Linear: [out=1152, in=H])
+    cl_mem bqkv_      = nullptr;   // [1152]     stacked fp16 biases
+    cl_mem buf_qkv_   = nullptr;   // [1152]     persistent decode output (sub-buffers below carve it)
+    cl_mem sub_q_qkv_ = nullptr;   // sub-buffer of buf_qkv_ → [Q_DIM]
+    cl_mem sub_k_qkv_ = nullptr;   // sub-buffer of buf_qkv_ → [KV_DIM]
+    cl_mem sub_v_qkv_ = nullptr;   // sub-buffer of buf_qkv_ → [KV_DIM]
+    bool   qkv_fused_ok_ = false;
+
     // Persistent activation buffers — lazy-allocated on first forward,
     // grown on-demand for prefill. Eliminates 6 alloc/free per layer
     // per token at decode (Mamba Step 6 lesson).

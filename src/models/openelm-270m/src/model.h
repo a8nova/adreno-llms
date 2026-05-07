@@ -53,6 +53,14 @@ public:
     // sampler.temperature<=0 AND repetition_penalty==1. Returns -1 on error.
     int32_t forward_argmax_greedy(const std::vector<int32_t>& input_ids, int start_pos);
 
+    // Step 9: enqueue-only chained variant. Reads its single input token from
+    // argmax_result_ (written by the previous forward) instead of host memory,
+    // and DOES NOT block on a host readback. Caller is responsible for
+    // pipelining a CL_FALSE clEnqueueReadBuffer of argmax_result_ if it needs
+    // the int32 on the host (e.g. for streaming/EOS). Returns true on success.
+    bool forward_argmax_greedy_chained_enqueue(int start_pos);
+    cl_mem argmax_result_buffer() const { return argmax_result_; }
+
     // Streaming callback: invoked once per newly-generated token (NOT for
     // prompt tokens). Use this to print/decode tokens live as they are
     // produced. Runs synchronously on the generate() thread between tokens —
@@ -83,6 +91,11 @@ private:
     cl_program argmax_program_ = nullptr;
     cl_kernel  argmax_kernel_  = nullptr;
     cl_mem     argmax_result_  = nullptr;   // 1 × int32 device buffer
+
+    // Step Z: persistent logits buffer for the lm_head. Sticky capacity.
+    cl_mem  logits_buf_ = nullptr;
+    size_t  logits_buf_cap_bytes_ = 0;
+    bool ensure_logits_buf_(int seq_len);
 
     bool ensure_argmax_resources_();
 

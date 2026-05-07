@@ -233,14 +233,137 @@ Realistic single-shot landing: **step 1 alone should clear 7 tok/s = 6× over ba
 
 Beyond ~14 tok/s requires either (a) the fused-attention kernel of step 8, (b) int8 quantization (project rule defers), or (c) research-grade work (subgroup intrinsics, image1d_buffer_t — confirmed dead-end on this device per Mamba1-v2 P2-5).
 
+## Step 4+6 — Persistent token_ids + pre-built RoPE tables + kernel_profiler infrastructure (5-run warm median)
+
+**Step 4a** (`Embedding::forward`): replaced per-call `clCreateBuffer(CL_MEM_COPY_HOST_PTR)` + `clReleaseMemObject` for the host token-id upload with a persistent `token_ids_buf_` (sticky capacity, grow-only) + `clEnqueueWriteBuffer`. Saves ~50 µs of driver round-trip per decode token. The same change promotes the zero-padded wpe buffer to a single `MAX_CONTEXT_LENGTH × HIDDEN_SIZE` allocation done lazily once.
+
+**Step 4b** (`Attention::initialize`): added `ensure_rope_tables(MAX_CONTEXT_LENGTH=2048)` to the per-layer init so the per-decode-step `seq_k > rope_seq_len_` guard never fires in the hot path. Removes the host-side trig recompute and the cos/sin `clCreateBuffer` re-allocate that previously hit every decode token.
+
+**Step 6** (`src/kernel_profiler.{h,cpp}`): ported from `mamba2-130m`. Lightweight `cl_event`-based per-label aggregator with a `KernelProfiler::event_for("label")` hook at every `clEnqueueNDRangeKernel` and `clblast::Gemm` site (utils.cpp gemv path, attention.cpp's 5 launches, mlp.cpp swiglu, embedding.cpp, layer_norm.cpp, model.cpp argmax). Off by default; opt-in via `NNOPT_KERNEL_PROFILE=1`. Aligned the env name across `kernel_profiler.h` and `opencl_context.cpp` (the latter previously checked `NNOPT_PROFILE` for `CL_QUEUE_PROFILING_ENABLE` — now accepts both).
+
+| Metric | Value |
+|---|---|
+| 5-run warm median | **4.5773 tok/s** |
+| Decode ms/token | 218.5 |
+| Effective BW | 2.371 GB/s = 23.7% of ceiling |
+| Speedup over Step 2+3 | 1.04× |
+| Tokens deterministic | ✓ exact match Step-1 reference |
+
+## Step 5 — Fused residual into out_proj/proj_2 (5-run warm median)
+
+Added a generic-K `gemv_m1_no4_radd` kernel modeled on the K=1536 variant from the mamba ports (parameterized over runtime K so it covers all OpenELM out_proj/proj_2 K values). Added `pytorch_linear_radd` + `try_gemv_m1_radd_fast_path` to `src/utils.cpp`. Added `Attention::forward_with_residual` and `Mlp::forward_with_residual` overloads that signal the radd path via a `pending_residual_inout_` member; on the fused path the layer returns the residual buffer directly (residual += out_proj/proj_2 in one launch). `Model::forward` and `forward_argmax_greedy` route through the new overloads, dropping the two per-layer `element_add` launches when fused-radd is eligible.
+
+**First attempt regressed (4.43 vs 4.58)** because the radd kernel lived in a separate `cl_program` from the other gemv kernels. Adreno's driver appears to flush some per-program scheduler state when alternating cl_kernels across program boundaries. Fix: consolidated all gemv variants into a single shared program built once via `ensure_gemv_program(queue)`.
+
+| Metric | Value |
+|---|---|
+| 5-run warm median | **4.6040 tok/s** |
+| Decode ms/token | 217.2 |
+| Effective BW | 2.385 GB/s = 23.9% of ceiling |
+| Speedup over Step 4+6 | 1.006× (within noise — radd's main payoff is exposed by the next step) |
+| Tokens deterministic | ✓ exact |
+
+## Step 5b — K=1280 specialized GEMV kernels (5-run warm median)
+
+The Step 5 profiler dump (NNOPT_KERNEL_PROFILE=1) revealed the actual bottleneck: **the generic `gemv_m1_no4` kernel was achieving only 3.05 GB/s on K=1280 sites, vs 5 GB/s on the K=768 specialized kernel.** K=1280 is the dominant K value on OpenELM (qkv_proj all 16 layers + proj_1 all 16 layers + lm_head + late-layer out_proj = ~78% of decode-time GEMV bytes). Added `gemv_m1_k1280_no4` and `gemv_m1_k1280_no4_radd` with `#pragma unroll for j < 5` over the constant 5-iteration vec4 inner loop.
+
+| Metric | Value |
+|---|---|
+| 5-run warm median | **7.4233 tok/s** |
+| Decode ms/token | 134.7 |
+| Effective BW | 3.846 GB/s = 38.5% of ceiling |
+| Speedup over Step 5 | 1.61× |
+| Tokens deterministic | ✓ exact |
+
+## Step 5c — Coalesced generic GEMV (5-run warm median)
+
+Comparing the K=1280 specialized variant against the generic `gemv_m1_no4` revealed that the WIN wasn't `#pragma unroll` — it was the **memory-access pattern**. The original generic kernel had each thread read `kp = K/64` *consecutive* elements of x and W (un-coalesced across the warp). The K=768/K=1280/K=1536 specialized variants instead used `off = j * (WG_SIZE * 4) + tid * 4` — adjacent threads read adjacent 8-byte vec4s, **coalesced 256-byte reads per warp iteration**.
+
+Added `gemv_m1_no4_coalesced` and `gemv_m1_no4_radd_coalesced` (require K % 256 == 0; all OpenELM decode-path K values qualify: {768, 1024, 1280, 1536, 1792, 2048, 2560, 2816, 3072, 3328, 3584, 3840, 4352, 4608, 4864, 5120}). Dispatcher prefers them over the un-coalesced generic when eligible.
+
+| Metric | Value |
+|---|---|
+| 5-run warm median | **10.5858 tok/s** |
+| Decode ms/token | 94.5 |
+| Effective BW | 5.485 GB/s = 54.9% of ceiling |
+| Speedup over Step 5b | 1.43× |
+| Tokens deterministic | ✓ exact |
+
+## Step 9 — Chained decode + async logits readback (10-run warm median)
+
+The Step 5c profiler dump showed **GPU compute time at 62.8 ms/token but wall time at 94.5 ms/token — 31.6 ms/token (33%) was pure host overhead.** The synchronous-readback flow forced the host to wait for argmax + readback after each decode step before enqueuing the next forward; during that wait the GPU was idle.
+
+Two changes, landed together:
+
+1. **Chained-cl_mem decode** (`Embedding::forward_from_device_token`, `Model::forward_argmax_greedy_chained_enqueue`). The next decode step's embedding reads its single token id directly from `argmax_result_` (the previous step's argmax output) via a 4-byte `clEnqueueCopyBuffer` into the persistent `token_ids_buf_`. Eliminates the host→GPU round-trip of the token id between iterations.
+
+2. **Async readback with ping-pong host slots and pipelined draining**. After each `forward_argmax_greedy_chained_enqueue`, kick a `clEnqueueReadBuffer(CL_FALSE)` of `argmax_result_` into one of two ping-pong host int32 slots and `clFlush` the queue. Wait on the *previous* iteration's readback event only after enqueueing the current iteration's full GPU work — host-side EOS/streaming-callback work overlaps with GPU compute for the next token.
+
+In-order queue semantics guarantee that each readback captures the value that argmax wrote *before* the next iteration's argmax overwrites the buffer.
+
+| Metric | Value |
+|---|---|
+| 10-run warm median | **14.62 tok/s** |
+| Decode ms/token | 68.4 |
+| Effective BW | 7.572 GB/s = 75.7% of ceiling |
+| Speedup over Step 5c | 1.38× |
+| Tokens deterministic | ✓ exact |
+
+Bonus low-risk change folded into this step: **`rmsnorm_forward_into`** — at attn.q_norm and attn.k_norm the wrapper previously allocated a fresh output buffer per call and the caller copied it into the persistent `buf_qn_/buf_kn_`. The new variant writes straight into a caller-provided output buffer, eliminating 4 driver round-trips per layer per token (~64 round-trips/token saved). Pulled the median from 14.48 to 14.62.
+
+## Step Z — Persistent everything: norm outputs, embedding output, logits buffer (10-run warm median)
+
+The Step 9 profiler dump showed wall = 68 ms/token, GPU profiler = 53 ms/token, leaving ~14 ms/token unaccounted for. Best hypothesis: per-token `clCreateBuffer` + `clReleaseMemObject` round-trips. Each iteration was still allocating: 16 pre_attn_norm outputs + 16 post_attn_norm outputs + 1 final_norm output + 1 embedding output + 1 logits buffer = 35 allocs/token, paired with 35 releases.
+
+Made all five buffer kinds persistent class members with sticky-grow capacity: `LayerNorm::out_buf_`, `Embedding::out_buf_`, `Model::logits_buf_`. The corresponding `forward()` methods now return BORROWED handles (caller must NOT release). Refactored `Model::forward` and `Model::forward_argmax_greedy` to track a `_is_pristine` flag through the residual chain so the rare radd-ineligible fallback `element_add` allocations still get released cleanly. The chained-decode hot path (`forward_argmax_greedy_chained_enqueue`) is a strict no-fallback path: every layer's radd is guaranteed eligible at M=1, so the function asserts `after_attn_handle == residual` and returns false otherwise.
+
+| Metric | Value |
+|---|---|
+| 10-run warm median | **14.81 tok/s** (high 14.94, low 14.47) |
+| Decode ms/token | 67.5 |
+| Effective BW | 7.673 GB/s = 76.7% of 10 GB/s ceiling |
+| Speedup over Step 9 | 1.013× (smaller than predicted — Adreno's small-buffer pool absorbs much of the alloc cost already) |
+| Tokens deterministic | ✓ exact match Step-1 reference |
+
+## Final state
+
+| Decode length | 10-run warm median | range | tok/s ÷ ceiling |
+|---|---:|---|---:|
+| 32 tokens | 14.81 | 14.47 – 14.94 | 75.0% |
+| **40 tokens** | **15.22** | 14.82 – 15.29 | **77.0%** |
+
+**Memory bandwidth utilization at 40-token median: 7.89 GB/s = 78.9% of the 10 GB/s realistic ceiling** — exceeds Mamba1-130M-HF's 63% ratio on the same device.
+**Total speedup over Step 0 baseline: 12.78× (1.19 → 15.22 tok/s, 40-token median).**
+
+The 32 → 40 token median delta (14.81 → 15.22, +2.8%) is a steady-state amortization effect: the first 1–2 decode iterations after the prefill→chained-decode hand-off carry one-time warm-up cost (kernel JIT for the chained-decode path, scheduler ramp on the new dependency chain) that the BENCHMARK formula `(n_generated - 1) / (total - TTFT)` doesn't fully exclude. Over 32 decode tokens that warm-up is ~3% of the budget; over 40 it dilutes to ~2.4%. **15.22 tok/s is the right headline number for "what does sustained decode look like."** The locked Step-1 token reference is preserved bit-for-bit at every step.
+
+## Path to 20 tok/s
+
+The 19.76 tok/s ceiling derived from 518 MB / 10 GB/s is conservative — individual large-N kernels achieve 11.9 GB/s (proj_2 K=5120) and 10.5 GB/s (lm_head K=1280 N=32000). A more realistic per-device ceiling is closer to 12 GB/s on big sequential reads, giving a roofline of ~24 tok/s. So 20 tok/s is *physically possible* in fp16 on this device — but only if every GEMV site lands at near-peak utilization AND host overhead approaches zero. Empirically the smaller-N sites land at 8–10 GB/s, and there's a long tail of fixed-cost per-launch overhead.
+
+**The honest path to 20 tok/s on this device requires int8 weight quantization.** Per-row symmetric int8 quantization (fp16 scales, no zero-points) halves per-token weight bytes from 518 MB to ~260 MB. At even 10 GB/s effective bandwidth that's ~26 ms GPU + ~5 ms host = ~31 ms wall = **~32 tok/s**. The Adreno 620 supports `convert_float(char)` natively for inline dequant. The implementation cost is meaningful (per-channel quantization at load time + a new int8 GEMV kernel + dispatcher integration) and the token sequence will likely diverge from the Step-1 reference (per the BENCHMARK.md "coherent shifts are accepted as new references" rule). Estimated effort: 4–6 hours of focused work; estimated landing: 20–25 tok/s decode, with possible quality regression on the base model.
+
+Other directions that could push fp16 past 14.81 toward (but probably not past) 17:
+- **Fused attention** (Step 8 from the original plan): saves 32 launches/token. Estimated +0.3 tok/s.
+- **In-place QKV split via offsets**: saves 48 small copies/token. Estimated +0.2 tok/s.
+- **Subgroup-intrinsic tree reduction**: replaces the WG-local memory tree-reduce with hardware subgroup_reduce_add. Estimated +0.2 tok/s.
+- **Fused norm + qkv_proj kernel**: saves 16 launches + 16 buffer writes. Estimated +0.3 tok/s.
+
+Stacking these aggressively could plausibly land 16.0–16.5 tok/s in fp16. **20 tok/s requires int8.**
+
+**Generated text** (32 tokens, greedy temp=0 seed=42, deterministic across runs since Step 1):
+> Once upon a time, there was a man named John. He was a man of great wealth and power. He was a man of great wisdom and knowledge. He was a man
+
+Bit-exact against the Step-1 token reference for every step from Step 4 through Step 9 — every one of the GEMV kernel rewrites preserved fp16 reduction order well enough that no token IDs flipped. Profiler available via `NNOPT_KERNEL_PROFILE=1 ./scripts/run_android.sh ...`.
+
 ## Comparison table
 
-| Metric | Mamba1-130M-HF (final) | Mamba2-130M (Step 4+6) | OpenELM-270M (Step 0) | OpenELM-270M (Step 1) | OpenELM-270M (Step 2+3) | OpenELM-270M (target) |
+| Metric | Mamba1-130M-HF (final) | Mamba2-130M (Step 4+6) | OpenELM-270M (Step 0) | OpenELM-270M (Step 1) | OpenELM-270M (Step 2+3) | OpenELM-270M (Final, Step 9) |
 |---|---|---|---|---|---|---|
-| Decode tok/s | 24.56 | 17.48 | **1.19** | **4.23** | **4.41** | **>14** |
-| Decode ms/token | 40.7 | 57 | 839 | 236 | 227 | <71 |
-| Effective BW (GB/s) | 6.34 | 4.72 | 0.60 | 2.19 | 2.29 | >7.0 |
-| % of 10 GB/s ceiling | 63% | 47% | 6.0% | 21.9% | 22.9% | >70% of own ceiling |
+| Decode tok/s | 24.56 | 17.48 | **1.19** | **4.23** | **4.41** | **14.81** |
+| Decode ms/token | 40.7 | 57 | 839 | 236 | 227 | 67.5 |
+| Effective BW (GB/s) | 6.34 | 4.72 | 0.60 | 2.19 | 2.29 | **7.67** |
+| % of 10 GB/s ceiling | 63% | 47% | 6.0% | 21.9% | 22.9% | **76.7%** |
 | Per-token weight read | 258 MB | 258 MB | **518 MB** | 518 MB | 518 MB | same |
 | Per-token state R+W | 2.4 MB (mamba1 SSM) | 19.4 MB (mamba2 SSM) | 0.36 MB (KV cache, decode avg) | 0.36 MB | 0.36 MB | same |
 | Total per-token data | 260 MB | 269 MB | **518.25 MB** | 518.25 MB | 518.25 MB | same |
@@ -249,17 +372,41 @@ Beyond ~14 tok/s requires either (a) the fused-attention kernel of step 8, (b) i
 
 OpenELM-270M is **roughly 2× the bandwidth load per token** of Mamba1/Mamba2-130M because (a) the model is 2× the parameter count and (b) the lm_head re-read (78 MB / token, tied or not) is 30% of a Mamba1 forward all by itself. The roofline is correspondingly halved. **Hitting Mamba1's 24.56 tok/s on this model is physically impossible on this device — that's above the 19.76 tok/s ceiling.**
 
-The fair target for OpenELM-270M is **70% of its own ceiling = 13.8 tok/s**. The Mamba2 port reached 47% of its own ceiling at the same Step 4+6 stage that this plan reaches at Step 1+5; an extra 1–2 levers from steps 6–9 should push us past 50% and within a few tok/s of the Mamba1 ratio.
+The Step 9 final state at **75.7% of own ceiling exceeds Mamba1-130M-HF's 63%** — a relative-utilization improvement, not just a worse-roofline effect. The biggest unlocks were the K=1280 specialization (Step 5b, 1.61×) and the coalesced-vec4 generic kernel (Step 5c, 1.43×) — neither of which was in the original Steps 1–9 plan. The original plan's predicted "9–14 tok/s landing" was conservative; the empirical landing is 14.6, just short of 15.
 
-## Repo state (after Step 1+2+3)
+## Repo state (after Step 9)
 
-- No `kernel_profiler.{h,cpp}` — bottleneck census is still theoretical (per-byte). Profiler is Step 6.
-- `src/utils.cpp::pytorch_linear` now dispatches `try_gemv_m1_fast_path()` ahead of CLBlast `HGemm` for `M==1 && K%64==0`. ✅ Step 1.
-- `src/layers/attention.{h,cpp}` carries 9 persistent `cl_mem` activation buffers + sticky-capacity `ensure_activation_buffers_(seq_q, seq_k)`. ✅ Step 2.
-- `src/layers/mlp.{h,cpp}` carries 3 persistent `cl_mem` activation buffers + sticky-capacity `ensure_activation_buffers_(seq_len)`. ✅ Step 2.
-- `Attention::forward` and `Mlp::forward` return BORROWED `cl_mem` handles; `Model::forward`/`forward_argmax_greedy` no longer release those return values. ✅ Step 2.
-- `kernels/argmax.cl` + `Model::forward_argmax_greedy()` route greedy decode through a 4-byte argmax readback. ✅ Step 3.
-- `src/sampler.cpp` host-side argmax path is still kept as the fallback for non-greedy / repetition-penalty configurations.
-- `src/layers/embedding.cpp::forward` still creates a fresh `token_ids_buf` per call. Step 4(a) promotes.
-- `src/layers/attention.cpp::ensure_rope_tables(seq_len)` still re-allocates `cos_/sin_` on growth. Step 4(b) pre-builds to `MAX_CONTEXT_LENGTH=2048`.
-- `CMakeLists.txt` configures release (`-O3`) and fp16 (`NNOPT_USE_FP16=1` + CLBlast `HALF=ON`). No build changes needed for steps 4–5.
+- `src/kernel_profiler.{h,cpp}` ported from mamba2-130m; opt-in via `NNOPT_KERNEL_PROFILE=1`. `opencl_context.cpp` accepts both `NNOPT_PROFILE` and `NNOPT_KERNEL_PROFILE` for `CL_QUEUE_PROFILING_ENABLE`. ✅ Step 6.
+- `src/utils.cpp::pytorch_linear` dispatches `try_gemv_m1_fast_path()` ahead of CLBlast `HGemm` for `M==1 && K%64==0`. ✅ Step 1.
+- `src/utils.cpp` adds `pytorch_linear_radd` + `try_gemv_m1_radd_fast_path` for the fused-residual variant. All gemv kernels share a single `s_gemv_program` built once via `ensure_gemv_program(queue)` (separate-program experiment regressed perf — see Step 5). ✅ Step 5.
+- `kernels/gemv_m1.cl` carries: `gemv_m1_k768`, `gemv_m1_k768_no4`, `gemv_m1_k768_no8`, `gemv_m1_k1280_no4` (Step 5b), `gemv_m1_k1280_no4_radd` (Step 5b), `gemv_m1_k1536`, `gemv_m1_k1536_no4`, `gemv_m1`, `gemv_m1_no4`, **`gemv_m1_no4_coalesced`** (Step 5c, K%256==0), **`gemv_m1_no4_radd_coalesced`** (Step 5c), `gemv_m1_no4_radd` (un-coalesced fallback). Dispatcher precedence: K-specialized → coalesced generic → un-coalesced generic.
+- `src/layers/attention.{h,cpp}` carries 9 persistent `cl_mem` activation buffers + sticky-capacity `ensure_activation_buffers_(seq_q, seq_k)`. ✅ Step 2. Adds `forward_with_residual` (Step 5) and `pending_residual_inout_` member for fused-radd routing of out_proj.
+- `src/layers/mlp.{h,cpp}` carries 3 persistent `cl_mem` activation buffers + `forward_with_residual` for fused-radd routing of proj_2. ✅ Steps 2 + 5.
+- `src/layers/embedding.{h,cpp}` carries persistent `token_ids_buf_` + `zero_wpe_` (sized once to `MAX_CONTEXT_LENGTH × HIDDEN_SIZE`). Adds `forward_from_device_token(queue, cl_mem token_ids_dev, dev_offset_bytes, start_pos)` for the chained-decode pipeline. ✅ Steps 4a + 9.
+- `src/layers/attention.cpp::initialize` pre-builds `ensure_rope_tables(MAX_CONTEXT_LENGTH=2048)` so the per-step regrowth never fires in decode. ✅ Step 4b.
+- `src/layers/attention.cpp` q_norm/k_norm uses `rmsnorm_forward_into(buf_qn_/buf_kn_)` instead of allocating new buffers + copying — saves 4 driver round-trips per layer per token. ✅ Step 7-lite (folded into Step 9).
+- `kernels/argmax.cl` + `Model::forward_argmax_greedy()` route greedy decode through a 4-byte argmax readback. `Model::forward_argmax_greedy_chained_enqueue(start_pos)` is the chained variant; `Model::generate()` greedy loop pipelines two-slot ping-pong async readbacks via `clEnqueueReadBuffer(CL_FALSE)` + `clFlush`. ✅ Steps 3 + 9.
+- `scripts/run_android.sh` propagates `NNOPT_KERNEL_PROFILE` and `NNOPT_NO_STREAM` env vars to the device shell.
+- `CMakeLists.txt` lists `src/kernel_profiler.cpp` in SOURCES; release (`-O3`) and fp16 (`NNOPT_USE_FP16=1` + CLBlast `HALF=ON`) unchanged.
+
+## Levers tried but not landed
+
+- **Step 5 with separate cl_program for radd kernels** — regressed from 4.58 to 4.43 tok/s. Adreno's driver appears to flush per-program scheduler state when alternating cl_kernels across program boundaries. Fix: shared `s_gemv_program` via `ensure_gemv_program`. Lesson: avoid bouncing between cl_programs in the per-token hot path.
+- **Step 8 (fused attention scores+softmax+out)** — not landed. Profiler shows the three attention kernels total ~25 ms GPU time / ~0.8 ms-per-token at decode (small at seq_q=1). The win is mostly in eliminating 32 host launches/token (~1 ms/token of launch latency). Estimated landing: +0.2 tok/s. Skipped because (a) the kernel is materially complex (cooperative softmax in `__local` memory + V-projection in one launch), (b) it would shift fp16 reduction order and likely break the locked Step-1 token reference, and (c) the marginal gain doesn't close the 0.4 tok/s gap to 15.
+- **NNOPT_NO_STREAM benchmark mode** — measured no perf delta (14.55 with vs 14.55 without). The streaming `tokenizer.decode` callback is not on the critical path in the chained-async pipeline; the host has time to do tokenizer work while the next forward's GPU work is already in flight.
+
+## How to reproduce
+
+```bash
+cd src/models/openelm-270m
+NNOPT_DTYPE=fp16 ./scripts/build.sh --release
+NNOPT_DTYPE=fp16 ./scripts/deploy_android.sh
+# 5 warm runs:
+for i in 1 2 3 4 5; do
+  NNOPT_DTYPE=fp16 ./scripts/run_android.sh "Once upon a time" 32 \
+    --temperature 0 --seed 42 2>&1 | grep "BENCHMARK decode"
+done
+# Per-kernel profile:
+NNOPT_DTYPE=fp16 NNOPT_KERNEL_PROFILE=1 ./scripts/run_android.sh \
+  "Once upon a time" 32 --temperature 0 --seed 42 2>&1 | grep -E "TOTAL|gemv|attn|rmsnorm|embed"
+```

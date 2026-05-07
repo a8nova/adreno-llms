@@ -44,6 +44,15 @@ public:
     // (temperature<=0 AND repetition_penalty==1).
     int32_t forward_greedy(const std::vector<int32_t>& input_ids, int start_pos);
 
+    // Step 10: chained-decode forward (single token). Embedding reads its
+    // input token from `argmax_out_idx_` (written by the previous forward),
+    // and the final argmax writes back into `argmax_out_idx_`. NO host
+    // readback inside this function — caller is responsible for pipelining
+    // a CL_FALSE clEnqueueReadBuffer of argmax_out_buffer() and waiting on
+    // the event when needed (e.g. for streaming/EOS check).
+    bool forward_greedy_chained_enqueue(int start_pos);
+    cl_mem argmax_out_buffer() const { return argmax_out_idx_; }
+
     std::vector<int32_t> generate(
         const std::vector<int32_t>& prompt_ids,
         int max_new_tokens = 64,

@@ -51,6 +51,20 @@ public:
                    int seq_q,
                    int start_pos);
 
+    // Step 5: forward with FUSED RESIDUAL ADD at out_proj.
+    // residual_inout is the residual-stream buffer; on success the layer
+    // writes residual_inout[i] += out_proj_output[i] in a single GEMV launch
+    // (gemv_m1_no4_radd) and returns residual_inout. If the fused path is
+    // not eligible (M>1 or shape mismatch), falls back to the un-fused path
+    // and the caller is responsible for the explicit element_add — but at
+    // M=1 every OpenELM layer is eligible so this is the always-on decode path.
+    // Returns BORROWED handle (residual_inout when fused, buf_proj_ when not).
+    cl_mem forward_with_residual(cl_command_queue queue,
+                                 cl_mem input,
+                                 int seq_q,
+                                 int start_pos,
+                                 cl_mem residual_inout);
+
 private:
     bool ensure_rope_tables(int seq_len);
     bool ensure_kv_cache();   // Allocates k_cache_/v_cache_ once, on first forward.
@@ -113,6 +127,11 @@ private:
     cl_mem buf_scores_   = nullptr;   // [QH, seq_q, seq_k]
     cl_mem buf_ctx_out_  = nullptr;   // [seq_q, Q_DIM]
     cl_mem buf_proj_     = nullptr;   // [seq_q, HIDDEN]   (returned to caller)
+    // Step 5: out-of-band signal from forward_with_residual() to forward(...).
+    // When non-null, the out_proj GEMV uses pytorch_linear_radd to fuse the
+    // residual add into the same launch and returns this buffer instead of
+    // buf_proj_. Set/cleared around the forward() call; not thread-safe.
+    cl_mem pending_residual_inout_ = nullptr;
     size_t buf_qkv_cap_      = 0;
     size_t buf_q_cap_        = 0;
     size_t buf_k_cap_        = 0;

@@ -23,6 +23,7 @@ public:
 
     // Device info
     std::string device_name() const;
+    std::string device_description() const;
     size_t max_work_group_size() const;
     size_t local_mem_size() const;
 

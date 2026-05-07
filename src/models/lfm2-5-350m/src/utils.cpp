@@ -155,8 +155,10 @@ static cl_kernel  s_gemv_m1_k1024      = nullptr;
 static cl_kernel  s_gemv_m1_k1024_no4  = nullptr;
 static cl_kernel  s_gemv_m1_k4608_no4  = nullptr;
 // Image-backed variants (Adreno texture L1 cache, 1.71× faster than buffer L2 on Razr 2020).
+static cl_kernel  s_gemv_m1_k1024_no8_img = nullptr;
 static cl_kernel  s_gemv_m1_k1024_no4_img = nullptr;
 static cl_kernel  s_gemv_m1_k1024_no2_img = nullptr;
+static cl_kernel  s_gemv_m1_k1024_no8_silufused_img = nullptr;
 static cl_kernel  s_gemv_m1_k4608_no4_img = nullptr;
 
 // Per-buffer image2d_t view cache (lazy). Standard entries hold one image;
@@ -217,6 +219,8 @@ static bool ensure_gemv_m1_program(cl_command_queue queue) {
     s_gemv_m1_k4608_no4 = clCreateKernel(s_gemv_m1_prog, "gemv_m1_k4608_no4", &err);
     if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("gemv_m1: k4608_no4 create failed (%d)", err); }
     // Image variants — optional (silently null on devices without image2d-from-buffer).
+    s_gemv_m1_k1024_no8_img = clCreateKernel(s_gemv_m1_prog, "gemv_m1_k1024_no8_img", &err);
+    if (err != CL_SUCCESS) { s_gemv_m1_k1024_no8_img = nullptr; }
     s_gemv_m1_k1024_no4_img = clCreateKernel(s_gemv_m1_prog, "gemv_m1_k1024_no4_img", &err);
     if (err != CL_SUCCESS) { s_gemv_m1_k1024_no4_img = nullptr; }
     s_gemv_m1_k1024_no2_img = clCreateKernel(s_gemv_m1_prog, "gemv_m1_k1024_no2_img", &err);
@@ -224,6 +228,52 @@ static bool ensure_gemv_m1_program(cl_command_queue queue) {
     s_gemv_m1_k4608_no4_img = clCreateKernel(s_gemv_m1_prog, "gemv_m1_k4608_no4_img", &err);
     if (err != CL_SUCCESS) { s_gemv_m1_k4608_no4_img = nullptr; }
     return s_gemv_m1_k1024 && s_gemv_m1_k4608_no4;
+}
+
+// Separate cl_program for the silufused kernel — keeping it in gemv_m1.cl
+// caused Adreno's compiler to spill registers in the no8_img kernels,
+// regressing decode by ~10×. Compiling as standalone isolates allocation.
+static cl_program s_mlp_fused_prog = nullptr;
+
+static bool ensure_mlp_fused_program(cl_command_queue queue) {
+    if (s_mlp_fused_prog) return true;
+
+    cl_context   ctx    = nullptr;
+    cl_device_id device = nullptr;
+    clGetCommandQueueInfo(queue, CL_QUEUE_CONTEXT, sizeof(ctx),    &ctx,    nullptr);
+    clGetCommandQueueInfo(queue, CL_QUEUE_DEVICE,  sizeof(device), &device, nullptr);
+    if (!ctx || !device) return false;
+
+    std::ifstream f("kernels/mlp_fused.cl", std::ios::binary);
+    if (!f.is_open()) {
+        NNOPT_ERROR_FMT("mlp_fused: cannot open kernels/mlp_fused.cl%s", "");
+        return false;
+    }
+    std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const char* src_cstr = src.c_str();
+    size_t src_len = src.size();
+    cl_int err;
+    s_mlp_fused_prog = clCreateProgramWithSource(ctx, 1, &src_cstr, &src_len, &err);
+    if (err != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("mlp_fused: clCreateProgramWithSource failed (%d)", (int)err);
+        return false;
+    }
+    err = clBuildProgram(s_mlp_fused_prog, 1, &device, "-cl-fast-relaxed-math", nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        size_t log_size = 0;
+        clGetProgramBuildInfo(s_mlp_fused_prog, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
+        if (log_size > 0) {
+            std::vector<char> log(log_size + 1, 0);
+            clGetProgramBuildInfo(s_mlp_fused_prog, device, CL_PROGRAM_BUILD_LOG, log_size, log.data(), nullptr);
+            fprintf(stderr, "mlp_fused build log: %s\n", log.data());
+        }
+        clReleaseProgram(s_mlp_fused_prog);
+        s_mlp_fused_prog = nullptr;
+        return false;
+    }
+    s_gemv_m1_k1024_no8_silufused_img = clCreateKernel(s_mlp_fused_prog, "gemv_m1_k1024_no8_silufused_img", &err);
+    if (err != CL_SUCCESS) { s_gemv_m1_k1024_no8_silufused_img = nullptr; }
+    return s_gemv_m1_k1024_no8_silufused_img != nullptr;
 }
 
 // Look up (or create on first use) an image2d_t view of fp16 weight buffer W
@@ -309,7 +359,14 @@ static bool run_gemv_m1_image(cl_command_queue queue, int N, int K, cl_mem W, cl
     if (!ensure_gemv_m1_program(queue)) return false;
     cl_kernel k = nullptr;
     int stride = 4;  // outputs per WG
-    if (K == 1024 && (N % 4) == 0 && s_gemv_m1_k1024_no4_img) {
+    // no8 wins for large N (more arithmetic density per thread hides texture
+    // latency better) but loses for small N where the thread count drops
+    // below the device's latency-hiding threshold. Profile (Adreno 620):
+    //   N=4608/3072/65536-tile-16384: +10-19% with no8
+    //   N=1024: -2%, N=512: -11% (fall back to no4).
+    if (K == 1024 && N >= 2048 && (N % 8) == 0 && s_gemv_m1_k1024_no8_img) {
+        k = s_gemv_m1_k1024_no8_img; stride = 8;
+    } else if (K == 1024 && (N % 4) == 0 && s_gemv_m1_k1024_no4_img) {
         k = s_gemv_m1_k1024_no4_img; stride = 4;
     } else if (K == 1024 && (N % 2) == 0 && s_gemv_m1_k1024_no2_img) {
         k = s_gemv_m1_k1024_no2_img; stride = 2;
@@ -793,6 +850,43 @@ bool pytorch_linear(cl_command_queue queue,
     NNOPT_DEBUG_SYNC(queue);
     return true;
 }
+
+#ifdef NNOPT_USE_FP16
+bool pytorch_linear_silu_gate_fused(cl_command_queue queue,
+                                    int N, int K,
+                                    cl_mem x, cl_mem W3, cl_mem gate_inout) {
+    // Eligibility: K=1024, N%8==0, no8 silufused kernel built, image2d view of W3 available.
+    if (K != 1024 || (N % 8) != 0) return false;
+    if (!ensure_gemv_m1_program(queue)) return false;
+    if (!ensure_mlp_fused_program(queue)) return false;
+    if (!s_gemv_m1_k1024_no8_silufused_img) return false;
+
+    const WImageEntry* ent = get_or_create_w_image(queue, W3, N, K);
+    if (!ent || !ent->image) return false;  // tiled path not supported here (lm_head only)
+
+    cl_kernel k = s_gemv_m1_k1024_no8_silufused_img;
+    clSetKernelArg(k, 0, sizeof(cl_mem), &x);
+    clSetKernelArg(k, 1, sizeof(cl_mem), &ent->image);
+    clSetKernelArg(k, 2, sizeof(cl_mem), &gate_inout);
+    clSetKernelArg(k, 3, sizeof(int),    &N);
+
+    const size_t WG = 64;
+    size_t gws = (size_t)(N / 8) * WG;
+    size_t lws = WG;
+    cl_event* evt = KernelProfiler::event_for("gemv_m1_K1024_no8_silufused_img");
+    cl_int err = clEnqueueNDRangeKernel(queue, k, 1, nullptr, &gws, &lws, 0, nullptr, evt);
+    if (err != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("silufused enqueue: %d (N=%d)", err, N);
+        return false;
+    }
+    NNOPT_DEBUG_SYNC(queue);
+    return true;
+}
+#else
+bool pytorch_linear_silu_gate_fused(cl_command_queue, int, int, cl_mem, cl_mem, cl_mem) {
+    return false;  // fp32 build: no image path, fall back to host
+}
+#endif
 
 bool pytorch_conv1d(cl_command_queue queue,
                     int M, int N, int K,

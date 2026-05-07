@@ -19,6 +19,15 @@ class Mlp {
   // Caller MUST NOT release. Owned by *this.
   cl_mem forward(cl_command_queue queue, cl_mem input, int seq_len);
 
+  // Step 5: forward with FUSED RESIDUAL ADD at proj_2. residual_inout is
+  // the residual-stream buffer; on success this writes residual_inout[i] +=
+  // proj_2_output[i] in one GEMV launch and returns residual_inout. Falls
+  // back to un-fused path if shape ineligible. Caller owns residual_inout.
+  cl_mem forward_with_residual(cl_command_queue queue,
+                               cl_mem input,
+                               int seq_len,
+                               cl_mem residual_inout);
+
  private:
   bool ensure_activation_buffers_(int seq_len);
   void release_activation_buffers_();
@@ -49,4 +58,9 @@ class Mlp {
   size_t buf_proj1_out_cap_ = 0;
   size_t buf_gate_cap_      = 0;
   size_t buf_proj2_out_cap_ = 0;
+
+  // Step 5: out-of-band signal from forward_with_residual() to forward(...).
+  // When non-null, the proj_2 GEMV uses pytorch_linear_radd to fuse the
+  // residual add and returns this buffer instead of buf_proj2_out_.
+  cl_mem pending_residual_inout_ = nullptr;
 };

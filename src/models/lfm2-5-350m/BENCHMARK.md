@@ -393,6 +393,130 @@ What's left on the table:
 - **Persistent activation buffers** (eliminate per-call `clCreateBuffer` inside `Attention::forward` / `Convolution::forward` / `Mlp::forward`): predicted 1.01–1.02× since GPU-active is already 90% of wall.
 - **int8 quantization**: project rule defers; would 2× the BW budget instantly (676 MB → 338 MB → 14.8 → 29.6 tok/s ceiling).
 
+## ── Session 3 (2026-05-07) — past Step 7, push toward 15 tok/s ──
+
+User goal: 15 tok/s. After Step 7 we sit at 51% of the 19.9 tok/s texture roofline; 15 tok/s = 75%. Plan attacks the two biggest remaining levers identified in the post-Step-7 profile: host-side blocking readback (Step 10) and K=1024 GEMV underutilization at 60% of texture ceiling vs K=4608 at 85% (Step 11).
+
+## Step 9 — post-Step-7 baseline profile (informational)
+
+Profile run with `NNOPT_PROFILE=1 NNOPT_KERNEL_PROFILE=1`. Wall = 95.9 ms/token (10.42 tok/s in profile). Total GPU kernel time = 83.6 ms/token. Host gap = 12.3 ms/token (down from baseline's 21 ms; the chained-decode work in Step 10 targets this 12 ms).
+
+Per-call BW utilization (vs 13.46 GB/s texture ceiling):
+- K=1024 N=4608: 1167 µs/call → 8.1 GB/s = **60%**
+- K=1024 N=65536 (per tile): 4078 µs → 7.85 GB/s = **58%**
+- K=4608 N=1024 (no4): 822 µs → 11.4 GB/s = **85%** ← ceiling
+- K=1024 N=3072: 789 µs → 8.0 GB/s = **59%**
+- K=1024 N=1024: 284 µs → 7.4 GB/s = **55%**
+- K=1024 N=512: 157 µs → 6.7 GB/s = **50%**
+
+**Key signal:** K=4608 hits 85% with the same no4 kernel design that K=1024 stalls at 60% on. The difference is per-thread iteration count: K=4608 no4 = 18 K-iter × 4 outputs = 72 dot products per thread; K=1024 no4 = 4 K-iter × 4 outputs = 16. K=1024 has too few in-flight reads to saturate the texture engine. Step 11 attacks this.
+
+## Step 10 — chained decode + async readback (3-run median, neutral)
+
+**Lever.** Eliminate the blocking `clEnqueueReadBuffer(argmax_out_idx_, CL_TRUE, ...)` at the end of `Model::forward_greedy()` (model.cpp:354). Add a new `forward_greedy_chained_enqueue(start_pos)` that mirrors `forward_greedy` but (a) the embedding reads its single token id from the *previous* iteration's argmax output via `clEnqueueCopyBuffer(argmax_out_idx_ → buf_input_ids_, 4 bytes)` instead of from a host-supplied vector, (b) skips the per-call `clCreateSubBuffer` for the argmax row (offset=0 at seq_len=1 means logits_buf_ itself is the row), and (c) does NOT block on a host readback. `Model::generate()` runs a ping-pong loop: enqueue forward N+1, enqueue *non-blocking* readback for slot (N+1)&1, `clFlush`, then `clWaitForEvents` on slot N&1's readback to consume the int32 from the previous iteration. The host stays one step ahead in enqueue and one step behind in readback, hiding the readback latency behind the next forward's enqueue. Reference: openelm-270m's Step 9 pattern.
+
+| Run | decode tok/s | tokens deterministic |
+|---|---|---|
+| 1 | 9.91 | ✓ |
+| 2 | 9.67 | ✓ |
+| 3 | 10.24 | ✓ |
+| **median** | **9.94** | ✓ |
+
+**Step 10 / Step 7:** **0.974×** — within run-to-run variance, effectively neutral. The post-Step-7 profile shows GPU kernel time (83.6 ms/token) fully accounts for almost all of the 95.9 ms wall — host overhead is ~12 ms/token but is already overlapped with GPU work via the in-order queue's natural pipelining. The blocking readback was waiting for *GPU work to finish*, not for host work, and that wait is unavoidable. **Predicted +1.20–1.30× was wrong** — the openelm-270m gain was driven by a much higher relative host stall there. **Kept anyway**: code is clean, tokens match, and it interacts correctly with subsequent steps; reverting buys nothing.
+
+## Step 11 — `gemv_m1_k1024_no8_img` (3-run median, BIG WIN)
+
+**Lever.** New OpenCL kernel `gemv_m1_k1024_no8_img` in `kernels/gemv_m1.cl` — same image-backed K=1024 path as `_no4_img`, but produces **8 outputs per WG** instead of 4. Doubles per-thread arithmetic density (32 dot products + 36 vec4 reads per thread vs 16 + 20), giving the texture engine more in-flight reads to hide latency. Key insight: the BUFFER no4 path failed at K=1024 due to register pressure (Lever A in the Top-N table), but the IMAGE path uses the texture engine — a separate pipeline that doesn't compete for VGPRs the same way. Step 7 already established that no4 image works at K=1024 where no4 buffer doesn't; no8 image extends that headroom further.
+
+Dispatcher in `src/utils.cpp::run_gemv_m1_image` selects no8 when `K==1024 && N>=2048 && N%8==0`. Threshold N≥2048 avoids a small regression at N=512 / N=1024 where the WG count drops below the device's latency-hiding threshold (no8 → 8192 threads at N=1024 is too few; no4 keeps 16384). Larger sites win:
+
+| Site | Step 7 (no4) | Step 11 (no8) | Speedup | New BW utilization |
+|---|---|---|---|---|
+| K=1024 N=4608 (MLP w1/w3) | 1167 µs | **1033 µs** | **1.13×** | **68%** ↑ from 60% |
+| K=1024 N=65536 (lm_head, per tile) | 4078 µs | **3428 µs** | **1.19×** | **70%** ↑ from 58% |
+| K=1024 N=3072 (conv in_proj) | 789 µs | **718 µs** | **1.10×** | **65%** ↑ from 59% |
+| K=1024 N=1024 (q/conv-out/attn-out) | 284 µs | 290 µs | 0.98× | unchanged (uses no4) |
+| K=1024 N=512 (k/v_proj) | 157 µs | 174 µs | 0.90× | unchanged (uses no4) |
+| K=4608 N=1024 (MLP w2) | 822 µs | 732 µs | 1.12× | unchanged kernel (warm-thermal) |
+
+5-run measurement (post-build warmup):
+
+| Run | decode tok/s | tokens deterministic |
+|---|---|---|
+| 1 | 11.21 | ✓ |
+| 2 | 11.21 | ✓ |
+| 3 | 10.75 | ✓ (thermal dip) |
+| 4 | 11.25 | ✓ |
+| 5 | 11.17 | ✓ |
+| **median** | **11.21** | ✓ |
+
+**Step 11 / Step 7 (10.21):** **1.098×.** Tokens are bit-identical to the locked Session-2 reference. Per-token decode time: 1000 / 11.21 = **89.2 ms/token** (down from 97.9). Effective decode BW: 676 MB / 89.2 ms = **7.58 GB/s = 56% of texture-cache ceiling** (up from 51%).
+
+**Why register pressure didn't bite at no8:** the K=1024 no4 buffer regression was diagnosed (line 171) as 25 fp32 regs/thread spilling. no8 image holds 8 fp32 acc + transient W vec4 + 1 x vec4 ≈ 50–60 fp32-equivalent regs. The IMAGE path's `read_imageh + convert_float4` apparently keeps W loads in texture-engine pipeline registers (separate from compute VGPRs), so the 8-output design fits where 4-output buffer didn't.
+
+## Step 11 ledger
+
+| Metric | Step 7 (session-2 final) | Step 11 (session-3) | Δ |
+|---|---|---|---|
+| Decode tok/s | 10.21 | **11.21** | **+9.8%** |
+| Decode ms/token | 97.9 | 89.2 | −8.7 ms |
+| Effective decode BW | 6.91 GB/s | 7.58 GB/s | +0.67 GB/s |
+| % of 13.46 GB/s texture ceiling | 51% | **56%** | +5 pp |
+| Tokens deterministic | ✓ | ✓ | ID-for-ID matched |
+
+**Cumulative session-3:** 10.21 → 11.21 = **1.098× = +9.8%.**
+
+## Step 12 — fused MLP (w3 GEMV + silu_mul) — sub-noise, NOT shipped
+
+**Lever.** New OpenCL kernel `gemv_m1_k1024_no8_silufused_img` in `kernels/mlp_fused.cl` (separate cl_program — see *Compiler interaction caveat* below). Replaces the second MLP GEMV + `silu_mul` with a single kernel that reads `buf_gate_[n]` (= w1·x from a prior pytorch_linear), reads W3 via image2d, and writes `silu(buf_gate_[n]) * (W3·x)` back into buf_gate_. Eliminates one kernel launch per MLP layer (16/token) and the buf_up_ intermediate buffer entirely.
+
+**Compiler interaction caveat (recorded for posterity).** First attempt placed the silufused kernel inside `kernels/gemv_m1.cl`. Result: catastrophic 13× per-call regression on the no8 kernels (no8 K=1024,N=4608 went 1032 → 13217 µs; whole-program tok/s dropped from 11.21 → 1.32). Hypothesis: Adreno OpenCL compiler runs cross-kernel global register allocation across all kernels in a cl_program, and the silufused kernel's transient state (8 acc + native_exp + gate read/write) pushed the no8 kernels' allocation over the per-wave register file budget, causing them to spill. **Lesson: keep optimizer-sensitive kernels in their own cl_program on Adreno.** Moved silufused to `kernels/mlp_fused.cl` with its own `ensure_mlp_fused_program()`; no8 kernels recovered to 1032 µs.
+
+**Per-call profile (post-fix, separate program):**
+- `gemv_m1_K1024_N4608_no8_img` (w1 GEMV alone): 1032 µs/call
+- `gemv_m1_K1024_no8_silufused_img` (w3 + silu, fused): **881 µs/call** ← *slightly faster than the bare no8 GEMV*
+- Net per layer: 1032 + 881 = 1913 µs vs unfused 2 × 1033 + 15 silu = 2081 µs → ~170 µs saved per MLP × 16 = **2.7 ms/token GPU saved**
+
+**Wall-clock measurement (12 runs across two clean rebuilds):** 10.87, 10.91, 10.98, 10.98, 10.99, 10.99, 11.00, 11.00, 11.02, 11.03, 11.03 → median **10.99 tok/s**.
+
+| State | median tok/s |
+|---|---|
+| Step 11 (no fused) | 11.21 |
+| Step 12 (fused enabled) | 10.99 |
+| Step 12 code present, fused disabled in mlp.cpp | 11.21 |
+
+**Status:** ❌ NOT shipped (sub-noise to slight regression on Adreno 620; 2.7 ms GPU savings did not propagate to wall-clock, suggesting the in-order queue's natural pipelining was already absorbing the silu_mul cost). Kernel + program plumbing kept in tree (`kernels/mlp_fused.cl`, `pytorch_linear_silu_gate_fused()` in utils) — flip the `if (false)` guard in `Mlp::forward()` to re-enable for future driver/SDK comparison.
+
+## Session 3 final state
+
+| Metric | Step 7 baseline (session-2 final) | Step 11 final | Δ |
+|---|---|---|---|
+| Decode tok/s | 10.21 | **11.21** | **+9.8%** |
+| Decode ms/token | 97.9 | 89.2 | −8.7 ms |
+| Effective decode BW | 6.91 GB/s | 7.58 GB/s | +0.67 GB/s |
+| % of 13.46 GB/s texture ceiling | 51% | **56%** | +5 pp |
+| Tokens deterministic | ✓ | ✓ | ID-for-ID matched |
+
+**Path to 15 tok/s — what's needed:**
+- 15 tok/s = 66.7 ms/token wall = 75% of texture ceiling. Need to save another 22.5 ms/token from the current 89.2.
+- Per-shape utilization at Step 11 close: K=1024 sites at 65–70% (no8_img), K=4608 site at 85% (no4_img is already optimal). If K=1024 could match K=4608's 85%, savings would be ~10 ms/token → 13 tok/s. **Still short of 15.**
+- The remaining gap is fundamental: per-token weight footprint (676 MB) ÷ texture-cache ceiling (13.46 GB/s) = 50.2 ms/token = 19.9 tok/s ABSOLUTE max. The only path to 15 tok/s is **int8 weight quantization** (halves weight bytes → ~22 tok/s ceiling) — out of scope for this sprint.
+- Cheap remaining levers (Step 13 vec4 OperatorNorm, Step 14 conv-block kernel reduction) collectively offer ≤1% — not worth the complexity at this stage.
+
+## Repo state — session 3
+
+- `src/layers/embedding.{h,cpp}` — added `forward_from_device_token(queue, token_ids_dev, dev_offset_bytes)` for chained decode (reads token id from a GPU buffer instead of host array). Reuses existing persistent buf_input_ids_ / buf_out_.
+- `src/model.{h,cpp}` — added `forward_greedy_chained_enqueue(start_pos)` mirroring forward_greedy at seq_len=1 with no host readback; `Model::generate()` greedy fast path now runs a ping-pong async-readback loop after prefill (Step 10).
+- `kernels/gemv_m1.cl` — added `gemv_m1_k1024_no8_img` (Step 11). 8-output-per-WG image2d kernel. Selected by `run_gemv_m1_image()` for K=1024 ∧ N≥2048 ∧ N%8==0.
+- `src/utils.cpp` — registered `s_gemv_m1_k1024_no8_img`; threshold N≥2048 to fall back to no4_img on small-N sites; added `pytorch_linear_silu_gate_fused()` (Step 12) gated behind `seq_len==1` (currently dispatch is disabled in mlp.cpp pending wall-clock validation).
+- `src/utils.cpp` — added `ensure_mlp_fused_program()` building `kernels/mlp_fused.cl` as a SEPARATE cl_program (see Step 12 compiler interaction caveat).
+- `kernels/mlp_fused.cl` — new file with `gemv_m1_k1024_no8_silufused_img`. Lives in its own program to avoid Adreno's global cross-kernel register allocator spilling no8 in gemv_m1.cl.
+- `BENCHMARK.md` — Session 3 entries (this section).
+
+## Repo state
+
+- `src/main.cpp` — added `--no-eos` / `--ignore-eos` flag for benchmark continuation past the model's tokenizer-mismatched EOS=2.
+
 ## Repo state
 
 - `src/main.cpp` — added `--no-eos` / `--ignore-eos` flag for benchmark continuation past the model's tokenizer-mismatched EOS=2.

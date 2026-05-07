@@ -118,6 +118,16 @@ bool pytorch_linear(cl_command_queue queue,
                     int M, int N, int K,
                     cl_mem x, cl_mem W, cl_mem out);
 
+// MLP w3 + silu_mul fused into one kernel. Reads gate_inout[n] (= w1·x
+// from a prior pytorch_linear call), reads W3 via image2d, computes
+// silu(gate_inout[n]) * (W3·x), and writes the result back into
+// gate_inout. Eliminates the separate silu_mul kernel + the buf_up_
+// intermediate buffer for SwiGLU MLPs. M=1 only; falls back to false
+// if K=1024 image path or no8 kernel are unavailable.
+bool pytorch_linear_silu_gate_fused(cl_command_queue queue,
+                                    int N, int K,
+                                    cl_mem x, cl_mem W3, cl_mem gate_inout);
+
 // ──────────────────────────────────────────────
 // pytorch_conv1d: dtype-templated GEMM wrapper for HF Conv1D layout
 // ──────────────────────────────────────────────
