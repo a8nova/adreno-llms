@@ -203,7 +203,7 @@ required=(
   "scripts/hf_repo_README.md"
   "scripts/verify_clean_checkout.sh"
 )
-MODELS=(lfm2-5-350m mamba-130m mamba2-130m openelm-270m qwen2-5-0-5b smollm2-135m-instruct)
+MODELS=(granite-4-0-350m lfm2-5-350m mamba-130m mamba2-130m openelm-270m qwen2-5-0-5b smollm2-135m-instruct)
 for m in "${MODELS[@]}"; do
   required+=(
     "src/models/$m/README.md"

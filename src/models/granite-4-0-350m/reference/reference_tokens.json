@@ -1,0 +1,145 @@
+{
+  "produced_by": "_run_reference.py",
+  "script_version": "2026-05-09-extract-tensor-from-modeloutput-v1",
+  "transformers_version": "4.57.6",
+  "pytorch_version": "2.2.2",
+  "python_version": "3.9.9",
+  "input_ids": [
+    791,
+    11326,
+    6575,
+    520,
+    279,
+    220
+  ],
+  "generated_ids": [
+    791,
+    11326,
+    6575,
+    520,
+    279,
+    220,
+    20,
+    339,
+    12239,
+    2237,
+    13,
+    578,
+    11326
+  ],
+  "prompt": "The teacher worked at the ",
+  "reference_text": "The teacher worked at the 5th grade level. The teacher",
+  "generated_text": "5th grade level. The teacher",
+  "max_new_tokens": 7,
+  "model_id": "ibm-granite/granite-4.0-350m",
+  "test_prompts": [
+    {
+      "prompt": "The teacher worked at the ",
+      "input_ids": [
+        791,
+        11326,
+        6575,
+        520,
+        279,
+        220
+      ]
+    },
+    {
+      "prompt": "Hello",
+      "input_ids": [
+        9906
+      ]
+    },
+    {
+      "prompt": "Hello, world!",
+      "input_ids": [
+        9906,
+        11,
+        1917,
+        0
+      ]
+    },
+    {
+      "prompt": "The quick brown fox jumps over the lazy dog.",
+      "input_ids": [
+        791,
+        4062,
+        14198,
+        39935,
+        35308,
+        927,
+        279,
+        16053,
+        5679,
+        13
+      ]
+    },
+    {
+      "prompt": "  leading and   multiple   whitespace  ",
+      "input_ids": [
+        220,
+        6522,
+        323,
+        256,
+        5361,
+        256,
+        37472,
+        256
+      ]
+    },
+    {
+      "prompt": "Numbers 0 1 2 3 and code def f(x): return x**2",
+      "input_ids": [
+        28336,
+        220,
+        15,
+        220,
+        16,
+        220,
+        17,
+        220,
+        18,
+        323,
+        2082,
+        711,
+        282,
+        2120,
+        1680,
+        471,
+        865,
+        334,
+        17
+      ]
+    },
+    {
+      "prompt": "Email: user@example.com (2024-01-01)",
+      "input_ids": [
+        4886,
+        25,
+        1217,
+        36587,
+        916,
+        320,
+        2366,
+        19,
+        12,
+        1721,
+        12,
+        1721,
+        8
+      ]
+    },
+    {
+      "prompt": "\n\tnewlines and\ttabs\n",
+      "input_ids": [
+        198,
+        8808,
+        8128,
+        323,
+        3324,
+        3518,
+        198
+      ]
+    }
+  ]
+}

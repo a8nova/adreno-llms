@@ -8,7 +8,7 @@
 #   ./scripts/fetch_weights.sh all
 #
 # Models:
-#   lfm2-5-350m  mamba-130m  mamba2-130m  qwen2-5-0-5b  smollm2-135m-instruct
+#   granite-4-0-350m  lfm2-5-350m  mamba-130m  mamba2-130m  qwen2-5-0-5b  smollm2-135m-instruct
 #
 # Per model, this fetches every file the runtime needs:
 #   weights/model.fp16.bin
@@ -26,7 +26,7 @@ HF_REPO="${HF_REPO:-a8nova/adreno-llms-weights}"
 HF_BRANCH="${HF_BRANCH:-main}"
 HF_BASE="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}"
 
-MODELS=(lfm2-5-350m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct)
+MODELS=(granite-4-0-350m lfm2-5-350m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct)
 WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
