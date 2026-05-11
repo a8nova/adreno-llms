@@ -24,7 +24,7 @@ CMakeFiles/
 layer_dumps/
 layer_dumps_fixed/
 layer_dumps_new/
-reference/layers/
+**/reference/layers/
 logs/
 kernel_cache/
 
