@@ -83,12 +83,22 @@ if [ "${NNOPT_PROFILE:-}" = "1" ]; then PROFILE_ENV="NNOPT_PROFILE=1"; fi
 RECORD_ENV=""
 if [ "${NNOPT_RECORD:-}" = "1" ]; then RECORD_ENV="NNOPT_RECORD=1"; fi
 
+# Subgroup-reduce kernel path A/B gate (Phase 2 lever; PDF §6.5/§8.9/§9.2).
+# Builds kernels with -D USE_SUBGROUP_REDUCE=1 and busts the kernel-binary cache.
+SUBGROUP_ENV=""
+if [ "${NNOPT_SUBGROUP_REDUCE:-}" = "1" ]; then SUBGROUP_ENV="NNOPT_SUBGROUP_REDUCE=1"; fi
+
+# Per-row int8 weight path (Tier B lever). Pulls weights/model.int8.bin and
+# dispatches int8 kernels in attention.cpp / mlp.cpp when meta says dtype=int8.
+QUANT_ENV=""
+if [ -n "${NNOPT_QUANT:-}" ]; then QUANT_ENV="NNOPT_QUANT=${NNOPT_QUANT}"; fi
+
 # Execute on device — let stdout and stderr flow through adb to host.
 # adb shell merges remote stdout+stderr into host stdout. The Infer tool
 # separates them using pattern matching (CHECKPOINT/ERROR/LAYER_CHECK = stderr).
 # No device file redirect — no stale logs/device_run_stderr.log to confuse the agent.
 set +e
-$ADB shell "cd $REMOTE_DIR && $DEBUG_ENV $DUMP_ENV $PROFILE_ENV $RECORD_ENV LD_LIBRARY_PATH=$REMOTE_DIR/lib:/system/vendor/lib64:\$LD_LIBRARY_PATH ./$BINARY_NAME '$ESCAPED_PROMPT' $MAX_TOKENS $EXTRA_ARGS"
+$ADB shell "cd $REMOTE_DIR && $DEBUG_ENV $DUMP_ENV $PROFILE_ENV $RECORD_ENV $SUBGROUP_ENV $QUANT_ENV LD_LIBRARY_PATH=$REMOTE_DIR/lib:/system/vendor/lib64:\$LD_LIBRARY_PATH ./$BINARY_NAME '$ESCAPED_PROMPT' $MAX_TOKENS $EXTRA_ARGS"
 INFERENCE_EXIT=$?
 set -e
 

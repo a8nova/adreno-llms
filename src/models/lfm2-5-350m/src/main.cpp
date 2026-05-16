@@ -459,11 +459,75 @@ int main(int argc, char* argv[]) {
     const char* nnopt_weights_bin  = "weights/model.bin";
     const char* nnopt_weights_meta = "weights/model.meta.json";
 #endif
+    // NNOPT_QUANT picks the quantized weight bundle and triggers the matching
+    // GEMV image-path registration.
+    //   int8 → weights/model.int8.bin  (per-row symmetric int8 + fp16 scales)
+    //   q4   → weights/model.q4.bin    (block-32 symmetric Q4 + fp16 scales)
+    bool nnopt_quant_int8 = false;
+    bool nnopt_quant_q4   = false;
+    if (const char* q = std::getenv("NNOPT_QUANT")) {
+        std::string mode(q);
+        if (mode == "int8") {
+            nnopt_weights_bin  = "weights/model.int8.bin";
+            nnopt_weights_meta = "weights/model.int8.meta.json";
+            nnopt_quant_int8 = true;
+            std::cerr << "NNOPT_QUANT=int8: using " << nnopt_weights_bin << std::endl;
+        } else if (mode == "q4") {
+            nnopt_weights_bin  = "weights/model.q4.bin";
+            nnopt_weights_meta = "weights/model.q4.meta.json";
+            nnopt_quant_q4 = true;
+            std::cerr << "NNOPT_QUANT=q4: using " << nnopt_weights_bin << std::endl;
+        }
+    }
     if (!weights.load(nnopt_weights_bin, nnopt_weights_meta, cl_ctx.context())) {
         std::cerr << "Failed to load weights from " << nnopt_weights_bin << std::endl;
         return 1;
     }
     NNOPT_CHECKPOINT("weights loaded");
+
+    // Walk every quantized tensor + sibling `.scale` and hand both buffers to
+    // utils.cpp. From here on, any pytorch_linear() call on these W buffers
+    // takes the appropriate quantized image-path GEMV.
+    if (nnopt_quant_int8) {
+        int registered = 0;
+        for (const std::string& name : weights.all_keys()) {
+            if (weights.get_dtype(name) != "int8") continue;
+            const std::string scale_name = name + ".scale";
+            if (!weights.has_tensor(scale_name)) continue;
+            const auto shape = weights.get_shape(name);
+            if (shape.size() != 2) continue;
+            cl_mem W = weights.get_buffer(name);
+            cl_mem S = weights.get_buffer(scale_name);
+            if (!W || !S) continue;
+            if (nnopt_register_int8_weight(W, S, shape[0], shape[1])) {
+                registered++;
+            }
+        }
+        std::cerr << "NNOPT_QUANT=int8: registered " << registered << " int8 weights for GEMV fast path" << std::endl;
+    }
+    if (nnopt_quant_q4) {
+        int registered = 0;
+        for (const std::string& name : weights.all_keys()) {
+            if (weights.get_dtype(name) != "q4_packed") continue;
+            const std::string scale_name = name + ".scale";
+            if (!weights.has_tensor(scale_name)) continue;
+            const auto shape = weights.get_shape(name);
+            if (shape.size() != 2) continue;
+            // shape is [N, K/2] (packed bytes). The kernel needs the unpacked
+            // K, which the scale rows give us: K = scale_cols * 32.
+            const auto scale_shape = weights.get_shape(scale_name);
+            if (scale_shape.size() != 2) continue;
+            const int N = shape[0];
+            const int K_unpacked = scale_shape[1] * 32;
+            cl_mem W = weights.get_buffer(name);
+            cl_mem S = weights.get_buffer(scale_name);
+            if (!W || !S) continue;
+            if (nnopt_register_q4_weight(W, S, N, K_unpacked)) {
+                registered++;
+            }
+        }
+        std::cerr << "NNOPT_QUANT=q4: registered " << registered << " q4 weights for GEMV fast path" << std::endl;
+    }
 
     // Create model. Constructor stores refs only — kernel builds and per-layer
     // initialize() calls live in Model::initialize() so failures can return

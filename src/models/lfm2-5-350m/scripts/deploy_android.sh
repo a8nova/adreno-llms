@@ -65,6 +65,19 @@ $ADB push "$NNOPT_WEIGHTS_BIN" $REMOTE_DIR/weights/ 2>/dev/null || echo "Warning
 $ADB push "$NNOPT_WEIGHTS_META" $REMOTE_DIR/weights/ 2>/dev/null || echo "Warning: $NNOPT_WEIGHTS_META not found"
 $ADB push weights/tokenizer_vocab.bin $REMOTE_DIR/weights/ 2>/dev/null || true
 
+# Also push the int8 quantized weights if present — main.cpp picks them up
+# at runtime when NNOPT_QUANT=int8 is set. No-op if the file doesn't exist.
+if [ -f weights/model.int8.bin ]; then
+    echo "Pushing weights (weights/model.int8.bin)..."
+    $ADB push weights/model.int8.bin $REMOTE_DIR/weights/
+    $ADB push weights/model.int8.meta.json $REMOTE_DIR/weights/
+fi
+if [ -f weights/model.q4.bin ]; then
+    echo "Pushing weights (weights/model.q4.bin)..."
+    $ADB push weights/model.q4.bin $REMOTE_DIR/weights/
+    $ADB push weights/model.q4.meta.json $REMOTE_DIR/weights/
+fi
+
 # Push all kernels
 echo "Pushing OpenCL kernels..."
 if [ -d "kernels" ]; then

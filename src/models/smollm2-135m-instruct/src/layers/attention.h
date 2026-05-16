@@ -48,6 +48,20 @@ public:
                                       cl_mem x, int start_pos,
                                       cl_mem residual);
 
+    // Kernel-handle accessors for the recordable-queue path: Model::initialize
+    // collects these so it can issue arg updates between replays.
+    //   fused_rope_kvwrite_m1: arg 10 is start_pos.
+    //   fused_decode_attn_m1:  arg with seq_k.
+    cl_kernel rope_kvwrite_kernel() const { return fused_rope_kvwrite_m1_; }
+    cl_kernel decode_attn_kernel()  const { return fused_decode_attn_m1_;  }
+
+    // Pre-allocate RoPE cos/sin tables up to `max_seq` positions. Used by the
+    // recordable-queue setup to avoid mid-decode buffer re-allocation (which
+    // would invalidate the cl_mem references captured in the recording).
+    bool prewarm_rope_tables(cl_command_queue queue, int max_seq) {
+        return ensure_rope_tables(queue, max_seq);
+    }
+
 private:
     bool ensure_rope_tables(cl_command_queue queue, int seq_len);
     bool ensure_kv_cache();   // Allocates k_cache_/v_cache_ once, on first forward.
@@ -118,4 +132,16 @@ private:
     cl_kernel fused_oproj_no4_img_    = nullptr;  // fused_oproj_residual_m1_no4_img
     bool      qkv_img_ready_   = false;
     bool      oproj_img_ready_ = false;
+
+    // ── int8 quantized path (NNOPT_QUANT=int8 + weights/model.int8.bin)
+    //   Per-row symmetric int8: image2d (CL_SIGNED_INT8 RGBA) + fp16 scale buffer.
+    //   Selected when weights_.get_dtype(prefix+"q_proj.weight")=="int8".
+    bool      quantized_ = false;
+    cl_program block_fused_int8_prog_ = nullptr;
+    cl_kernel gemv_k576_no4_img_int8_      = nullptr;
+    cl_kernel fused_oproj_no4_img_int8_    = nullptr;
+    cl_mem wq_int8_img_ = nullptr, wk_int8_img_ = nullptr,
+           wv_int8_img_ = nullptr, wo_int8_img_ = nullptr;
+    cl_mem wq_scale_ = nullptr, wk_scale_ = nullptr,
+           wv_scale_ = nullptr, wo_scale_ = nullptr;
 };

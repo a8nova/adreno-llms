@@ -141,6 +141,7 @@ static bool parse_meta_json(const std::string& json,
 
 // Bytes-per-element for the recognized dtype strings emitted by ConvertWeights.
 static inline size_t _nnopt_bytes_per_element(const std::string& dtype) {
+    if (dtype == "int8") return 1;
     if (dtype == "float16" || dtype == "bfloat16") return 2;
     return 4;  // float32 default
 }

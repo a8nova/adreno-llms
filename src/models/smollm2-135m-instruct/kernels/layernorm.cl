@@ -17,7 +17,12 @@
   #define STORE(p, i, v) ((p)[(i)] = (v))
 #endif
 
+#ifdef USE_SUBGROUP_REDUCE
+  #pragma OPENCL EXTENSION cl_khr_subgroups : enable
+#endif
+
 #define WG_SIZE 64
+#define MAX_SUBGROUPS 8
 
 __kernel
 __attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
@@ -34,9 +39,15 @@ void layernorm_forward(
   if (row >= rows) return;
 
   const int base = row * cols;
+#ifdef USE_SUBGROUP_REDUCE
+  __local float subg_scratch[MAX_SUBGROUPS];
+  __local float mean_bcast;
+  __local float inv_std_bcast;
+#else
   __local float partial[WG_SIZE];
   __local float mean_bcast;
   __local float inv_std_bcast;
+#endif
 
 #ifdef USE_FP16
   const int C4 = cols >> 2;
@@ -53,6 +64,22 @@ void layernorm_forward(
   for (int c = C4 * 4 + lid; c < cols; c += WG_SIZE) {
     sum += LOAD(x, base + c);
   }
+#ifdef USE_SUBGROUP_REDUCE
+  {
+    float subg_s = sub_group_reduce_add(sum);
+    const uint sg_id  = get_sub_group_id();
+    const uint sg_lid = get_sub_group_local_id();
+    const uint nsg    = get_num_sub_groups();
+    if (sg_lid == 0) subg_scratch[sg_id] = subg_s;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (sg_id == 0) {
+      float v = (sg_lid < nsg) ? subg_scratch[sg_lid] : 0.0f;
+      float tot = sub_group_reduce_add(v);
+      if (sg_lid == 0) mean_bcast = tot / (float)cols;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+#else
   partial[lid] = sum;
   barrier(CLK_LOCAL_MEM_FENCE);
   for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
@@ -61,6 +88,7 @@ void layernorm_forward(
   }
   if (lid == 0) mean_bcast = partial[0] / (float)cols;
   barrier(CLK_LOCAL_MEM_FENCE);
+#endif
   const float mean = mean_bcast;
 
   // Pass 2: partial sum-of-squared-deviations for variance.
@@ -74,6 +102,22 @@ void layernorm_forward(
     float d = LOAD(x, base + c) - mean;
     ss += d * d;
   }
+#ifdef USE_SUBGROUP_REDUCE
+  {
+    float subg_s = sub_group_reduce_add(ss);
+    const uint sg_id  = get_sub_group_id();
+    const uint sg_lid = get_sub_group_local_id();
+    const uint nsg    = get_num_sub_groups();
+    if (sg_lid == 0) subg_scratch[sg_id] = subg_s;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (sg_id == 0) {
+      float v = (sg_lid < nsg) ? subg_scratch[sg_lid] : 0.0f;
+      float tot = sub_group_reduce_add(v);
+      if (sg_lid == 0) inv_std_bcast = native_rsqrt((tot / (float)cols) + eps);
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+#else
   partial[lid] = ss;
   barrier(CLK_LOCAL_MEM_FENCE);
   for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
@@ -82,6 +126,7 @@ void layernorm_forward(
   }
   if (lid == 0) inv_std_bcast = native_rsqrt((partial[0] / (float)cols) + eps);
   barrier(CLK_LOCAL_MEM_FENCE);
+#endif
   const float inv_std = inv_std_bcast;
 
   // Pass 3: vec4 normalize + scale + bias write.

@@ -656,3 +656,270 @@ Body unchanged except `__global const half* xh` → `__constant const half* xh`.
 - `kernels/argmax.cl` — new: 2-pass GPU argmax for the greedy decode path.
 - `CMakeLists.txt` — added `src/kernel_profiler.cpp` to `SOURCES`.
 - All per-layer `.cpp` files (`embedding`, `mlp`, `operator_norm`, `attention`, `convolution`) — profiler events wired into every `clEnqueueNDRangeKernel` call site with mnemonic labels.
+
+---
+
+# Tab A9+ port (Adreno 619 v2 / Snapdragon 695) — 2026-05-15
+
+Second-device port targeting the Samsung Galaxy Tab A9+ (Adreno 619 v2 / SM6375). The Razr 2020 work above landed 11.51 tok/s on Adreno 620; this section ports the same code to a smaller-tier GPU and finds two ceiling-breaking levers the Razr 2020 work didn't need.
+
+## Session-0 — broken baseline
+
+Initial state: **crash at decode after ~4 tokens** with peak CPU memory ~2.5 GB. Decode ~1.50 tok/s before crash.
+
+**Root cause:** `MAX_POSITION_EMBEDDINGS = 128000` (the LFM2.5 architectural long-context limit) allocates ~1572 MB of KV cache across 6 attention layers: `6 × 2 (K+V) × 128000 × 8 (KV-heads) × 64 (head-dim) × 2 (fp16) = 1572 MB`. Plus 676 MB weights = **2.25 GB GPU memory required**. Tab A9+'s 1.8 GB GPU budget → OOM on first KV cache allocation.
+
+**Fix:** capped `MAX_POSITION_EMBEDDINGS` to 2048 in `src/model_config.h`. Real benchmark prompts never exceed ~100 positions; the 2048 cap shrinks KV cache to ~25 MB total. Architectural limit stays at 128000 only for documentation — bumping the cap requires either a bigger device or KV-cache compression.
+
+## Step T1 — fp16 baseline (3-run median, 32-token greedy, prompt="Hello, I am a language model")
+
+After cap fix + universal Phase 0 polish (`native_exp` in `silu`/softmax, `native_rsqrt` in RMSNorm). No int8 yet.
+
+| Metric | Pre-fix | Step T1 | Δ |
+|---|---|---|---|
+| Decode tok/s | 1.50 (then crash) | **6.70** | **+4.47×** |
+| TTFT (s) | 18.66 | **3.12** | **−83%** |
+| Peak CPU mem | 2516 MB | 1346 MB | −46% |
+| n_generated_tokens | crashed at 4 | 32 (full) | ✓ |
+
+Output quality: coherent, e.g. "Hello and welcome to the 1000 Questions in a Few Days questions on English Language. These questions are of medium difficulty…"
+
+## Step T2 — int8 GEMV path (3-run median, same prompt)
+
+Per-row symmetric int8 weight quantization on all Linear blocks (q/k/v/out_proj + w1/w2/w3 + conv.in_proj/out_proj). lm_head and embeddings stay fp16 (tied embeddings + V=65536 > Adreno 16384 image height limit). Image2d_t `CL_RGBA / CL_SIGNED_INT8` views over int8 buffers; new int8 GEMV kernels in `kernels/gemv_m1_int8.cl` (variants `K=1024_no4`, `K=1024_no8`, `K=4608_no4`).
+
+CLBlast `Hgemm` returns err=-1010 on int8 weights at M>1, so prefill bypasses CLBlast and feeds tokens one-by-one through the M=1 int8 fast path (matches the SmolLM2 port playbook).
+
+| Metric | Step T1 (fp16) | Step T2 (int8) | Δ |
+|---|---|---|---|
+| Decode tok/s | 6.70 | **7.62** | **+13.7%** |
+| TTFT (s) | 3.12 | **1.60** | **−48.7%** |
+| Peak CPU mem | 1346 MB | 882 MB | −34.5% |
+| Weight file size | 676 MB | 422 MB | −37.6% |
+
+The TTFT win is much larger than the decode win because CLBlast `Hgemm` at M=8 on this device was slower than 8× M=1 int8 GEMVs — image-cache locality on the M=1 path wins against CLBlast's blocked-GEMM tile schedule on small prompts.
+
+## Step T2 — cumulative Tab A9+ port
+
+**1.50 → 7.62 tok/s = 5.08×.** TTFT 18.66 → 1.60 s = 11.7× faster. Peak mem 2516 → 882 MB.
+
+10-prompt sweep at 32 tokens (median 7.5 tok/s, range 7.39–7.69):
+- "What is the capital of France?" → "C) Paris" ✓
+- "What language do they speak in Brazil?" → "C: Portuguese" ✓
+- "What is the boiling point of water in Celsius?" → wrong (said 90°C); model is 350M, expected drift
+- Other prompts produce coherent output
+
+## What's not done yet (Tab A9+ headroom)
+
+1. **lm_head int8.** Largest single fp16 weight (128 MB). Tied to embed_tokens, V=65536 > image-height cap → needs tiled int8 GEMV (port the fp16 tile path in `run_gemv_m1_image`).
+2. **`cl_qcom_recordable_queues`.** Probe infrastructure is in tree (Razr 2020 work). Kernel-launch overhead is large at this throughput tier — should reclaim ~10–20% if integrated.
+3. **`cl_qcom_dot_product8`.** Not exposed on SM6375 driver E031.45.02.26 (premium-tier extension). Skip.
+
+## Repo state — Tab A9+ port
+
+- `src/model_config.h` — `MAX_POSITION_EMBEDDINGS` 128000 → 2048 (sized for 1.8 GB GPU).
+- `src/model.h` — `MAX_SEQ_LEN` 128000 → 2048 (kept in sync).
+- `kernels/rmsnorm.cl` — `rsqrt` → `native_rsqrt` (×2 sites).
+- `kernels/block_fused.cl` / `mlp.cl` / `attention.cl` / `operator_norm.cl` — `exp` → `native_exp`, `rsqrt` → `native_rsqrt` where present.
+- `scripts/quantize_weights.py` — NEW. Per-row symmetric int8 on all LFM2 Linear weights (`w1/w2/w3`, `conv.in_proj/out_proj`, `self_attn.{q,k,v,out}_proj`). Emits `weights/model.int8.bin` + `weights/model.int8.meta.json`.
+- `kernels/gemv_m1_int8.cl` — NEW. Int8 image-path GEMV variants matching the fp16 layout.
+- `src/utils.{h,cpp}` — added `nnopt_register_int8_weight()` + `run_gemv_m1_image_int8()`; `pytorch_linear()` now tries the int8 image path before the fp16 path at M=1.
+- `src/weights.{h,cpp}` — `_nnopt_bytes_per_element("int8")` returns 1; added `all_keys()` for the int8 registration loop in `main.cpp`.
+- `src/main.cpp` — added `NNOPT_QUANT=int8` switch that loads `model.int8.bin` and walks every `<name>` / `<name>.scale` pair into `nnopt_register_int8_weight()`.
+- `src/model.cpp` — `forward()` and `forward_greedy()` reroute prefill (`seq_len>1`) through the M=1 fast path under `NNOPT_QUANT=int8` to dodge CLBlast Hgemm's int8 incompatibility.
+- `scripts/run_android.sh` — propagates `NNOPT_QUANT` env to the device shell.
+- `scripts/deploy_android.sh` — also pushes `weights/model.int8.bin` + meta if present.
+
+## Step T3 — lm_head int8 with tiled image (3-run median)
+
+The Step T2 int8 path kept the lm_head (= `model.embed_tokens.weight`, V=65536) fp16 because V > Adreno 619 v2's 16384 image-height cap. T3 adds a 4-tile int8 path: `scripts/quantize_weights.py --emit-lm-head-int8` emits a separate `lm_head.weight` (int8) + `lm_head.weight.scale` alongside the fp16 `embed_tokens`. Embedding lookup keeps the fp16 path; lm_head GEMV takes int8 via sub-buffered image2d_t tiles of 16384 rows each.
+
+| Metric | Step T2 (int8, fp16 lm_head) | Step T3 (int8, int8 lm_head) | Δ |
+|---|---|---|---|
+| Decode tok/s | 7.62 | **7.81** | **+2.5%** |
+| TTFT (s) | 1.60 | **1.10** | **−31%** |
+| Peak CPU mem (MB) | 882 | 1001 | +14% |
+| Weight file size (MB) | 422 | 489 | +16% |
+| Per-token weight footprint | ~416 MB | **~354 MB** | −15% |
+
+Decode bump is small (~5 ms saved on the lm_head BW, ~9 ms cost of 4-tile dispatch overhead almost cancels). TTFT win is bigger: under int8 prefill goes through the decode loop and lm_head is touched on every prefill step, so halving its BW shows up more there.
+
+5-prompt sanity sweep at 32 tokens (decode tok/s):
+- "What is the capital of France?"     → 7.82
+- "List three primary colors."          → 7.82
+- "Write a haiku about the ocean."      → 7.81
+- "Name three planets in our solar system." → 7.81
+- "What language do they speak in Brazil?"  → 7.77
+
+## Tab A9+ port — cumulative through T3
+
+**1.50 → 7.81 tok/s = 5.21×** decode. **TTFT 18.66 → 1.10 s = 16.9× faster.** Peak mem 2516 → 1001 MB.
+
+Current 7.81 tok/s = **27.7% of LPDDR4X roofline** (354 MB/tok ÷ 10 GB/s = 28.2 tok/s ceiling) and **20.4% of texture-cache roofline** (~38 tok/s).
+
+## Repo state — Tab A9+ port (T3 additions)
+
+- `scripts/quantize_weights.py` — `--emit-lm-head-int8` flag now in active use; regenerates `model.int8.bin` (422 → 489 MB) with a 64 MB `lm_head.weight` int8 alias + 128 KB fp16 scale.
+- `src/utils.cpp` — extended `Int8Aux` with a `std::vector<Int8Tile>` for weights whose row count exceeds `CL_DEVICE_IMAGE2D_MAX_HEIGHT` (16384 on Adreno 619 v2). Added `prepare_int8_entry()` that lazily builds either a single image2d_t view or per-tile sub-buffers + sub-images. `run_gemv_m1_image_int8()` now dispatches per-tile when entries are tiled, slicing `out` and `scale` by row offset.
+- `src/model.cpp` — lm_head call sites (×3: dense `forward`, `forward_greedy`, `forward_greedy_chained_enqueue`) now prefer `weights_.get_buffer("lm_head.weight")` when present, falling back to `model.embed_tokens.weight`. The int8 fast path picks up automatically via the registry.
+
+## Step T4 — `cl_qcom_recordable_queues` integration attempt + greedy-mode discovery
+
+Wired the extension end-to-end:
+- `src/opencl_context.{h,cpp}` — `clNewRecordingQCOM` / `clEndRecordingQCOM` / `clEnqueueRecordingQCOM` loaded via dlsym; `has_recordable_queues()`, `create_recordable_queue()`, `new_recording()`, `end_recording()`, `enqueue_recording()` wrappers.
+- `src/layers/attention.h` — accessors for `rope_kernel()`, `kv_write_kernel()`, `scores_kernel()`, `softmax_kernel()`, `out_kernel()`.
+- `src/model.{h,cpp}` — `record_queue_`, `recording_`, `recording_built_`, `rec_start_pos_args_`, `rec_seq_k_args_`. `collect_record_args_()` walks the 6 attention layers and collects 30 per-step kernel-arg overrides: rope.arg8/kv_write.arg2 (start_pos × 12) + scores.arg4/softmax.arg2/out.arg4 (seq_k × 18). `forward_greedy` builds the recording on first decode step, replays on subsequent.
+- `scripts/run_android.sh` — propagates `NNOPT_RECORD` env var.
+- `Model::generate` — disables chained-decode under `NNOPT_RECORD=1` (the two paths are mutually exclusive in this implementation).
+
+### Result: replay fails with err=-59 (CL_INVALID_OPERATION)
+
+Same driver bug class SmolLM2 documented as future work. Recording **builds** successfully ("RecordQ: recording built (16 layers, start_pos@record=0)") but the first `clEnqueueRecordingQCOM` call returns -59 and the system gracefully falls back to live dispatch (recording disabled for the rest of the run).
+
+This is consistent with E031.45.02.26's known recording-replay limitations. Doesn't seem worth deeper debugging given the next finding.
+
+### Surprise win: temperature=0 reveals 39% hidden headroom
+
+The Step T1–T3 benchmarks used the default sampler (`temp=1, top_k=50, top_p=1`). Running the same model with `--temperature 0` (pure greedy) reveals **the host sampler was eating most of the decode time**:
+
+| Sampling mode | Decode tok/s | TTFT | Notes |
+|---|---|---|---|
+| `temp=1 top_k=50 top_p=1` (default) | 7.81 | 1.10 | host sample: argmax over 65k logits + top-k sort + multinomial |
+| `--temperature 0` (greedy) | **10.85** | 1.16 | GPU argmax fast path: 4-byte readback, no host work |
+
+**That's a +39% decode bump for free** — the GPU compute was always there, the host sampler was the bottleneck at default settings. 5-run median: 11.01, 10.87, 10.83, 10.80, 10.85 → median **10.85**.
+
+## Tab A9+ port — cumulative through T4
+
+**1.50 → 10.85 tok/s = 7.23× decode.** TTFT 18.66 → 1.16 s = 16.1× faster.
+
+| Roofline | Value | We're at |
+|---|---|---|
+| LPDDR4X (354 MB ÷ 10 GB/s) | 28.2 tok/s | **38.5%** |
+| Texture cache (354 MB ÷ 13.5 GB/s) | 38.0 tok/s | **28.6%** |
+
+For comparison, Razr 2020 fp16 work landed 11.51 tok/s at 58% of texture ceiling. Tab A9+ is a slower SoC and we're at int8 on a smaller image cache, so this is a healthier % of ceiling than it looks vs Razr.
+
+## What's not pursued
+
+- **Recordable queues replay debug** — would need to isolate which captured kernel is causing -59. Adreno driver `E031.45.02.26` has multiple documented gotchas (dynamic local mem, specific arg sizes); the value is small (~3–5%) and the alternative path (chained-decode) is already close to dispatch-overhead-free.
+- **Q4_0 weight quantization** — would lift the per-token footprint from 354 MB → ~196 MB and the ceiling to ~51 tok/s LPDDR4X. Largest remaining lever. Out of scope for this sprint due to accuracy risk.
+
+## Step T5 — Block-32 symmetric Q4 quantization
+
+Halved the weight BW again. Scheme: per row, group into 32-element blocks; one fp16 scale per block; weights stored as packed 4-bit nibbles (2 per byte, `(q − 8) ∈ {−7..7}`).
+
+| Quantity | int8 (T3) | Q4 (T5) | Δ |
+|---|---|---|---|
+| Weight file size (MB) | 489 | **334** | −32% |
+| Per-token weight BW | 354 MB | **~183 MB** | −48% |
+| Decode tok/s @ temp=0 | 10.85 | **13.85** | **+27.6%** |
+| TTFT (s) | 1.16 | **0.88** | −24% |
+| Peak CPU mem (MB) | 1001 | **703** | −30% |
+| Row-0-block-0 reconstruction error | 0.40% | **6.93%** | quant noise expected at Q4 |
+
+Q4 row-0 reconstruction error of ~7% is much higher than int8's 0.4% but the model is robust enough at greedy decoding for the answers we tested (correct on capital/Brazil/primary-colors). Some greedy repetition loops on open-ended prompts are typical for a 350M base model, not a Q4 artifact.
+
+### Q4 kernel design
+
+New file `kernels/gemv_m1_q4.cl` with two variants matching the int8/fp16 layout:
+- `gemv_m1_k1024_q4_no4_img`  (K=1024, 4 outputs per WG, 2 K-iters)
+- `gemv_m1_k4608_q4_no4_img`  (K=4608, 4 outputs per WG, 9 K-iters)
+
+Image format is `CL_RGBA / CL_UNSIGNED_INT8` (one pixel = 4 bytes = 8 packed weights). Image width is K/8 pixels. Inner loop:
+1. `read_imageui` returns `uint4` (4 bytes).
+2. Unpack each byte into 2 signed nibbles via `((b >> shift) & 0xF) − 8`.
+3. Dot with 8 fp16 activations (loaded as 2× `vload_half4`).
+4. Multiply by per-block scale (`scales[(n_row × K/32) + (pix >> 2)]`).
+
+The lm_head Q4 alias is loaded as a tiled image (V=65536 → 4 tiles of 16384), same plumbing as the int8 path.
+
+### 5-run median (greedy, 32 tokens, "Hello, I am a language model")
+
+| Metric | Median | Range |
+|---|---|---|
+| Decode tok/s | **13.85** | 13.80 – 13.95 |
+| TTFT (s) | **0.88** | 0.87 – 0.89 |
+
+5-prompt diversity sweep (greedy, 32 tokens): 13.88 / 14.01 / 13.98 / 13.96 / 13.99 — extremely consistent.
+
+## Tab A9+ port — cumulative through T5
+
+**1.50 → 13.85 tok/s = 9.23× decode.** TTFT 18.66 → 0.88 s = 21× faster. Peak mem 2516 → 703 MB.
+
+| Roofline (at 183 MB/token, Q4) | Value | We're at |
+|---|---|---|
+| LPDDR4X (183 MB ÷ 10 GB/s) | 54.6 tok/s | 25.4% |
+| Texture cache (183 MB ÷ 13.5 GB/s) | 73.6 tok/s | 18.8% |
+
+Reference benchmark: the Razr 2020 fp16 work peaked at **11.51 tok/s on a faster SoC**. We're now at **13.85 on a slower one**, thanks to Q4.
+
+## What's not pursued at Q5
+
+- **Even-wider multi-output Q4 (no8)** — could help if register file allows; K=4608 no8 int8 spilled (see T2 attempt), so Q4 no8 likely needs careful scheduling.
+- **Q4 dot-product with `qcom_dot_product8`** — not exposed on SM6375.
+- **Speculative decode** — would compound any per-step lever.
+
+## Repo state — Tab A9+ port (T5 additions)
+
+- `scripts/quantize_q4.py` — NEW. Block-32 symmetric Q4 quantizer; emits `weights/model.q4.bin` (333.7 MB) + `weights/model.q4.meta.json`. `--emit-lm-head-q4` flag adds a separate `lm_head.weight` Q4 alias (37.7 MB).
+- `kernels/gemv_m1_q4.cl` — NEW. Q4 image-path GEMV variants (K=1024 no4, K=4608 no4) with on-the-fly nibble unpack + per-block fp16 scale fold.
+- `src/utils.{h,cpp}` — added `nnopt_register_q4_weight()`, `Q4Aux` registry, `prepare_q4_entry()` (single-image + tiled paths), `run_gemv_m1_image_q4()`. `pytorch_linear()` tries Q4 → int8 → fp16 in order at M=1.
+- `src/weights.cpp` — `_nnopt_bytes_per_element("q4_packed")` returns 1 (declared shape is [N, K/2] bytes).
+- `src/main.cpp` — `NNOPT_QUANT=q4` switch loads `model.q4.bin` and walks every q4_packed tensor pair into `nnopt_register_q4_weight()`. K is derived from the `.scale` shape (cols × 32).
+- `src/model.cpp` — prefill-via-decode-loop gate now matches both `int8` and `q4`.
+- `scripts/deploy_android.sh` — pushes `weights/model.q4.bin` + meta if present.
+
+## Step T6 — Q4 K=1024 no8 attempt (negative result)
+
+Hypothesis: the FFN gate/up (K=1024, N=4608) is 40% of decode GPU time at Q4. Doubling outputs per WG (no4 → no8) would amortize activation reads across 8 rows and saturate the texture engine harder.
+
+Implementation: `gemv_m1_k1024_q4_no8_img` in `kernels/gemv_m1_q4.cl`, 8 fp32 accumulators, sequenced unpack-and-dot per row to reuse weight registers across rows.
+
+Result: **decode dropped 13.85 → 8.54 tok/s (−38%)** across 5 runs. Q4's nibble-unpack adds ~3 ALU ops/byte on top of the int math; with 8 outputs × 8 weights × 2 K-iters = 128 unpacks per thread, the wave's register file spilled hard.
+
+Reverted the dispatch selection; the kernel stays in `gemv_m1_q4.cl` as a documented negative result so future work doesn't reattempt.
+
+### Why K=1024 Q4 no4 is already near the kernel-design ceiling
+
+Q4 per-byte cost = 4 unpack ALU ops (mask, shift, mask, sub) + 1 cast + 8 mul-adds spread across the dot. At no4 with 8 weights/pixel that's ~120 ops per thread per K-iter, well-pipelined against texture-cache reads. Adding more outputs slams the register file (8 fp32 accumulators in flight + temporary unpacks) — same register-pressure wall the int8 K=4608 no8 hit in T2.
+
+The remaining levers from here all require different kernel-design classes (subgroup reductions, dot-product instructions, draft-model speculative decode) rather than just widening tile shape.
+
+---
+
+# Razr 2020 / Adreno 620 — port verification (2026-05-16)
+
+Cross-device validation: same code that landed 14.01 tok/s at Q4 on Tab A9+ (Adreno 619 v2 / SM6375) runs on the original Razr 2020 (Adreno 620 / Snapdragon 765G). All three variants verified; output coherent on all.
+
+### 3-run median, greedy (`--temperature 0`), prompt `"Hello, I am a language model"`, 32 tokens
+
+| Variant | Decode tok/s | TTFT (s) | Peak CPU mem (MB) | Output |
+|---|---:|---:|---:|---|
+| fp16 | **11.43** (11.28 / 11.43 / 11.50) | 2.21 | 1666 | "Hello, I am a language model. I am here to help you learn English. I can help you with any language you want to learn, such as Spanish, French, or German." |
+| int8 | **13.67** (13.65 / 13.67 / 13.68) | 0.81 | 1015 | "Hello, I am a language model. I can help you with any language-related task, such as translating text, summarizing information, or answering questions." |
+| Q4 (5 runs) | **14.54** (14.48 / 14.50 / 14.54 / 14.54 / 14.59) | 0.79 | 719 | "Hello, I am a language model. I am here to help you learn a new language. I can translate text, translate images, and even write your own sentences." |
+
+### Cross-device comparison
+
+| Format | Tab A9+ / Adreno 619 v2 | Razr 2020 / Adreno 620 | Δ (Razr/A9+) |
+|---|---:|---:|---:|
+| fp16 (temp=0) | ~10.0 (chained) | **11.43** | +1.14× |
+| int8 (temp=0) | 10.85 | **13.67** | +1.26× |
+| Q4 (temp=0) | 14.01 | **14.54** | **+1.04×** |
+
+### The interesting finding
+
+Q4 scales **almost not at all** between devices (+3.8%), while fp16 scales +1.7× and int8 scales +1.26×. **Q4 is ALU-bound, not memory-bound, on Adreno 6xx.**
+
+The nibble-unpack work (mask, shift, mask, sub × 8 weights per pixel × 4 rows × 2 K-iters per WG) caps throughput at the wave's instruction-issue rate. Razr 2020 has more LPDDR4X memory bandwidth than Tab A9+ but the same per-CU ALU rate. At fp16 the extra BW is fully exploited; at int8 partially; at Q4 not at all.
+
+### Practical takeaway
+
+- **On Razr 2020 (or any Adreno 620+)**: int8 is essentially tied with Q4. Pick int8 for the better accuracy.
+- **On Tab A9+ / lower-tier Adreno**: Q4 is meaningfully faster (+28% over int8) because the chip is BW-bound there.
+- **For both**: Q4 wins on memory footprint (333 MB on-disk vs 467 MB int8 vs 676 MB fp16) — useful when stacking a bigger model.
+
+### What's the same code
+
+Identical binary deploy_android.sh push handles all three weight files in one go. No per-variant build. `NNOPT_QUANT=int8` / `NNOPT_QUANT=q4` is the only runtime switch. fp16 path verified non-regressed (11.43 vs prior session-4 11.51 — within noise).

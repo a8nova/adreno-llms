@@ -27,15 +27,14 @@ NNOPT_DTYPE=fp16 ./scripts/run_android.sh "Hello I am a language model" 32 --tem
 
 ## Performance
 
-Razr 2020 / Adreno 620, fp16, greedy (`temperature=0, seed=42`), 32-token generation, 3-run warm median measured 2026-05-11.
+Razr 2020 / Adreno 620 / Snapdragon 765G, fp16, greedy (`--temperature 0`), 32-token generation, 3-run warm median measured 2026-05-16.
 
-| | Decode tok/s | TTFT (s) |
-|---|---:|---:|
-| Measured today | **10.49** | **2.31** |
-| min / max across 3 runs | 10.36 / 10.51 | — |
-| Roofline ceiling (10 GB/s) | 14.8 | — |
+| | Decode tok/s | TTFT (s) | Peak CPU mem (MB) |
+|---|---:|---:|---:|
+| Measured today | **10.19** | **2.41** | **2580** |
+| Roofline ceiling (10 GB/s) | 14.8 | — | — |
 
-Per-token weight footprint: ~676 MB (140 MB attention + 336 MB MLP + 200 MB tied lm_head). 71% of the 10 GB/s memory-bandwidth ceiling. Full optimization log — including the 13.5× sprint that took decode from 0.70 → 10.49 tok/s via custom GEMV M=1 + native_exp silu + image2d w_out — in [BENCHMARK.md](./BENCHMARK.md).
+Per-token weight footprint: ~676 MB (140 MB attention + 336 MB MLP + 200 MB tied lm_head). 69% of the 10 GB/s memory-bandwidth ceiling. Full optimization log — including the 13.5× sprint that took decode from 0.70 → 10.49 tok/s via custom GEMV M=1 + native_exp silu + image2d w_out — in [BENCHMARK.md](./BENCHMARK.md).
 
 ## Layout
 

@@ -32,6 +32,20 @@ public:
                    int seq_q,
                    int start_pos);
 
+    // Accessors so Model::forward_greedy can collect per-step kernel-arg
+    // overrides for the cl_qcom_recordable_queues replay path. Per LFM2
+    // decode step at seq_q=1:
+    //   rope_kernel    arg 8 = start_pos
+    //   kv_write_kernel arg 2 = start_pos
+    //   scores_kernel   arg 4 = seq_k
+    //   softmax_kernel  arg 2 = seq_k
+    //   out_kernel      arg 4 = seq_k
+    cl_kernel rope_kernel()    const { return rope_kernel_;    }
+    cl_kernel kv_write_kernel() const { return kv_write_kernel_; }
+    cl_kernel scores_kernel()  const { return scores_kernel_;  }
+    cl_kernel softmax_kernel() const { return softmax_kernel_; }
+    cl_kernel out_kernel()     const { return out_kernel_;     }
+
 private:
     bool ensure_rope_tables(cl_command_queue queue, int seq_len);
     bool ensure_kv_cache();

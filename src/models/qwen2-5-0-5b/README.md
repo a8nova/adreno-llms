@@ -1,6 +1,6 @@
 # Qwen2.5-0.5B on Adreno (Android)
 
-Alibaba's Qwen2.5-0.5B (LLaMA-style + GQA) ported to C++/OpenCL for Adreno 6xx GPUs on non-flagship Android. Verified on Motorola Razr 2020 (Adreno 618).
+Alibaba's Qwen2.5-0.5B (LLaMA-style + GQA) ported to C++/OpenCL for Adreno 6xx GPUs on non-flagship Android. Verified on Motorola Razr 2020 (Adreno 620 / Snapdragon 765G).
 
 - **Upstream:** [Qwen/Qwen2.5-0.5B](https://huggingface.co/Qwen/Qwen2.5-0.5B)
 - **Parameters:** 500M
@@ -27,15 +27,14 @@ NNOPT_DTYPE=fp16 ./scripts/run_android.sh "Once upon a time" 64
 
 ## Performance
 
-Razr 2020 / Adreno 618, fp16, greedy (`temperature=0, seed=42`), 32-token generation, canonical token IDs, 5-run warm median measured 2026-05-06.
+Razr 2020 / Adreno 620 / Snapdragon 765G, fp16, greedy (`--temperature 0`), 32-token generation, 3-run warm median measured 2026-05-16.
 
-| | Decode tok/s | TTFT (s) |
-|---|---:|---:|
-| Measured today | **8.45** | **2.59** |
-| min / max across 5 runs | 8.27 / 8.99 | — |
-| Roofline ceiling (10 GB/s) | 10.6 | — |
+| | Decode tok/s | TTFT (s) | Peak CPU mem (MB) |
+|---|---:|---:|---:|
+| Measured today | **10.36** | **3.66** | **2720** |
+| Roofline ceiling (10 GB/s) | 10.6 | — | — |
 
-Per-token weight footprint: ~942 MB. Reaches ~80% of the memory-bandwidth ceiling — the highest utilization across the models in this repo. Full optimization log in [BENCHMARK.md](./BENCHMARK.md).
+Per-token weight footprint: ~942 MB. Reaches ~98% of the memory-bandwidth ceiling — the highest utilization across the models in this repo. Full optimization log in [BENCHMARK.md](./BENCHMARK.md).
 
 ### Steps 17 + 18: chained cl_mem decode + fused QKV (+21.2% total)
 
@@ -55,7 +54,7 @@ Per-token weight footprint: ~942 MB. Reaches ~80% of the memory-bandwidth ceilin
 
 ### int8 W8A16 attempt — reverted
 
-Tried per-channel symmetric int8 weights (W8A16) for `lm_head` + `down_proj` + `gate_proj` + `up_proj` via packed `CL_RGBA + CL_SIGNED_INT8` image2d. The same-session A/B did show a relative gain (+15% over the degraded baseline measured that day), but the absolute number never matched the 8.45 tok/s fp16 result in this README, so it wasn't shipped. Lesson: on Adreno, the texture engine matters more than the dtype — `fp16 + image2d` beats `int8 + buffer`, and only `int8 + image2d` (with tiling for `lm_head`'s N=151936) compounds the bytes saving with the texture-cache amplification. Even then, the per-dispatch CPU overhead and the small-N projections (k/v at N=128) eat the win at this model size on Adreno 618.
+Tried per-channel symmetric int8 weights (W8A16) for `lm_head` + `down_proj` + `gate_proj` + `up_proj` via packed `CL_RGBA + CL_SIGNED_INT8` image2d. The same-session A/B did show a relative gain (+15% over the degraded baseline measured that day), but the absolute number never matched the fp16 result in this README, so it wasn't shipped. Lesson: on Adreno, the texture engine matters more than the dtype — `fp16 + image2d` beats `int8 + buffer`, and only `int8 + image2d` (with tiling for `lm_head`'s N=151936) compounds the bytes saving with the texture-cache amplification. Even then, the per-dispatch CPU overhead and the small-N projections (k/v at N=128) eat the win at this model size on Adreno 620.
 
 ## Layout
 

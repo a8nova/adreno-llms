@@ -10,24 +10,27 @@ https://github.com/user-attachments/assets/c5723e58-6bc7-4fbc-921b-59388e26f2c9
 
 ## 📊 Models
 
-Decode tok/s = 5-run warm median (OpenELM-270M is 10-run), fp16, greedy, 32-token generation, measured 2026-05-07.
+All ports run on the **Motorola Razr 2020** (Snapdragon 765G / **Adreno 620**, 3.9 GB GPU global memory). Decode tok/s = warm 3-run median, greedy (`--temperature 0`), 32-token generation. Peak CPU mem = highest `peak_cpu_memory_mb` reading across the run — the actual host-process working set during inference (weights + KV cache + activations + driver overhead). Measured 2026-05-16.
 
-| Model | Params | Architecture | Device | Decode tok/s | TTFT (s) | Notes |
-|---|---:|---|---|---:|---:|---|
-| [Mamba2-130M](src/models/mamba2-130m/) | 130M | SSD | Razr 2020 (Adreno 618) | 23.18 | 1.53 | State-space duality |
-| [Mamba-130M](src/models/mamba-130m/) | 130M | SSM | Razr 2020 (Adreno 618) | 22.15 | 1.60 | No attention |
-| [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | 135M | LLaMA + GQA | Razr 2020 (Adreno 618) | 23.65 | 1.53 | Instruct-tuned; 61% of ceiling |
-| [OpenELM-270M](src/models/openelm-270m/) | 270M | LLaMA-style + tied lm_head | Razr 2020 (Adreno 618) | **14.81** (32 tok) / **15.22** (40 tok) | 1.93 | **3.31× over prior 4.47**; 78.9% of 10 GB/s ceiling at 40-token median |
-| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | 350M | Hybrid conv+attn | Razr 2020 (Adreno 620) | **11.51** | 3.73 | Liquid AI hybrid; 58% of texture ceiling, conv-block fused decode + `__constant` x in no8_img GEMV |
-| [Granite-4.0-350M](src/models/granite-4-0-350m/) | 350M | Dense decoder + GQA | Razr 2020 (Adreno 620) | **10.49** | 2.31 | IBM Granite; 71% of 10 GB/s ceiling, custom GEMV M=1 + `native_exp` silu + image2d w_out |
-| [Qwen2.5-0.5B](src/models/qwen2-5-0-5b/) | 500M | LLaMA + GQA | Razr 2020 (Adreno 618) | **10.41** | 2.59 | Largest in the repo; chained cl_mem decode + fused QKV → 70% of 14 GB/s ceiling |
+| Model | Params | Architecture | Decode tok/s | TTFT (s) | Peak CPU mem (MB) | Notes |
+|---|---:|---|---:|---:|---:|---|
+| [Mamba2-130M](src/models/mamba2-130m/) fp16 | 130M | SSD | **24.26** | 1.61 | 946 | State-space duality |
+| [Mamba-130M](src/models/mamba-130m/) fp16 | 130M | SSM | 21.52 | 1.62 | 686 | No attention |
+| [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) fp16 | 135M | LLaMA + GQA | **24.40** | 1.67 | 923 | Instruct-tuned; 61% of ceiling |
+| [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) **int8** | 135M | LLaMA + GQA | 24.21 | **0.91** | **670** | Per-row symmetric int8; −27% memory at tied tok/s |
+| [OpenELM-270M](src/models/openelm-270m/) fp16 | 270M | LLaMA-style + tied lm_head | 14.65 | 2.00 | 1371 | 78.9% of 10 GB/s ceiling |
+| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) fp16 | 350M | Hybrid conv+attn | 11.43 | 2.21 | 1666 | Liquid AI hybrid; 58% of texture ceiling |
+| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) **int8** | 350M | Hybrid conv+attn | 13.67 | **0.81** | 1015 | +19.6% vs fp16 |
+| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) **Q4** | 350M | Hybrid conv+attn | **14.54** | **0.79** | **719** | +27.2% vs fp16; ALU-bound nibble unpack |
+| [Granite-4.0-350M](src/models/granite-4-0-350m/) fp16 | 350M | Dense decoder + GQA | 10.19 | 2.41 | 2580 | IBM Granite; 71% of 10 GB/s ceiling |
+| [Qwen2.5-0.5B](src/models/qwen2-5-0-5b/) fp16 | 500M | LLaMA + GQA | 10.36 | 3.66 | 2720 | Largest in the repo; 70% of 14 GB/s ceiling |
 
 
 State-of-the-art small language models running on **Adreno 6xx GPUs** — the GPU class found in mid-range Android phones. Pure C++/OpenCL inference, cross-compiled on macOS, deployed via `adb` to `/data/local/tmp/`.
 
 Each model ships with **hand-written OpenCL kernels tuned for Adreno's WG=64 wave size, vec4 fp16 ALUs, and image-cache texture path:**
 
-- **`gemv_m1.cl`** — cooperative-WG=64 GEMV with vec4 fp16 + fp32 accumulator + `__local`-mem tree reduce. The decode-path workhorse, replacing CLBlast HGemm at every M=1 site (q/k/v/o-proj, gate/up/down-proj, lm_head). Hand-unrolled K-specialized variants (`_k768`, `_k1280`, `_k1536`) plus a generic-K **`_no4_coalesced`** path (vec4-strided across the warp for coalesced 256-byte DRAM reads) that hits 9–12 GB/s on Adreno 618. Adding the K=1280 specialization + coalesced generic to OpenELM-270M was the single largest unlock — **2.3× decode-throughput jump (4.60 → 10.59 tok/s)** before any other host-side work landed.
+- **`gemv_m1.cl`** — cooperative-WG=64 GEMV with vec4 fp16 + fp32 accumulator + `__local`-mem tree reduce. The decode-path workhorse, replacing CLBlast HGemm at every M=1 site (q/k/v/o-proj, gate/up/down-proj, lm_head). Hand-unrolled K-specialized variants (`_k768`, `_k1280`, `_k1536`) plus a generic-K **`_no4_coalesced`** path (vec4-strided across the warp for coalesced 256-byte DRAM reads) that hits 9–12 GB/s on Adreno 620. Adding the K=1280 specialization + coalesced generic to OpenELM-270M was the single largest unlock — **2.3× decode-throughput jump (4.60 → 10.59 tok/s)** before any other host-side work landed.
 - **`block_fused.cl`** — fused-residual GEMV variants (`gemv_m1_no4_radd`, `gemv_m1_k1280_no4_radd`, `gemv_m1_no4_radd_coalesced`) that write `hidden[i] += sum` in a single launch, killing the separate `element_add` kernel after attn out-proj and MLP down-proj.
 - **`attention.cl`** — grouped-query attention scores + softmax + out-proj.
 - **`mlp.cl` / `mlp_swiglu.cl`** — fused gate × silu × up.
@@ -54,7 +57,7 @@ Decode-loop techniques that compound on top of the kernels:
 git clone https://github.com/a8nova/adreno-llms.git
 cd adreno-llms
 
-# Pick any model — example: SmolLM2-135M-Instruct
+# Pick any model — example: SmolLM2-135M-Instruct (fp16)
 ./scripts/fetch_weights.sh smollm2-135m-instruct
 
 cd src/models/smollm2-135m-instruct
@@ -65,9 +68,29 @@ NNOPT_DTYPE=fp16 ./scripts/run_android.sh "Once upon a time" 64
 
 Tokens stream to stdout as they decode.
 
+### Quantized variants (smaller, faster on some devices)
+
+LFM2.5-350M and SmolLM2-135M-Instruct ship int8 and (for LFM2) Q4 weight bundles alongside fp16. Same binary, runtime-switchable via `NNOPT_QUANT`:
+
+```bash
+# Fetch the quantized bundle in addition to fp16
+./scripts/fetch_weights.sh lfm2-5-350m --quant q4              # fp16 + Q4
+./scripts/fetch_weights.sh smollm2-135m-instruct --quant int8  # fp16 + int8
+
+# Build + deploy as usual (deploy pushes every weight bundle present locally)
+cd src/models/lfm2-5-350m
+NNOPT_DTYPE=fp16 ./scripts/build.sh --release
+NNOPT_DTYPE=fp16 ./scripts/deploy_android.sh
+
+# Run — NNOPT_QUANT picks which weight file the runtime loads
+NNOPT_DTYPE=fp16 NNOPT_QUANT=q4 ./scripts/run_android.sh "..." 32 --temperature 0
+```
+
+Or run `--quant fp16` (the default — no extra files) and generate the quantized bundles locally with `python3 scripts/quantize_weights.py` / `quantize_q4.py` inside each port. See each model's README for the precision spread + measured tok/s.
+
 ## 🎯 Hardware target
 
-- **Verified:** Motorola Razr 2020, Adreno 618, Snapdragon 765G, Android 11+.
+- **Verified:** Motorola Razr 2020, Adreno 620, Snapdragon 765G, Android 11+. Also tested on Samsung Galaxy Tab A9+ (Adreno 619 v2, Snapdragon 695) — see LFM2's BENCHMARK.md for cross-device numbers.
 - **Should work:** any arm64-v8a Android device with Adreno 6xx-class GPU (610, 612, 618, 619, 620, 630, 640, 650, 660, 680, 690, 695). Performance characteristics vary — the kernels are tuned around 768-thread Adreno 6xx wave behavior.
 - **Probably works (untested):** Adreno 7xx flagships should run; numbers will be higher but kernels aren't tuned for them.
 - **Won't hit these numbers:** Mali, PowerVR, Apple GPUs. The OpenCL code will run but the optimizations won't transfer.

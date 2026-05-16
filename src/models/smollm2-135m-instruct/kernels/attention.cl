@@ -125,7 +125,7 @@ __kernel void gqa_softmax(
   float sum = 0.0f;
   for (int c = 0; c < seq_k; ++c) {
     float v = LOAD(scores, base + c);
-    float e = exp(v - maxv);
+    float e = native_exp(v - maxv);
     sum += e;
     STORE(scores, base + c, e);
   }

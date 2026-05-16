@@ -8,6 +8,41 @@
 // Always use portable Khronos headers (works for cross-compilation to Android)
 #include <CL/cl.h>
 
+// ── cl_qcom_recordable_queues extension types (PDF §9.1.3).
+//   Not in stock cl_ext.h; declared inline so we can dlsym the entry points
+//   at runtime. CL_QUEUE_RECORDABLE_QCOM = bit 30 (used ALONE on
+//   clCreateCommandQueue per LFM2 finding).
+typedef void* cl_recording_qcom;
+struct cl_array_arg_qcom {
+    cl_kernel    kernel;
+    cl_uint      arg_indx;
+    size_t       arg_size;
+    const void*  arg_value;
+};
+struct cl_array_kernel_exec_info_qcom {
+    cl_kernel       kernel;
+    cl_uint         indx;
+    size_t          param_value_size;
+    const void*     param_value;
+};
+typedef cl_recording_qcom (CL_API_CALL *clNewRecordingQCOM_fn)(cl_command_queue, cl_int*);
+typedef cl_int (CL_API_CALL *clEndRecordingQCOM_fn)(cl_recording_qcom);
+typedef cl_int (CL_API_CALL *clReleaseRecordingQCOM_fn)(cl_recording_qcom);
+typedef cl_int (CL_API_CALL *clEnqueueRecordingQCOM_fn)(
+    cl_command_queue queue,
+    cl_recording_qcom recording,
+    size_t num_args,
+    const cl_array_arg_qcom* args,
+    size_t num_global_offsets,
+    const cl_array_kernel_exec_info_qcom* global_offsets,
+    size_t num_global_work_sizes,
+    const cl_array_kernel_exec_info_qcom* global_work_sizes,
+    size_t num_local_work_sizes,
+    const cl_array_kernel_exec_info_qcom* local_work_sizes,
+    cl_uint num_events_in_wait_list,
+    const cl_event* event_wait_list,
+    cl_event* event);
+
 class OpenCLContext {
 public:
     OpenCLContext();
@@ -36,9 +71,25 @@ public:
         const std::string& source,
         const std::string& options);
 
+    // ── cl_qcom_recordable_queues helpers (loaded via dlsym at init).
+    bool has_recordable_queues() const { return record_fns_loaded_; }
+    cl_command_queue create_recordable_queue();  // returns nullptr on failure
+    cl_recording_qcom new_recording(cl_command_queue q) const;
+    cl_int end_recording(cl_recording_qcom rec) const;
+    cl_int release_recording(cl_recording_qcom rec) const;
+    cl_int enqueue_recording(cl_command_queue live_q, cl_recording_qcom rec,
+                             size_t num_args, const cl_array_arg_qcom* args) const;
+
 private:
     cl_platform_id platform_ = nullptr;
     cl_device_id device_ = nullptr;
     cl_context context_ = nullptr;
     cl_command_queue queue_ = nullptr;
+
+    // cl_qcom_recordable_queues entry points (resolved at init via dlsym).
+    bool record_fns_loaded_ = false;
+    clNewRecordingQCOM_fn       fn_new_recording_     = nullptr;
+    clEndRecordingQCOM_fn       fn_end_recording_     = nullptr;
+    clReleaseRecordingQCOM_fn   fn_release_recording_ = nullptr;
+    clEnqueueRecordingQCOM_fn   fn_enqueue_recording_ = nullptr;
 };

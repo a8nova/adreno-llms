@@ -36,12 +36,17 @@
   #define STORE(p, i, v) ((p)[(i)] = (v))
 #endif
 
+#ifdef USE_SUBGROUP_REDUCE
+  #pragma OPENCL EXTENSION cl_khr_subgroups : enable
+#endif
+
 
 #define WG_SIZE 64
+#define MAX_SUBGROUPS 8
 
 // Common activations (declared here so any agent-added kernel in this
 // file can reuse them without re-declaring).
-inline float silu_f(float x) { return x / (1.0f + exp(-x)); }
+inline float silu_f(float x) { return x / (1.0f + native_exp(-x)); }
 inline float gelu_f(float x) {
   // tanh approximation — matches transformers GeLU.NEW_GELU.
   const float c0 = 0.7978845608f;          // sqrt(2/pi)
@@ -361,7 +366,7 @@ void fused_gate_up_silu_m1(
   }
   if (tid == 0) {
     float g = ls_gate[0];
-    STORE(out, c, (g / (1.0f + exp(-g))) * ls_up[0]);
+    STORE(out, c, (g / (1.0f + native_exp(-g))) * ls_up[0]);
   }
 }
 
@@ -516,7 +521,7 @@ void fused_gate_up_silu_m1_v4(
   }
   if (tid == 0) {
     float g = ls_gate[0];
-    vstore_half((g / (1.0f + exp(-g))) * ls_up[0], c, out);
+    vstore_half((g / (1.0f + native_exp(-g))) * ls_up[0], c, out);
   }
 }
 
@@ -573,7 +578,7 @@ void fused_gate_up_silu_m1_v4_img(
   }
   if (tid == 0) {
     float g = ls_gate[0];
-    vstore_half((g / (1.0f + exp(-g))) * ls_up[0], c, out);
+    vstore_half((g / (1.0f + native_exp(-g))) * ls_up[0], c, out);
   }
 }
 
@@ -786,6 +791,13 @@ void fused_down_residual_m1_no4_img(
 
 #endif // USE_FP16
 
+// Tiny kernel for the cl_qcom_recordable_queues probe (PDF §9.1.3).
+// One atomic add per dispatch — per-launch CPU overhead dominates, exposing
+// any bookkeeping savings the recording API provides.
+__kernel void probe_noop(__global int* counter, const int incr) {
+  if (get_global_id(0) == 0) atomic_add(counter, incr);
+}
+
 // SCAFFOLD-EMITTED (above, ready to call from host code):
 //   - fused_oproj_residual_m1      (every transformer)
 //   - fused_down_residual_m1       (every MLP with down-proj)
@@ -852,7 +864,7 @@ void fused_decode_attn_m1(
 
     // Step 1: QK^T — thread tid handles tokens tid, tid+64, tid+128, ...
     for (int t = tid; t < seq_k; t += WG_SIZE) {
-        const __global storage_t* k_t = k_cache + (size_t)t * KV_DIM + kvh * D;
+        const __global storage_t* k_t = k_cache + t * KV_DIM + kvh * D;
         float score = 0.0f;
         for (int d = 0; d < D; d++) score += LOAD(q_ptr, d) * LOAD(k_t, d);
         ls_scores[t] = score * scale;
@@ -862,26 +874,60 @@ void fused_decode_attn_m1(
     // Step 2: stable softmax — parallel max over ls_scores
     float mx = -1e30f;
     for (int t = tid; t < seq_k; t += WG_SIZE) mx = fmax(mx, ls_scores[t]);
+#ifdef USE_SUBGROUP_REDUCE
+    {
+        float subg_m = sub_group_reduce_max(mx);
+        const uint sg_id  = get_sub_group_id();
+        const uint sg_lid = get_sub_group_local_id();
+        const uint nsg    = get_num_sub_groups();
+        if (sg_lid == 0) ls_partial[sg_id] = subg_m;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (sg_id == 0) {
+            float v = (sg_lid < nsg) ? ls_partial[sg_lid] : -1e30f;
+            float tot = sub_group_reduce_max(v);
+            if (sg_lid == 0) ls_partial[0] = tot;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+#else
     ls_partial[tid] = mx;
     barrier(CLK_LOCAL_MEM_FENCE);
     for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
         if (tid < s) ls_partial[tid] = fmax(ls_partial[tid], ls_partial[tid + s]);
         barrier(CLK_LOCAL_MEM_FENCE);
     }
+#endif
     const float gmax = ls_partial[0];
 
     // exp(score - max) + sum
     float psum = 0.0f;
     for (int t = tid; t < seq_k; t += WG_SIZE) {
-        ls_scores[t] = exp(ls_scores[t] - gmax);
+        ls_scores[t] = native_exp(ls_scores[t] - gmax);
         psum += ls_scores[t];
     }
+#ifdef USE_SUBGROUP_REDUCE
+    {
+        float subg_s = sub_group_reduce_add(psum);
+        const uint sg_id  = get_sub_group_id();
+        const uint sg_lid = get_sub_group_local_id();
+        const uint nsg    = get_num_sub_groups();
+        if (sg_lid == 0) ls_partial[sg_id] = subg_s;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (sg_id == 0) {
+            float v = (sg_lid < nsg) ? ls_partial[sg_lid] : 0.0f;
+            float tot = sub_group_reduce_add(v);
+            if (sg_lid == 0) ls_partial[0] = tot;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+#else
     ls_partial[tid] = psum;
     barrier(CLK_LOCAL_MEM_FENCE);
     for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
         if (tid < s) ls_partial[tid] += ls_partial[tid + s];
         barrier(CLK_LOCAL_MEM_FENCE);
     }
+#endif
     const float inv_sum = 1.0f / ls_partial[0];
 
     for (int t = tid; t < seq_k; t += WG_SIZE) ls_scores[t] *= inv_sum;
@@ -892,7 +938,7 @@ void fused_decode_attn_m1(
     for (int d = tid; d < D; d += WG_SIZE) {
         float acc = 0.0f;
         for (int t = 0; t < seq_k; t++) {
-            acc += ls_scores[t] * LOAD(v_cache + (size_t)t * KV_DIM + kvh * D, d);
+            acc += ls_scores[t] * LOAD(v_cache + t * KV_DIM + kvh * D, d);
         }
         STORE(out_ptr, d, acc);
     }

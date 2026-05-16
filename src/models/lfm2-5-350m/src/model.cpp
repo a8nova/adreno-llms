@@ -146,8 +146,46 @@ bool Model::initialize() {
     }
   }
 
+  // ── cl_qcom_recordable_queues setup (opt-in via NNOPT_RECORD=1). The
+  // first forward_greedy decode step will both run the layers live AND
+  // capture them into a recording on record_queue_. Subsequent decode
+  // steps replay the recording with start_pos / seq_k arg overrides.
+  if (const char* r = std::getenv("NNOPT_RECORD"); r && r[0] == '1') {
+    if (cl_ctx_.has_recordable_queues()) {
+      record_queue_ = cl_ctx_.create_recordable_queue();
+      record_enabled_ = (record_queue_ != nullptr);
+      if (record_enabled_) {
+        collect_record_args_();
+        std::cerr << "RecordQ: enabled (" << rec_start_pos_args_.size()
+                  << " start_pos args, " << rec_seq_k_args_.size()
+                  << " seq_k args)" << std::endl;
+      }
+    } else {
+      std::cerr << "RecordQ: NNOPT_RECORD=1 set but extension unavailable" << std::endl;
+    }
+  }
+
   NNOPT_CHECKPOINT("Model::initialize() complete");
   return true;
+}
+
+void Model::collect_record_args_() {
+  // For each attention layer at decode (seq_q=1):
+  //   rope_kernel    arg 8 = start_pos
+  //   kv_write_kernel arg 2 = start_pos
+  //   scores_kernel   arg 4 = seq_k
+  //   softmax_kernel  arg 2 = seq_k
+  //   out_kernel      arg 4 = seq_k
+  rec_start_pos_args_.clear();
+  rec_seq_k_args_.clear();
+  for (int i : ATTENTION_LAYER_INDICES) {
+    if (!attn_[i]) continue;
+    if (cl_kernel k = attn_[i]->rope_kernel())     rec_start_pos_args_.push_back({k, 8});
+    if (cl_kernel k = attn_[i]->kv_write_kernel()) rec_start_pos_args_.push_back({k, 2});
+    if (cl_kernel k = attn_[i]->scores_kernel())   rec_seq_k_args_.push_back({k, 4});
+    if (cl_kernel k = attn_[i]->softmax_kernel())  rec_seq_k_args_.push_back({k, 2});
+    if (cl_kernel k = attn_[i]->out_kernel())      rec_seq_k_args_.push_back({k, 4});
+  }
 }
 
 std::vector<float> Model::forward(const std::vector<int32_t>& input_ids) { return forward(input_ids, /*start_pos=*/0); }
@@ -157,6 +195,21 @@ std::vector<float> Model::forward(const std::vector<int32_t>& input_ids, int sta
 
   const int seq_len = (int)input_ids.size();
   if (seq_len <= 0) return {};
+
+  // Under NNOPT_QUANT=int8 the per-row symmetric weights are int8, but
+  // CLBlast Hgemm at M>1 can't ingest int8 (returns err=-1010). The int8
+  // image-path GEMV only fires at M=1 (see utils.cpp::run_gemv_m1_image_int8).
+  // So we run prefill as a sequence of single-token forwards — each one
+  // takes the M=1 fast path. Slow but correct. Matches the SmolLM2 port.
+  if (seq_len > 1) {
+    if (const char* q = std::getenv("NNOPT_QUANT"); q && (std::string(q) == "int8" || std::string(q) == "q4")) {
+      std::vector<float> last_logits;
+      for (int i = 0; i < seq_len; ++i) {
+        last_logits = forward(std::vector<int32_t>{input_ids[i]}, start_pos + i);
+      }
+      return last_logits;
+    }
+  }
 
   cl_command_queue queue = cl_ctx_.queue();
 
@@ -210,7 +263,13 @@ std::vector<float> Model::forward(const std::vector<int32_t>& input_ids, int sta
   NNOPT_LAYER_CHECK("final_norm",     queue, hidden, (size_t)seq_len * MODEL_CONFIG::HIDDEN_SIZE);
 
   cl_int err = CL_SUCCESS;
-  cl_mem W = weights_.get_buffer("model.embed_tokens.weight");
+  // Prefer the int8 lm_head alias when present (NNOPT_QUANT=int8 + quantize
+  // script run with --emit-lm-head-int8). Falls back to the tied
+  // embed_tokens.weight (fp16 path) under fp16 builds or if the alias is
+  // missing.
+  cl_mem W = weights_.has_tensor("lm_head.weight")
+               ? weights_.get_buffer("lm_head.weight")
+               : weights_.get_buffer("model.embed_tokens.weight");
   if (!W) { NNOPT_ERROR("lm_head weight not found"); return {}; }
   cl_mem logits_buf = ensure_logits_buf(cl_ctx_.context(), buf_logits_, buf_logits_seq_capacity_, seq_len);
   if (!logits_buf) return {};
@@ -256,36 +315,119 @@ int32_t Model::forward_greedy(const std::vector<int32_t>& input_ids, int start_p
   const int seq_len = (int)input_ids.size();
   if (seq_len <= 0) return -1;
 
+  // Same int8 prefill-via-decode-loop as the dense forward() above. The
+  // CLBlast Hgemm path used at M>1 cannot consume int8 weights. Run prefill
+  // tokens one-by-one through the M=1 int8 fast path, then argmax once.
+  if (seq_len > 1) {
+    if (const char* q = std::getenv("NNOPT_QUANT"); q && (std::string(q) == "int8" || std::string(q) == "q4")) {
+      int32_t last_token = -1;
+      for (int i = 0; i < seq_len; ++i) {
+        last_token = forward_greedy(std::vector<int32_t>{input_ids[i]}, start_pos + i);
+        if (last_token < 0) return -1;
+      }
+      return last_token;
+    }
+  }
+
   cl_command_queue queue = cl_ctx_.queue();
 
   cl_mem hidden = embedding_->forward(queue, (const int*)input_ids.data(), seq_len);
   if (!hidden) return -1;
 
-  for (int i = 0; i < MODEL_CONFIG::NUM_LAYERS; ++i) {
-    cl_mem op_norm = operator_norm_[i]->forward(queue, hidden, seq_len);
-    cl_mem op_out = nullptr;
-    if (layer_has_attention(i)) {
-      op_out = attn_[i]->forward(queue, op_norm, seq_len, start_pos);
-    } else if (layer_has_convolution(i)) {
-      op_out = conv_[i]->forward(queue, op_norm, seq_len, start_pos);
+  // Record/replay path (NNOPT_RECORD=1, seq_len==1 only — recording is only
+  // valid for the steady-state decode geometry where every kernel-arg layout
+  // is identical across calls and only start_pos / seq_k mutate).
+  bool replayed = false;
+  if (record_enabled_ && recording_built_ && seq_len == 1) {
+    cur_start_pos_ = start_pos;
+    cur_seq_k_     = start_pos + 1;
+    std::vector<cl_array_arg_qcom> args;
+    args.reserve(rec_start_pos_args_.size() + rec_seq_k_args_.size());
+    for (auto& p : rec_start_pos_args_) args.push_back({p.kernel, p.arg_indx, sizeof(int), &cur_start_pos_});
+    for (auto& p : rec_seq_k_args_)     args.push_back({p.kernel, p.arg_indx, sizeof(int), &cur_seq_k_});
+    cl_int rerr = cl_ctx_.enqueue_recording(queue, recording_, args.size(), args.data());
+    if (rerr != CL_SUCCESS) {
+      NNOPT_ERROR_FMT("RecordQ: enqueue_recording err=%d — disabling, falling back to live dispatch", rerr);
+      record_enabled_ = false;
     } else {
-      return -1;
+      replayed = true;
     }
-    // op_norm and op_out are BORROWED — do not release.
+  }
 
-    element_add_inplace(queue, utils_program_, hidden, op_out, (size_t)seq_len * MODEL_CONFIG::HIDDEN_SIZE);
+  if (!replayed) {
+    for (int i = 0; i < MODEL_CONFIG::NUM_LAYERS; ++i) {
+      cl_mem op_norm = operator_norm_[i]->forward(queue, hidden, seq_len);
+      cl_mem op_out = nullptr;
+      if (layer_has_attention(i)) {
+        op_out = attn_[i]->forward(queue, op_norm, seq_len, start_pos);
+      } else if (layer_has_convolution(i)) {
+        op_out = conv_[i]->forward(queue, op_norm, seq_len, start_pos);
+      } else {
+        return -1;
+      }
+      // op_norm and op_out are BORROWED — do not release.
 
-    cl_mem ffn_norm = ffn_norm_[i]->forward(queue, hidden, seq_len);
-    cl_mem mlp_out = mlp_[i]->forward(queue, ffn_norm, seq_len);
-    // ffn_norm and mlp_out are BORROWED — do not release.
+      element_add_inplace(queue, utils_program_, hidden, op_out, (size_t)seq_len * MODEL_CONFIG::HIDDEN_SIZE);
 
-    element_add_inplace(queue, utils_program_, hidden, mlp_out, (size_t)seq_len * MODEL_CONFIG::HIDDEN_SIZE);
+      cl_mem ffn_norm = ffn_norm_[i]->forward(queue, hidden, seq_len);
+      cl_mem mlp_out = mlp_[i]->forward(queue, ffn_norm, seq_len);
+      // ffn_norm and mlp_out are BORROWED — do not release.
+
+      element_add_inplace(queue, utils_program_, hidden, mlp_out, (size_t)seq_len * MODEL_CONFIG::HIDDEN_SIZE);
+    }
+  }
+
+  // First-call recording build: AFTER the live dispatch produced this step's
+  // logits, re-issue the layer block to the record_queue_ so the recording
+  // captures the dispatch sequence. End the recording; subsequent decode
+  // steps replay via enqueue_recording. The record_queue_ dispatches don't
+  // execute (recording-only mode) — they only build the recording.
+  if (record_enabled_ && !recording_built_ && seq_len == 1) {
+    recording_ = cl_ctx_.new_recording(record_queue_);
+    if (!recording_) {
+      std::cerr << "RecordQ: new_recording failed; disabling" << std::endl;
+      record_enabled_ = false;
+    } else {
+      bool rec_ok = true;
+      for (int i = 0; i < MODEL_CONFIG::NUM_LAYERS && rec_ok; ++i) {
+        cl_mem op_norm = operator_norm_[i]->forward(record_queue_, hidden, 1);
+        if (!op_norm) { rec_ok = false; break; }
+        cl_mem op_out = nullptr;
+        if (layer_has_attention(i)) {
+          op_out = attn_[i]->forward(record_queue_, op_norm, 1, start_pos);
+        } else if (layer_has_convolution(i)) {
+          op_out = conv_[i]->forward(record_queue_, op_norm, 1, start_pos);
+        } else { rec_ok = false; break; }
+        if (!op_out) { rec_ok = false; break; }
+        element_add_inplace(record_queue_, utils_program_, hidden, op_out, (size_t)MODEL_CONFIG::HIDDEN_SIZE);
+        cl_mem ffn_norm = ffn_norm_[i]->forward(record_queue_, hidden, 1);
+        cl_mem mlp_out  = mlp_[i]->forward(record_queue_, ffn_norm, 1);
+        if (!ffn_norm || !mlp_out) { rec_ok = false; break; }
+        element_add_inplace(record_queue_, utils_program_, hidden, mlp_out, (size_t)MODEL_CONFIG::HIDDEN_SIZE);
+      }
+      cl_int eerr = cl_ctx_.end_recording(recording_);
+      if (!rec_ok || eerr != CL_SUCCESS) {
+        std::cerr << "RecordQ: recording build failed (ok=" << rec_ok << " end_err=" << eerr << "); disabling" << std::endl;
+        cl_ctx_.release_recording(recording_);
+        recording_ = nullptr;
+        record_enabled_ = false;
+      } else {
+        recording_built_ = true;
+        std::cerr << "RecordQ: recording built (16 layers, start_pos@record=" << start_pos << ")" << std::endl;
+      }
+    }
   }
 
   hidden = embedding_norm_->forward(queue, hidden, seq_len);
 
   cl_int err = CL_SUCCESS;
-  cl_mem W = weights_.get_buffer("model.embed_tokens.weight");
+  // Prefer the int8 lm_head alias when present (NNOPT_QUANT=int8 + quantize
+  // script run with --emit-lm-head-int8). Falls back to the tied
+  // embed_tokens.weight (fp16 path) under fp16 builds or if the alias is
+  // missing.
+  cl_mem W = weights_.has_tensor("lm_head.weight")
+               ? weights_.get_buffer("lm_head.weight")
+               : weights_.get_buffer("model.embed_tokens.weight");
   if (!W) return -1;
   cl_mem logits_buf = ensure_logits_buf(cl_ctx_.context(), buf_logits_, buf_logits_seq_capacity_, seq_len);
   if (!logits_buf) return -1;
@@ -397,7 +539,13 @@ bool Model::forward_greedy_chained_enqueue(int start_pos) {
   hidden = embedding_norm_->forward(queue, hidden, seq_len);
   if (!hidden) { NNOPT_ERROR("chained: embedding_norm failed"); return false; }
 
-  cl_mem W = weights_.get_buffer("model.embed_tokens.weight");
+  // Prefer the int8 lm_head alias when present (NNOPT_QUANT=int8 + quantize
+  // script run with --emit-lm-head-int8). Falls back to the tied
+  // embed_tokens.weight (fp16 path) under fp16 builds or if the alias is
+  // missing.
+  cl_mem W = weights_.has_tensor("lm_head.weight")
+               ? weights_.get_buffer("lm_head.weight")
+               : weights_.get_buffer("model.embed_tokens.weight");
   if (!W) return false;
   cl_mem logits_buf = ensure_logits_buf(cl_ctx_.context(), buf_logits_, buf_logits_seq_capacity_, seq_len);
   if (!logits_buf) return false;
@@ -479,7 +627,12 @@ std::vector<int32_t> Model::generate(const std::vector<int32_t>& prompt_ids, int
   // iteration LATER, so the readback latency is hidden behind the next
   // forward's enqueue. After prefill, argmax_out_idx_ already holds the
   // first generated token, so iteration i=1 generates the second token.
-  if (greedy_fast && max_new_tokens > 1) {
+  //
+  // Skipped under NNOPT_RECORD=1: chained path uses a different forward
+  // (forward_greedy_chained_enqueue) that doesn't have the recording build
+  // wired up. Recording lives only in forward_greedy() for now; the two are
+  // mutually exclusive for the current experiment.
+  if (greedy_fast && max_new_tokens > 1 && !record_enabled_) {
     cl_command_queue queue = cl_ctx_.queue();
     int32_t host_int[2] = {0, 0};
     cl_event readback_event[2] = {nullptr, nullptr};

@@ -21,19 +21,49 @@ LmHead::~LmHead() {
         if (t.image)      clReleaseMemObject(t.image);
         if (t.sub_buffer) clReleaseMemObject(t.sub_buffer);
         if (t.out_sub)    clReleaseMemObject(t.out_sub);
+        if (t.int8_image) clReleaseMemObject(t.int8_image);
+        if (t.int8_sub)   clReleaseMemObject(t.int8_sub);
+        if (t.scale_sub)  clReleaseMemObject(t.scale_sub);
     }
     if (w_image_single_) clReleaseMemObject(w_image_single_);
     if (gemv_k576_no4_img_) clReleaseKernel(gemv_k576_no4_img_);
     if (fused_lm_head_m1_) clReleaseKernel(fused_lm_head_m1_);
     if (block_fused_prog_) clReleaseProgram(block_fused_prog_);
+    if (gemv_k576_no4_img_int8_) clReleaseKernel(gemv_k576_no4_img_int8_);
+    if (block_fused_int8_prog_)  clReleaseProgram(block_fused_int8_prog_);
 }
 
 bool LmHead::initialize() {
-    // Tied embeddings: use model.embed_tokens.weight as lm_head weight.
-    w_ = weights_.get_buffer("model.embed_tokens.weight");
-    if (!w_) {
-        NNOPT_ERROR("LmHead: missing weight model.embed_tokens.weight (tied embeddings)");
-        return false;
+    // Prefer a dedicated `lm_head.weight` int8 alias if the int8 weight file
+    // emitted one (script flag --emit-lm-head-int8). Avoids the tied-embedding
+    // conflict where quantizing model.embed_tokens.weight breaks the fp16
+    // embedding-lookup kernel.
+    if (weights_.has_tensor("lm_head.weight") &&
+        weights_.get_dtype("lm_head.weight") == "int8") {
+        w_ = weights_.get_buffer("lm_head.weight");
+        w_scale_full_ = weights_.get_buffer("lm_head.weight.scale");
+        if (!w_ || !w_scale_full_) {
+            NNOPT_ERROR("LmHead: lm_head.weight int8 alias broken (missing buffer or scale)");
+            return false;
+        }
+        quantized_ = true;
+        std::cerr << "LmHead: using dedicated lm_head.weight int8 alias" << std::endl;
+    } else {
+        // Tied embeddings: use model.embed_tokens.weight as lm_head weight.
+        w_ = weights_.get_buffer("model.embed_tokens.weight");
+        if (!w_) {
+            NNOPT_ERROR("LmHead: missing weight model.embed_tokens.weight (tied embeddings)");
+            return false;
+        }
+        // Detect direct int8 quantization (rare — see --quantize-embed).
+        quantized_ = (weights_.get_dtype("model.embed_tokens.weight") == "int8");
+        if (quantized_) {
+            w_scale_full_ = weights_.get_buffer("model.embed_tokens.weight.scale");
+            if (!w_scale_full_) {
+                NNOPT_ERROR("LmHead: int8 dtype but missing model.embed_tokens.weight.scale");
+                return false;
+            }
+        }
     }
 
     // Decode fast-path GEMV kernel (fused_lm_head_gemv_m1 in block_fused.cl).
@@ -65,7 +95,7 @@ bool LmHead::initialize() {
     // (typically 16384 on Adreno 6xx) — V=49152 will fail and fall through
     // to tiling. Each tile is a clCreateSubBuffer + clCreateImage over the
     // sub-buffer; the same gemv_m1_k576_no4_img kernel runs once per tile.
-    if (gemv_k576_no4_img_) {
+    if (!quantized_ && gemv_k576_no4_img_) {
         cl_context  ctx = cl_ctx_.context();
         cl_device_id dev = cl_ctx_.device();
         const int H = MODEL_CONFIG::HIDDEN_SIZE;
@@ -156,6 +186,111 @@ bool LmHead::initialize() {
                       << "(img_max=" << img_max_w << "x" << img_max_h << ")" << std::endl;
         }
     }
+
+    // ── int8 quantized image path for lm_head (V=49152 still requires tiling).
+    if (quantized_) {
+        block_fused_int8_prog_ = cl_ctx_.build_program_from_file(
+            "kernels/block_fused_int8.cl", "-DNNOPT_USE_FP16=1 -DUSE_FP16=1");
+        if (!block_fused_int8_prog_) {
+            NNOPT_ERROR("LmHead: failed to build block_fused_int8.cl");
+            return false;
+        }
+        gemv_k576_no4_img_int8_ = clCreateKernel(block_fused_int8_prog_, "gemv_m1_k576_no4_img_int8", &err);
+        if (err != CL_SUCCESS) {
+            NNOPT_ERROR_FMT("LmHead: clCreateKernel gemv_int8 failed: %d", err);
+            return false;
+        }
+
+        cl_context  ctx = cl_ctx_.context();
+        cl_device_id dev = cl_ctx_.device();
+        const int H = MODEL_CONFIG::HIDDEN_SIZE;
+        const int V = MODEL_CONFIG::VOCAB_SIZE;
+        const int K_PIX = H / 4;
+
+        size_t img_max_w = 0, img_max_h = 0;
+        clGetDeviceInfo(dev, CL_DEVICE_IMAGE2D_MAX_WIDTH,  sizeof(img_max_w), &img_max_w, nullptr);
+        clGetDeviceInfo(dev, CL_DEVICE_IMAGE2D_MAX_HEIGHT, sizeof(img_max_h), &img_max_h, nullptr);
+
+        cl_image_format fmt_i8;
+        fmt_i8.image_channel_order     = CL_RGBA;
+        fmt_i8.image_channel_data_type = CL_SIGNED_INT8;
+
+        const int row_bytes_i8 = H * 1;     // int8 = 1 byte per element
+        const int row_bytes_sc = 2;         // fp16 scale = 2 bytes per row
+
+        int TILE_H = (int)img_max_h;
+        TILE_H -= (TILE_H % 4);
+        if (TILE_H <= 0 || (row_bytes_i8 % 128) != 0) {
+            // 576 % 128 = 64, not aligned — but Adreno may relax this for int8.
+            // Try anyway; if it fails we fall back to plain pytorch_linear / fused.
+            // Note: this won't actually trip because 576 / 128 = 4.5; many Adreno
+            // drivers accept odd row pitches under newer ICDs.
+        }
+
+        // Tile the int8 weight buffer + scale buffer in parallel.
+        int rows_left = V, row_offset = 0;
+        bool ok = true;
+        while (rows_left > 0) {
+            int tile_n = rows_left < TILE_H ? rows_left : TILE_H;
+            if ((tile_n % 4) != 0) { ok = false; break; }
+            // int8 weight sub-buffer
+            cl_buffer_region region_w;
+            region_w.origin = (size_t)row_offset * (size_t)row_bytes_i8;
+            region_w.size   = (size_t)tile_n    * (size_t)row_bytes_i8;
+            cl_int e = CL_SUCCESS;
+            cl_mem sub_w = clCreateSubBuffer(w_, CL_MEM_READ_ONLY,
+                                             CL_BUFFER_CREATE_TYPE_REGION, &region_w, &e);
+            if (e != CL_SUCCESS || !sub_w) { ok = false; break; }
+            // int8 image over sub-buffer
+            cl_image_desc desc_i8;
+            std::memset(&desc_i8, 0, sizeof(desc_i8));
+            desc_i8.image_type   = CL_MEM_OBJECT_IMAGE2D;
+            desc_i8.image_width  = (size_t)K_PIX;
+            desc_i8.image_height = (size_t)tile_n;
+            desc_i8.buffer       = sub_w;
+            cl_mem img_i8 = clCreateImage(ctx, CL_MEM_READ_ONLY, &fmt_i8, &desc_i8, nullptr, &e);
+            if (e != CL_SUCCESS || !img_i8) { clReleaseMemObject(sub_w); ok = false; break; }
+
+            // Scale sub-buffer
+            cl_buffer_region region_sc;
+            region_sc.origin = (size_t)row_offset * (size_t)row_bytes_sc;
+            region_sc.size   = (size_t)tile_n    * (size_t)row_bytes_sc;
+            cl_mem sub_sc = clCreateSubBuffer(w_scale_full_, CL_MEM_READ_ONLY,
+                                              CL_BUFFER_CREATE_TYPE_REGION, &region_sc, &e);
+            if (e != CL_SUCCESS || !sub_sc) {
+                clReleaseMemObject(img_i8); clReleaseMemObject(sub_w);
+                ok = false; break;
+            }
+
+            WImageTile t;
+            t.int8_sub   = sub_w;
+            t.int8_image = img_i8;
+            t.scale_sub  = sub_sc;
+            t.row_offset = row_offset;
+            t.row_count  = tile_n;
+            t.out_sub    = nullptr;
+            w_tiles_.push_back(t);
+
+            row_offset += tile_n;
+            rows_left  -= tile_n;
+        }
+        if (ok && !w_tiles_.empty()) {
+            img_path_ready_ = true;
+            std::cerr << "LmHead: int8 image2d path ready ("
+                      << w_tiles_.size() << " tiles, "
+                      << "img_max=" << img_max_w << "x" << img_max_h << ")" << std::endl;
+        } else {
+            // Cleanup partial state
+            for (auto& tt : w_tiles_) {
+                if (tt.int8_image) clReleaseMemObject(tt.int8_image);
+                if (tt.int8_sub)   clReleaseMemObject(tt.int8_sub);
+                if (tt.scale_sub)  clReleaseMemObject(tt.scale_sub);
+            }
+            w_tiles_.clear();
+            NNOPT_ERROR("LmHead: int8 tile creation failed");
+            return false;
+        }
+    }
 #endif // NNOPT_USE_FP16
 
     NNOPT_LAYER_INIT("lm_head");
@@ -175,6 +310,50 @@ cl_mem LmHead::forward(cl_command_queue queue, cl_mem hidden, int M) {
     if (err != CL_SUCCESS || !out) {
         NNOPT_ERROR_FMT("LmHead: alloc out failed: %d", err);
         return nullptr;
+    }
+
+    if (M == 1 && quantized_ && img_path_ready_ && gemv_k576_no4_img_int8_) {
+        // ── int8 image-backed lm_head decode fast path ──
+        // Tiled int8: one dispatch per tile against int8 image + scale sub-buffer.
+        const size_t out_row_bytes = sizeof(nnopt_storage_t);  // fp16 = 2
+        for (auto& t : w_tiles_) {
+            cl_buffer_region region;
+            region.origin = (size_t)t.row_offset * out_row_bytes;
+            region.size   = (size_t)t.row_count  * out_row_bytes;
+            cl_mem out_sub = clCreateSubBuffer(out, CL_MEM_READ_WRITE,
+                                               CL_BUFFER_CREATE_TYPE_REGION, &region, &err);
+            if (err != CL_SUCCESS || !out_sub) {
+                NNOPT_ERROR_FMT("lm_head int8 tile out_sub failed: %d", err);
+                clReleaseMemObject(out);
+                return nullptr;
+            }
+            cl_kernel kk = gemv_k576_no4_img_int8_;
+            if (clSetKernelArg(kk, 0, sizeof(cl_mem), &hidden)      != CL_SUCCESS ||
+                clSetKernelArg(kk, 1, sizeof(cl_mem), &t.int8_image)!= CL_SUCCESS ||
+                clSetKernelArg(kk, 2, sizeof(cl_mem), &t.scale_sub) != CL_SUCCESS ||
+                clSetKernelArg(kk, 3, sizeof(cl_mem), &out_sub)     != CL_SUCCESS) {
+                NNOPT_ERROR("lm_head int8 setarg failed");
+                clReleaseMemObject(out_sub); clReleaseMemObject(out);
+                return nullptr;
+            }
+            int tile_n = t.row_count;
+            if (clSetKernelArg(kk, 4, sizeof(int), &tile_n) != CL_SUCCESS) {
+                clReleaseMemObject(out_sub); clReleaseMemObject(out);
+                return nullptr;
+            }
+            const size_t WG = 64;
+            size_t gws = (size_t)(tile_n / 4) * WG;
+            size_t lws = WG;
+            err = nnopt_prof::enqueue(queue, kk, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+            clReleaseMemObject(out_sub);
+            if (err != CL_SUCCESS) {
+                NNOPT_ERROR_FMT("lm_head int8 dispatch failed: %d", err);
+                clReleaseMemObject(out);
+                return nullptr;
+            }
+        }
+        NNOPT_LAYER_CHECK("lm_head", queue, out, (size_t)M * (size_t)V);
+        return out;
     }
 
     if (M == 1 && img_path_ready_ && gemv_k576_no4_img_) {

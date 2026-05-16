@@ -237,10 +237,65 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
         }
     }
 
+    // cl_qcom_recordable_queues entry-point load (PDF §9.1.3). dlsym from the
+    // already-loaded libOpenCL.so — same pattern as LFM2/Qwen probes.
+    fn_new_recording_     = (clNewRecordingQCOM_fn)    dlsym(RTLD_DEFAULT, "clNewRecordingQCOM");
+    fn_end_recording_     = (clEndRecordingQCOM_fn)    dlsym(RTLD_DEFAULT, "clEndRecordingQCOM");
+    fn_release_recording_ = (clReleaseRecordingQCOM_fn)dlsym(RTLD_DEFAULT, "clReleaseRecordingQCOM");
+    fn_enqueue_recording_ = (clEnqueueRecordingQCOM_fn)dlsym(RTLD_DEFAULT, "clEnqueueRecordingQCOM");
+    record_fns_loaded_ = (fn_new_recording_ && fn_end_recording_ &&
+                          fn_release_recording_ && fn_enqueue_recording_);
+    if (record_fns_loaded_) {
+        std::cerr << "RecordQ: cl_qcom_recordable_queues entry points loaded" << std::endl;
+    } else {
+        std::cerr << "RecordQ: cl_qcom_recordable_queues NOT available" << std::endl;
+    }
+
     return true;
 }
 
-// Helper: append USE_FP16 + fast-relaxed-math to options if not present.
+cl_command_queue OpenCLContext::create_recordable_queue() {
+    if (!record_fns_loaded_) return nullptr;
+    // CL_QUEUE_RECORDABLE_QCOM = 0x40000000, used ALONE per LFM2 finding.
+    constexpr cl_command_queue_properties RECORD_BIT = (cl_command_queue_properties)1 << 30;
+    cl_int err = CL_SUCCESS;
+    cl_command_queue q = clCreateCommandQueue(context_, device_, RECORD_BIT, &err);
+    if (err != CL_SUCCESS || !q) {
+        std::cerr << "RecordQ: clCreateCommandQueue(RECORD_BIT) failed err=" << err << std::endl;
+        return nullptr;
+    }
+    return q;
+}
+
+cl_recording_qcom OpenCLContext::new_recording(cl_command_queue q) const {
+    if (!fn_new_recording_) return nullptr;
+    cl_int err = CL_SUCCESS;
+    cl_recording_qcom rec = fn_new_recording_(q, &err);
+    if (err != CL_SUCCESS) return nullptr;
+    return rec;
+}
+
+cl_int OpenCLContext::end_recording(cl_recording_qcom rec) const {
+    if (!fn_end_recording_) return CL_INVALID_OPERATION;
+    return fn_end_recording_(rec);
+}
+
+cl_int OpenCLContext::release_recording(cl_recording_qcom rec) const {
+    if (!fn_release_recording_) return CL_INVALID_OPERATION;
+    return fn_release_recording_(rec);
+}
+
+cl_int OpenCLContext::enqueue_recording(cl_command_queue live_q,
+                                        cl_recording_qcom rec,
+                                        size_t num_args,
+                                        const cl_array_arg_qcom* args) const {
+    if (!fn_enqueue_recording_) return CL_INVALID_OPERATION;
+    return fn_enqueue_recording_(live_q, rec, num_args, args,
+                                 0, nullptr, 0, nullptr, 0, nullptr,
+                                 0, nullptr, nullptr);
+}
+
+// Helper: append USE_FP16 + fast-relaxed-math (+ optional USE_SUBGROUP_REDUCE) to options if not present.
 static std::string make_effective_options(const std::string& options) {
     std::string eff = options;
 #ifdef NNOPT_USE_FP16
@@ -252,6 +307,29 @@ static std::string make_effective_options(const std::string& options) {
     if (eff.find("-cl-fast-relaxed-math") == std::string::npos) {
         if (!eff.empty()) eff += " ";
         eff += "-cl-fast-relaxed-math";
+    }
+    // Default to -cl-std=CL2.0 on Adreno A5x+ (all SmolLM2 deployment targets).
+    // Measured on Adreno 619 v2 (SM6375): CL 2.0 build path makes the GEMV
+    // family ~16-25% faster (better compiler vectorization / register allocation)
+    // even when no CL 2.0 builtin is used. Opt out via NNOPT_NO_CL2_STD=1.
+    if (const char* off = std::getenv("NNOPT_NO_CL2_STD"); !(off && off[0] == '1')) {
+        if (eff.find("-cl-std=") == std::string::npos) {
+            if (!eff.empty()) eff += " ";
+            eff += "-cl-std=CL2.0";
+        }
+    }
+    // Opt-in subgroup-reduce path (Phase 2 lever): flip with NNOPT_SUBGROUP_REDUCE=1.
+    // Kernel #ifdef USE_SUBGROUP_REDUCE swaps __local tree reduce for
+    // sub_group_reduce_{add,max}, per PDF §6.5/§8.9/§9.2.
+    // NOTE: Adreno 619 v2 measurement shows this REGRESSES rmsnorm + softmax
+    // (+90% per-kernel time) because at WG=64 there is exactly one full-wave
+    // subgroup and the cross-subgroup roll-up is wasted work vs a 6-step tree
+    // reduce. Keep behind the flag for re-test on devices with smaller waves.
+    if (const char* sgr = std::getenv("NNOPT_SUBGROUP_REDUCE"); sgr && sgr[0] == '1') {
+        if (eff.find("USE_SUBGROUP_REDUCE") == std::string::npos) {
+            if (!eff.empty()) eff += " ";
+            eff += "-D USE_SUBGROUP_REDUCE=1";
+        }
     }
     return eff;
 }

@@ -43,8 +43,12 @@ public:
     std::vector<float> get_host_vec(const std::string& key) const;
 
     // Returns the per-tensor dtype string from meta.json ("float32",
-    // "float16", "bfloat16"). Empty string if key not found.
+    // "float16", "bfloat16", "int8"). Empty string if key not found.
     std::string get_dtype(const std::string& key) const;
+
+    // Enumerate all tensor names known to the weight file. Used by the int8
+    // wiring in main.cpp to find pairs of `name` (int8) + `name.scale` (fp16).
+    std::vector<std::string> all_keys() const;
 
     // Destructor — munmaps the weight file and releases any GPU buffers
     // created by get_buffer().

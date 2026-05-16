@@ -101,22 +101,101 @@ int32_t Model::forward_decode_greedy(int32_t token_id, int start_pos) {
     clReleaseMemObject(ids_buf);
     if (!hidden) return -1;
 
-    // 2. Transformer layers (same as forward_decode).
-    for (int i = 0; i < MODEL_CONFIG::NUM_HIDDEN_LAYERS; i++) {
-        cl_mem normed = input_layernorm_[i]->forward_decode(queue, hidden);
-        if (!normed) { clReleaseMemObject(hidden); return -1; }
-        if (!self_attn_[i]->forward_decode_into_residual(queue, normed, start_pos, hidden)) {
-            clReleaseMemObject(hidden); return -1;
+    // 2. Transformer layers (30) — with optional cl_qcom_recordable_queues path.
+    //    Recording mode threads layer chain through persistent decode_hidden_buf_
+    //    so the same kernel-arg cl_mem handles get captured at record time and
+    //    re-used on every replay. Embedding output is copied into the persistent
+    //    buffer once per call; subsequent layer dispatches mutate it in place.
+    cl_mem hidden_for_layers = hidden;
+    if (record_enabled_) {
+        err = clEnqueueCopyBuffer(queue, hidden, decode_hidden_buf_, 0, 0,
+                                  (size_t)MODEL_CONFIG::HIDDEN_SIZE * sizeof(nnopt_storage_t),
+                                  0, nullptr, nullptr);
+        clReleaseMemObject(hidden);
+        if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("RecordQ: embed→persistent copy failed err=%d", err); return -1; }
+        hidden_for_layers = decode_hidden_buf_;
+    }
+
+    bool replayed = false;
+    if (record_enabled_ && recording_built_) {
+        // Replay path: 30 layers + KV cache writes run via the recording.
+        cur_start_pos_ = start_pos;
+        cur_seq_k_     = start_pos + 1;
+        std::vector<cl_array_arg_qcom> args;
+        args.reserve(rec_start_pos_args_.size() + rec_seq_k_args_.size());
+        for (auto& p : rec_start_pos_args_) {
+            args.push_back({p.kernel, p.arg_indx, sizeof(int), &cur_start_pos_});
         }
-        cl_mem normed2 = post_attention_layernorm_[i]->forward_decode(queue, hidden);
-        if (!normed2) { clReleaseMemObject(hidden); return -1; }
-        if (!mlp_[i]->forward_decode_into_residual(queue, normed2, hidden)) {
-            clReleaseMemObject(hidden); return -1;
+        for (auto& p : rec_seq_k_args_) {
+            args.push_back({p.kernel, p.arg_indx, sizeof(int), &cur_seq_k_});
+        }
+        // DEBUG: try 0-args first (LFM2 probe baseline) to verify replay API works.
+        // If this succeeds we know the issue is in our args[] construction.
+        const bool USE_EMPTY_ARGS = std::getenv("NNOPT_RECORD_EMPTY_ARGS") &&
+                                    std::getenv("NNOPT_RECORD_EMPTY_ARGS")[0] == '1';
+        cl_int rerr;
+        if (USE_EMPTY_ARGS) {
+            rerr = cl_ctx_.enqueue_recording(queue, recording_, 0, nullptr);
+        } else {
+            rerr = cl_ctx_.enqueue_recording(queue, recording_, args.size(), args.data());
+        }
+        if (rerr != CL_SUCCESS) {
+            NNOPT_ERROR_FMT("RecordQ: enqueue_recording failed err=%d — disabling and re-dispatching live", rerr);
+            record_enabled_ = false;
+            // Fall through to live dispatch below.
+        } else {
+            replayed = true;
         }
     }
 
-    cl_mem final_hidden = final_norm_->forward_decode(queue, hidden);
-    clReleaseMemObject(hidden);
+    if (!replayed) {
+        for (int i = 0; i < MODEL_CONFIG::NUM_HIDDEN_LAYERS; i++) {
+            cl_mem normed = input_layernorm_[i]->forward_decode(queue, hidden_for_layers);
+            if (!normed) { if (hidden_for_layers != decode_hidden_buf_) clReleaseMemObject(hidden_for_layers); return -1; }
+            if (!self_attn_[i]->forward_decode_into_residual(queue, normed, start_pos, hidden_for_layers)) {
+                if (hidden_for_layers != decode_hidden_buf_) clReleaseMemObject(hidden_for_layers); return -1;
+            }
+            cl_mem normed2 = post_attention_layernorm_[i]->forward_decode(queue, hidden_for_layers);
+            if (!normed2) { if (hidden_for_layers != decode_hidden_buf_) clReleaseMemObject(hidden_for_layers); return -1; }
+            if (!mlp_[i]->forward_decode_into_residual(queue, normed2, hidden_for_layers)) {
+                if (hidden_for_layers != decode_hidden_buf_) clReleaseMemObject(hidden_for_layers); return -1;
+            }
+        }
+    }
+
+    // First call after live dispatch (only when recording enabled): capture the
+    // dispatch sequence into a recording on record_queue_ (no GPU work — host-
+    // side bookkeeping only). End the recording so subsequent calls can replay.
+    if (record_enabled_ && !recording_built_) {
+        recording_ = cl_ctx_.new_recording(record_queue_);
+        if (!recording_) {
+            std::cerr << "RecordQ: new_recording failed; disabling" << std::endl;
+            record_enabled_ = false;
+        } else {
+            bool rec_ok = true;
+            for (int i = 0; i < MODEL_CONFIG::NUM_HIDDEN_LAYERS; i++) {
+                cl_mem normed = input_layernorm_[i]->forward_decode(record_queue_, decode_hidden_buf_);
+                if (!normed) { rec_ok = false; break; }
+                if (!self_attn_[i]->forward_decode_into_residual(record_queue_, normed, start_pos, decode_hidden_buf_)) { rec_ok = false; break; }
+                cl_mem normed2 = post_attention_layernorm_[i]->forward_decode(record_queue_, decode_hidden_buf_);
+                if (!normed2) { rec_ok = false; break; }
+                if (!mlp_[i]->forward_decode_into_residual(record_queue_, normed2, decode_hidden_buf_)) { rec_ok = false; break; }
+            }
+            cl_int eerr = cl_ctx_.end_recording(recording_);
+            if (!rec_ok || eerr != CL_SUCCESS) {
+                std::cerr << "RecordQ: recording build failed (ok=" << rec_ok << " end_err=" << eerr << "); disabling" << std::endl;
+                cl_ctx_.release_recording(recording_);
+                recording_ = nullptr;
+                record_enabled_ = false;
+            } else {
+                recording_built_ = true;
+                std::cerr << "RecordQ: recording built (30 layers, start_pos@record=" << start_pos << ")" << std::endl;
+            }
+        }
+    }
+
+    cl_mem final_hidden = final_norm_->forward_decode(queue, hidden_for_layers);
+    if (hidden_for_layers != decode_hidden_buf_) clReleaseMemObject(hidden_for_layers);
     if (!final_hidden) return -1;
 
     cl_mem logits_buf = lm_head_->forward(queue, final_hidden, 1);
@@ -214,6 +293,56 @@ bool Model::initialize() {
     NNOPT_LAYER_INIT("lm_head");
 
     clReleaseProgram(utils_program);
+
+    // Pre-warm RoPE cos/sin tables to MAX_POSITION_EMBEDDINGS up-front for ALL
+    // layers. Without this, ensure_rope_tables rebuilds the tables every decode
+    // step (seq_k grows by 1 each call → fp32 host loop + clCreateBuffer pair
+    // per layer per token). Pre-warming once at init saved +17% decode tok/s
+    // on Adreno 619 v2 (Step 12 measurement). Cheap: each layer reuses the
+    // same MAX_POSITION_EMBEDDINGS sized buffer.
+    for (int i = 0; i < MODEL_CONFIG::NUM_HIDDEN_LAYERS; ++i) {
+        if (!self_attn_[i]->prewarm_rope_tables(cl_ctx_.queue(),
+                                                 MODEL_CONFIG::MAX_POSITION_EMBEDDINGS)) {
+            NNOPT_ERROR_FMT("prewarm_rope_tables failed for layer %d", i);
+            return false;
+        }
+    }
+    NNOPT_CHECKPOINT("RoPE tables prewarmed for all layers");
+
+    // ── cl_qcom_recordable_queues setup (opt-in via NNOPT_RECORD=1).
+    if (const char* r = std::getenv("NNOPT_RECORD"); r && r[0] == '1') {
+        if (!cl_ctx_.has_recordable_queues()) {
+            std::cerr << "RecordQ: NNOPT_RECORD=1 set but extension not exposed; disabled" << std::endl;
+        } else {
+            record_queue_ = cl_ctx_.create_recordable_queue();
+            if (record_queue_) {
+                cl_int berr = CL_SUCCESS;
+                decode_hidden_buf_ = clCreateBuffer(
+                    cl_ctx_.context(), CL_MEM_READ_WRITE,
+                    (size_t)MODEL_CONFIG::HIDDEN_SIZE * sizeof(nnopt_storage_t),
+                    nullptr, &berr);
+                if (berr == CL_SUCCESS && decode_hidden_buf_) {
+                    // RoPE tables are already pre-warmed unconditionally above.
+                    // Collect per-layer kernel handles for the arg-update array on replay.
+                    //   fused_rope_kvwrite_m1: start_pos is arg 10 (see attention.cpp dispatch).
+                    //   fused_decode_attn_m1:  seq_k is arg 9.
+                    for (int i = 0; i < MODEL_CONFIG::NUM_HIDDEN_LAYERS; ++i) {
+                        rec_start_pos_args_.push_back({self_attn_[i]->rope_kvwrite_kernel(), 10});
+                        rec_seq_k_args_.push_back   ({self_attn_[i]->decode_attn_kernel(),  9});
+                    }
+                    record_enabled_ = true;
+                    std::cerr << "RecordQ: enabled (record_queue=" << record_queue_
+                              << ", H=" << MODEL_CONFIG::HIDDEN_SIZE
+                              << ", " << rec_start_pos_args_.size() << " per-step args x 2)" << std::endl;
+                } else {
+                    std::cerr << "RecordQ: alloc decode_hidden_buf_ failed err=" << berr << std::endl;
+                    clReleaseCommandQueue(record_queue_);
+                    record_queue_ = nullptr;
+                }
+            }
+        }
+    }
+
     NNOPT_CHECKPOINT("Model::initialize() complete");
     return true;
 }
@@ -290,6 +419,19 @@ std::vector<float> Model::forward(const std::vector<int32_t>& input_ids, int sta
 
     // Dispatch single-token decode to the fast path (GEMV, not GEMM).
     if (seq_len == 1 && start_pos > 0) return forward_decode(input_ids[0], start_pos);
+
+    // Int8 prefill fallback: CLBlast HGemm in pytorch_linear() does not speak int8,
+    // so we route prefill through the decode kernels token-by-token. Slower
+    // (O(seq_len) decode steps instead of one batched GEMM) but correctness-correct
+    // for the int8 weight path. Only the decode tok/s metric matters for tuning.
+    if (const char* q = std::getenv("NNOPT_QUANT"); q && std::string(q) == "int8") {
+        std::vector<float> last_logits;
+        for (int i = 0; i < seq_len; ++i) {
+            last_logits = forward_decode(input_ids[i], start_pos + i);
+            if (last_logits.empty()) return {};
+        }
+        return last_logits;
+    }
 
     cl_command_queue queue = cl_ctx_.queue();
 
