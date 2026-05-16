@@ -4,17 +4,27 @@
 # Supports resume and an HF_REPO override for forks.
 #
 # Usage:
-#   ./scripts/fetch_weights.sh <model-name>
-#   ./scripts/fetch_weights.sh all
+#   ./scripts/fetch_weights.sh <model-name> [--quant fp16|int8|q4]
+#   ./scripts/fetch_weights.sh all          [--quant fp16|int8|q4]
 #
 # Models:
 #   granite-4-0-350m  lfm2-5-350m  mamba-130m  mamba2-130m  qwen2-5-0-5b  smollm2-135m-instruct
 #
-# Per model, this fetches every file the runtime needs:
+# Per model, this fetches the base set the runtime needs:
 #   weights/model.fp16.bin
 #   weights/model.fp16.meta.json
 #   weights/tokenizer.json
 #   weights/tokenizer_vocab.bin
+#
+# Optional `--quant int8` also fetches model.int8.bin + model.int8.meta.json
+# (currently available for lfm2-5-350m and smollm2-135m-instruct).
+#
+# Optional `--quant q4` also fetches model.q4.bin + model.q4.meta.json
+# (currently available for lfm2-5-350m only).
+#
+# The runtime picks which weights to load at run-time via NNOPT_QUANT=int8|q4
+# (see each model's README). Having multiple bundles side-by-side on disk is
+# fine — they don't conflict.
 #
 # OpenELM is NOT here: Apple's ASCL forbids redistribution. Use
 # scripts/fetch_openelm_weights.sh which pulls from apple/OpenELM-270M
@@ -27,18 +37,29 @@ HF_BRANCH="${HF_BRANCH:-main}"
 HF_BASE="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}"
 
 MODELS=(granite-4-0-350m lfm2-5-350m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct)
-WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
+BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
+
+# Which models currently have which quant variants published on HF. Update when
+# new quant bundles are uploaded.
+MODELS_WITH_INT8=(lfm2-5-350m smollm2-135m-instruct)
+MODELS_WITH_Q4=(lfm2-5-350m)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 usage() {
   cat <<EOF
-Usage: $0 <model-name | all>
+Usage: $0 <model-name | all> [--quant fp16|int8|q4]
 
 Models: ${MODELS[*]}
 
-Per-model files fetched: ${WEIGHT_FILES[*]}
+Default fetch set (always pulled): ${BASE_FILES[*]}
+
+--quant int8 → additionally pulls model.int8.bin + model.int8.meta.json
+              (available: ${MODELS_WITH_INT8[*]})
+--quant q4   → additionally pulls model.q4.bin + model.q4.meta.json
+              (available: ${MODELS_WITH_Q4[*]})
+--quant fp16 → default behavior (no extra files)
 
 Environment:
   HF_REPO   override the HuggingFace repo (default: a8nova/adreno-llms-weights)
@@ -47,7 +68,62 @@ EOF
   exit 1
 }
 
-[ $# -eq 1 ] || usage
+[ $# -ge 1 ] || usage
+
+target="$1"
+shift
+
+QUANT="fp16"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --quant)
+      QUANT="${2:-}"
+      shift 2
+      ;;
+    --quant=*)
+      QUANT="${1#--quant=}"
+      shift
+      ;;
+    *)
+      echo "ERROR: unknown arg '$1'" >&2
+      usage
+      ;;
+  esac
+done
+
+case "${QUANT}" in
+  fp16|int8|q4) ;;
+  *) echo "ERROR: --quant must be one of fp16 / int8 / q4 (got '${QUANT}')" >&2; usage ;;
+esac
+
+# Return 0 if the given model is in the given array, 1 otherwise.
+_in_array() {
+  local needle="$1"; shift
+  for m in "$@"; do
+    [ "${m}" = "${needle}" ] && return 0
+  done
+  return 1
+}
+
+# Build the per-model file list based on --quant.
+file_list_for() {
+  local model="$1"
+  local files=("${BASE_FILES[@]}")
+  if [ "${QUANT}" = "int8" ]; then
+    if _in_array "${model}" "${MODELS_WITH_INT8[@]}"; then
+      files+=(model.int8.bin model.int8.meta.json)
+    else
+      echo "    note: ${model} has no published int8 bundle; fetching fp16 only" >&2
+    fi
+  elif [ "${QUANT}" = "q4" ]; then
+    if _in_array "${model}" "${MODELS_WITH_Q4[@]}"; then
+      files+=(model.q4.bin model.q4.meta.json)
+    else
+      echo "    note: ${model} has no published q4 bundle; fetching fp16 only" >&2
+    fi
+  fi
+  printf '%s\n' "${files[@]}"
+}
 
 fetch_one() {
   local model="$1"
@@ -60,19 +136,18 @@ fetch_one() {
   local weights_dir="${REPO_ROOT}/src/models/${model}/weights"
   mkdir -p "${weights_dir}"
 
-  echo ">>> ${model}"
-  for f in "${WEIGHT_FILES[@]}"; do
+  echo ">>> ${model} (--quant ${QUANT})"
+  while IFS= read -r f; do
     local dest="${weights_dir}/${f}"
     local url="${HF_BASE}/${model}/${f}"
     echo "    ${f}"
     curl --location --continue-at - --fail-with-body --progress-bar \
          --retry 3 --retry-delay 5 \
          --output "${dest}" "${url}"
-  done
+  done < <(file_list_for "${model}")
   echo "    done — total $(du -sh "${weights_dir}" | awk '{print $1}')"
 }
 
-target="$1"
 if [ "${target}" = "all" ]; then
   for m in "${MODELS[@]}"; do fetch_one "${m}"; done
 else

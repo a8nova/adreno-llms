@@ -12,27 +12,35 @@ HuggingFace's smallest instruct-tuned LLM (LLaMA-style + GQA) ported to C++/Open
 From this directory, with an Android device connected over `adb`:
 
 ```bash
-# 1. Fetch the converted fp16 weights
-../../../scripts/fetch_weights.sh smollm2-135m-instruct
+# 1. Fetch weights from HuggingFace. Pick the variant(s) you want:
+../../../scripts/fetch_weights.sh smollm2-135m-instruct                # fp16 only (~270 MB)
+../../../scripts/fetch_weights.sh smollm2-135m-instruct --quant int8   # fp16 + int8 (~460 MB)
 
-# 2. (Optional) Generate the int8 variant from the fp16 bundle
-python3 scripts/quantize_weights.py --emit-lm-head-int8     # → weights/model.int8.bin
-
-# 3. Build (single release binary, handles both variants at runtime)
+# 2. Build (single release binary, handles both variants at runtime)
 NNOPT_DTYPE=fp16 ./scripts/build.sh --release
 
-# 4. Deploy binary + every weight bundle that exists locally
+# 3. Deploy binary + every weight bundle that exists locally
 NNOPT_DTYPE=fp16 ./scripts/deploy_android.sh
 
-# 5a. Run fp16 — instruct mode (recommended; wraps prompt with the SmolLM2 chat template)
+# 4a. Run fp16 — instruct mode (recommended; wraps prompt with the SmolLM2 chat template)
 NNOPT_DTYPE=fp16 ./scripts/run_android.sh "What is the capital of France?" 96 --chat
 
-# 5b. Run int8 — same prompt, picks weights/model.int8.bin via NNOPT_QUANT
+# 4b. Run int8 — same prompt, picks weights/model.int8.bin via NNOPT_QUANT
 NNOPT_DTYPE=fp16 NNOPT_QUANT=int8 ./scripts/run_android.sh "What is the capital of France?" 96 --chat
 
 # Or raw completion mode (no template — useful for benchmark parity but produces
 # rambling output on most prompts since this is an instruct-tuned model):
 NNOPT_DTYPE=fp16 ./scripts/run_android.sh "Once upon a time" 64
+```
+
+Same binary handles both precisions — pick via `NNOPT_QUANT` at run-time.
+
+### Alternative: generate the int8 bundle locally
+
+If you have the fp16 bundle and would rather not download the int8 file, regenerate it on your machine (~15s, needs Python 3 + numpy):
+
+```bash
+python3 scripts/quantize_weights.py --emit-lm-head-int8     # → weights/model.int8.bin
 ```
 
 The `--chat` flag wraps the prompt as `<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n` and stops generation at `<|im_end|>`. Without it the model still works but treats the prompt as raw completion, which is rarely what you want for an instruct model.

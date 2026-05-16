@@ -26,24 +26,37 @@ All numbers are greedy (`--temperature 0`), 32-token generation, 3–5 run media
 From this directory, with an Android device connected over `adb`:
 
 ```bash
-# 1. Fetch the converted weights (fp16, ~676 MB)
-../../../scripts/fetch_weights.sh lfm2-5-350m
+# 1. Fetch weights from HuggingFace. Pick the variant(s) you want:
+../../../scripts/fetch_weights.sh lfm2-5-350m                # fp16 only (676 MB)
+../../../scripts/fetch_weights.sh lfm2-5-350m --quant int8   # fp16 + int8 (1.14 GB)
+../../../scripts/fetch_weights.sh lfm2-5-350m --quant q4     # fp16 + Q4   (994 MB)
+# (Each fetch is incremental — re-running with a different --quant adds the
+# missing files without re-downloading the fp16 bundle.)
 
-# 2. (Optional) Generate the int8 + Q4 variants from the fp16 bundle
-python3 scripts/quantize_weights.py --emit-lm-head-int8     # → weights/model.int8.bin
-python3 scripts/quantize_q4.py      --emit-lm-head-q4       # → weights/model.q4.bin
-
-# 3. Build (single Release binary, handles all variants at runtime)
+# 2. Build (single Release binary, handles all variants at runtime)
 NNOPT_DTYPE=fp16 ./scripts/build.sh --release
 
-# 4. Deploy binary + every weight bundle that exists locally
+# 3. Deploy binary + every weight bundle that exists locally
 NNOPT_DTYPE=fp16 ./scripts/deploy_android.sh
 
-# 5. Run — pick a variant via NNOPT_QUANT (unset = fp16)
+# 4. Run — pick a variant via NNOPT_QUANT (unset = fp16)
 NNOPT_DTYPE=fp16                  ./scripts/run_android.sh "Hello, I am a language model" 32 --temperature 0
 NNOPT_DTYPE=fp16 NNOPT_QUANT=int8 ./scripts/run_android.sh "Hello, I am a language model" 32 --temperature 0
 NNOPT_DTYPE=fp16 NNOPT_QUANT=q4   ./scripts/run_android.sh "Hello, I am a language model" 32 --temperature 0
 ```
+
+Same binary handles all three precisions — pick via `NNOPT_QUANT` at run-time.
+
+### Alternative: generate the quantized bundles locally
+
+If you have the fp16 bundle and would rather not download the int8/Q4 files, regenerate them on your machine (~30s each, needs Python 3 + numpy):
+
+```bash
+python3 scripts/quantize_weights.py --emit-lm-head-int8     # → weights/model.int8.bin
+python3 scripts/quantize_q4.py      --emit-lm-head-q4       # → weights/model.q4.bin
+```
+
+Both scripts read `weights/model.fp16.bin` and write the new bundle alongside.
 
 Same binary, same deploy step — the runtime picks the weight file based on `NNOPT_QUANT` (`weights/model.fp16.bin` / `model.int8.bin` / `model.q4.bin`).
 

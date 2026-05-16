@@ -57,7 +57,7 @@ Decode-loop techniques that compound on top of the kernels:
 git clone https://github.com/a8nova/adreno-llms.git
 cd adreno-llms
 
-# Pick any model — example: SmolLM2-135M-Instruct
+# Pick any model — example: SmolLM2-135M-Instruct (fp16)
 ./scripts/fetch_weights.sh smollm2-135m-instruct
 
 cd src/models/smollm2-135m-instruct
@@ -67,6 +67,26 @@ NNOPT_DTYPE=fp16 ./scripts/run_android.sh "Once upon a time" 64
 ```
 
 Tokens stream to stdout as they decode.
+
+### Quantized variants (smaller, faster on some devices)
+
+LFM2.5-350M and SmolLM2-135M-Instruct ship int8 and (for LFM2) Q4 weight bundles alongside fp16. Same binary, runtime-switchable via `NNOPT_QUANT`:
+
+```bash
+# Fetch the quantized bundle in addition to fp16
+./scripts/fetch_weights.sh lfm2-5-350m --quant q4              # fp16 + Q4
+./scripts/fetch_weights.sh smollm2-135m-instruct --quant int8  # fp16 + int8
+
+# Build + deploy as usual (deploy pushes every weight bundle present locally)
+cd src/models/lfm2-5-350m
+NNOPT_DTYPE=fp16 ./scripts/build.sh --release
+NNOPT_DTYPE=fp16 ./scripts/deploy_android.sh
+
+# Run — NNOPT_QUANT picks which weight file the runtime loads
+NNOPT_DTYPE=fp16 NNOPT_QUANT=q4 ./scripts/run_android.sh "..." 32 --temperature 0
+```
+
+Or run `--quant fp16` (the default — no extra files) and generate the quantized bundles locally with `python3 scripts/quantize_weights.py` / `quantize_q4.py` inside each port. See each model's README for the precision spread + measured tok/s.
 
 ## 🎯 Hardware target
 
