@@ -357,6 +357,290 @@ argmax_final                              31       0.159       5.1       6.1    
 
 ---
 
+## Step 8 — New device baseline (Galaxy Tab A9+, Adreno 619 v2 / SM6375) + CL 2.0 std
+
+> **Status:** MEASURED — 2026-05-15
+
+**Device change:** moved from Motorola Razr 2020 / Adreno 618 to Samsung Galaxy Tab A9+ Wi-Fi (SM-X210), Qualcomm Snapdragon 695 5G (SM6375) → **Adreno 619 v2**, 1 SP / 64 KB L2 / 32 KB local / 64-byte cache line / 1024 max WG, OpenCL 2.0 full profile. Driver E031.45.02.26. Android 16. Production device (no root → sysfs governor writes no-op; `cl_qcom_perf_hint(HIGH)` provides what clock control is available).
+
+**Device extensions worth noting** (from `cl_probe` dump):
+- `cl_khr_subgroups`, `cl_qcom_subgroup_shuffle`, `cl_qcom_reqd_sub_group_size` — subgroup family **AVAILABLE**.
+- `cl_qcom_recordable_queues` — **AVAILABLE** (vs Razr 2020 where it was blocked per Qwen prior).
+- `cl_qcom_create_buffer_from_image` — enables single-image lm_head (V=49152 > 16384 height cap).
+- `cl_khr_image2d_from_buffer`, `cl_qcom_ext_host_ptr`, `cl_qcom_dmabuf_host_ptr` — zero-copy options.
+- **Missing on this device** (deviations from PDF Table 9-1 SD888 reference): `cl_qcom_dot_product8` (no hw int8 dot4 — `qcom_dot8_acc` Bloom-560m precedent is OFF the table), `cl_qcom_ml_ops`, `cl_qcom_onchip_global_memory`, `cl_qcom_bitreverse`.
+
+**What changed:** plain port-over rebuild on the new device, plus the Phase 0 offline kernel polish (`native_exp` swaps in silu + softmax, `(size_t)t` cast removal in `fused_decode_attn_m1` per PDF §8.7), plus a default `-cl-std=CL2.0` build flag (Phase 2 lever — measured to flip the compiler's vectorization path on this driver; opt-out with `NNOPT_NO_CL2_STD=1`).
+
+**Step 8.A — Pre-CL2 baseline (Razr port verbatim, just rebuilt for Tab A9+):**
+| Run | decode tok/s | tokens deterministic |
+|---|---:|:---:|
+| 1 | 20.7885 | YES (new reference) |
+| 2 | 21.3167 | YES |
+| 3 | 20.8190 | YES |
+| 4 | 21.1102 | YES |
+| 5 | 20.7303 | YES |
+| **median** | **20.82** | — |
+
+Output: `"The teacher worked at the 20th and 21st floors, and the student was at the 22nd floor. The student was 10 years old, and"`. **Numerical drift vs Razr 2020 Step 7** — same input/seed, different fp16 reduction order on Adreno 619 silicon. Locked as new-device reference.
+
+**Step 8.B — `-cl-std=CL2.0` build (default-on after this step):**
+| Run | decode tok/s |
+|---|---:|
+| 1 | 20.6093 |
+| 2 | 21.1841 |
+| 3 | 20.9690 |
+| 4 | 20.9867 |
+| 5 | 21.6725 |
+| **median** | **20.99** |
+
+**Δ vs 8.A:** +0.8% wall, token IDs unchanged. Worth keeping (default-on now). Driver's CL2 compile path tends to pick slightly better register allocation on the GEMV kernels.
+
+**Step 8.C — `NNOPT_SUBGROUP_REDUCE=1` A/B (kept behind flag; default OFF):**
+| Run | decode tok/s |
+|---|---:|
+| 1 | 21.1927 |
+| 2 | 21.0043 |
+| 3 | 21.0706 |
+| 4 | 20.9060 |
+| 5 | 21.0521 |
+| **median** | **21.05** |
+
+**Δ vs 8.B:** +0.3% wall. **Drift event** — tokens diverge at position 12: `"...20th and 21st grade level, and..."` instead of `"...22nd floor..."`. Per-kernel profile shows **rmsnorm_forward** +90% (24 → 46 ms) and **fused_decode_attn_m1** +90% (25 → 47 ms) — i.e. the kernels that actually USE subgroup reduce regressed; the wall-clock parity comes from the GEMVs reading the same CL 2.0 std flag. Conclusion: **`USE_SUBGROUP_REDUCE` is wrong for WG=64 single-subgroup geometry on Adreno 619 v2** (the cross-subgroup roll-up `if (sg_id == 0) { ... }` is wasted work vs the simple 6-step tree). Kept opt-in for devices with smaller waves; default off.
+
+**Step 8 per-kernel profile (NNOPT_PROFILE=1, CL2.0 std, no subgroup):**
+```
+=========== GPU per-kernel profile ===========
+Total recorded GPU time: 1301.86 ms across 16 distinct kernels
+kernel                                 count    total_ms    avg_us    max_us   % tot
+------------------------------------------------------------------------------------
+fused_gate_up_silu_m1_v4_img             930     463.933     498.9     615.9   35.6%
+gemv_m1_k576_no4_img                    2883     447.852     155.3    3202.0   34.4%
+fused_down_residual_m1_no4_img           930     215.078     231.3     301.1   16.5%
+fused_oproj_residual_m1_no4_img          930     105.900     113.9     149.0    8.1%
+fused_decode_attn_m1                     930      24.735      26.6      42.0    1.9%
+rmsnorm_forward                         1952      24.333      12.5      17.2    1.9%
+embedding_forward                         32       9.075     283.6     292.1    0.7%
+fused_rope_kvwrite_m1                    930       7.260       7.8      12.0    0.6%
+argmax_partial                            31       0.822      26.5      34.8    0.1%
+... rest <1%
+------------------------------------------------------------------------------------
+```
+
+**Critical observation (Adreno 619 v2):**
+- 4 GEMV-family kernels = **95% of GPU work**: `fused_gate_up_silu_m1_v4_img` (36%), `gemv_m1_k576_no4_img` (34%, Q+K+V+lm_head 3-tile = 96 dispatches), `fused_down_residual_m1_no4_img` (16%), `fused_oproj_residual_m1_no4_img` (8%).
+- GPU profile total **1.30 s** (with profile overhead — wall-clock-equivalent ~0.90 s); decode wall time ≈ 1.50 s → **~600 ms = 40% of decode wall is host launch overhead** (lower than Razr 2020's 62% because Adreno 619 v2's smaller compute unit makes the GEMV inner loops a larger share of the pie).
+- Roofline at 10.6 GB/s image-cache: 38.5 tok/s (same as Razr). **Current efficiency 20.99 / 38.5 = 54.5%.**
+
+**Top next levers (ordered by expected impact):**
+1. `cl_qcom_recordable_queues` — eliminates the ~600 ms launch overhead per 32-token run. Target 30+ tok/s. (Available on this device, unlike Razr 2020.)
+2. Per-row int8 weight quant + int8 GEMV kernels (NO `qcom_dot8_acc` — pure madd, since `cl_qcom_dot_product8` is missing). Target +30-50% on the 4 GEMV kernels.
+3. `cl_qcom_create_buffer_from_image` single-tile lm_head — eliminates the 3-tile fan-out and reduces dispatch count by ~60.
+
+---
+
+## Step 9 — Per-row int8 image path (Q/K/V/O + gate/up/down)
+
+> **Status:** MEASURED — 2026-05-15
+
+**What changed:** `scripts/quantize_weights.py` emits `weights/model.int8.bin` (162 MB, 210 weights quantized — every transformer-block Linear, lm_head/embed and norms unchanged). New `kernels/block_fused_int8.cl` with 4 image2d-backed int8 kernel variants:
+
+- `gemv_m1_k576_no4_img_int8` (Q/K/V)
+- `fused_oproj_residual_m1_no4_img_int8`
+- `fused_gate_up_silu_m1_v4_img_int8`
+- `fused_down_residual_m1_no4_img_int8`
+
+All use `image2d_t` with `CL_RGBA / CL_SIGNED_INT8` + `read_imagei` (sign-extended int4 per pixel), accumulate fp32, pull per-row fp16 scale out once at the tail. **Adreno 619 v2 does not expose `cl_qcom_dot_product8`** (PDF §9.5.1 — extension absent on SM6375), so no `qcom_dot8_acc` inner loop; plain fma. Host wiring in `src/layers/{attention,mlp}.cpp` adds parallel int8 state vars + `quantized_` flag; `set_weights()` detects `dtype=int8` from meta.json. Dispatch priority becomes: int8 image > fp16 image > fp16 buffer.
+
+CLBlast HGemm in `pytorch_linear()` doesn't speak int8, so prefill is routed through the decode kernels token-by-token (`Model::forward` gates on `NNOPT_QUANT=int8`). Slower prefill in absolute kernel-count terms, but cumulatively much faster since CLBlast HGemm at M=6 is the worst case for Adreno's GEMM path.
+
+Flip with `NNOPT_QUANT=int8` env var; weight file selection in `src/main.cpp`.
+
+**5-run median (warm):**
+| Run | decode tok/s | total wall (s) | tokens deterministic |
+|---|---:|---:|:---:|
+| 1 | 19.9040 | 1.8499 | YES (new int8 reference) |
+| 2 | 20.1721 | 1.8100 | YES |
+| 3 | 20.1922 | 1.8314 | YES |
+| 4 | 20.7262 | 1.7741 | YES |
+| 5 | 20.4749 | 1.7978 | YES |
+| **median** | **20.19** | **1.81** | — |
+
+**Δ vs Step 8 (fp16 CL2.0 baseline):** decode −3.8% (20.99 → 20.19); **total wall −52% (3.78 s → 1.81 s)**.
+
+**Drift event:** Output diverges from fp16 baseline at position 9. New reference: `"The teacher worked at the 20th and 21st grade level, and the student was at the 20th and 21st grade level."` — coherent, deterministic across 5 runs. Per-row symmetric int8 with absolute-max scale; sanity check at row 0 of down_proj layer 0: max_abs_err=0.00586, relative 0.41%.
+
+**Per-kernel deltas (per-call avg µs, int8 vs Step 8 fp16):**
+| Kernel | fp16 µs/call | int8 µs/call | Δ |
+|---|---:|---:|---:|
+| `fused_gate_up_silu_m1_v4_img` | 498.9 | 441.8 | **−11%** |
+| `gemv_m1_k576_no4_img` (Q/K/V per call) | 155.3 | 57.6 | **−63%** |
+| `fused_down_residual_m1_no4_img` | 231.3 | 156.8 | **−32%** |
+| `fused_oproj_residual_m1_no4_img` | 113.9 | 96.2 | **−15%** |
+| `lm_head` (still fp16: 3 × `gemv_m1_k576_no4_img` per token) | 2565.9 | 2565.9 | 0% (not quantized) |
+
+**Why decode tok/s didn't move despite faster int8 kernels:** the lm_head still runs fp16 (`model.embed_tokens.weight` was kept fp16 by default in `scripts/quantize_weights.py`, since lm_head is tied to embed and the script keeps it for argmax-safety). 285 ms of 1326 ms total GPU time per decode batch lives in lm_head's 3 fp16 image tile dispatches; with int8 carrying the other 73% of the GPU pie, the lm_head share stays at 21% and overall throughput is BW-mixed.
+
+**Wall-time win source:** the `forward_decode` fallback for `NNOPT_QUANT=int8` prefill replaces CLBlast HGemm (slow at M=6 batch on Adreno 619 v2's single-SP geometry) with 6 cheap decode-style M=1 GEMV dispatches. TTFT drops accordingly.
+
+**Step 9 per-kernel profile (NNOPT_PROFILE=1, int8):**
+```
+=========== GPU per-kernel profile ===========
+Total recorded GPU time: 1326.32 ms across 11 distinct kernels
+kernel                                 count    total_ms    avg_us    max_us   % tot
+------------------------------------------------------------------------------------
+fused_gate_up_silu_m1_v4_img_int8       1110     490.399     441.8     452.9   37.0%
+gemv_m1_k576_no4_img (lm_head fp16)      111     284.818    2565.9    2625.0   21.5%
+gemv_m1_k576_no4_img_int8               3330     191.879      57.6     103.9   14.5%
+fused_down_residual_m1_no4_img_int8     1110     174.078     156.8     167.9   13.1%
+fused_oproj_residual_m1_no4_img_int8    1110     106.794      96.2     103.9    8.1%
+rmsnorm_forward                         2257      29.377      13.0      16.9    2.2%
+fused_decode_attn_m1                    1110      28.311      25.5      43.0    2.1%
+embedding_forward                         37      10.475     283.1     286.0    0.8%
+fused_rope_kvwrite_m1                   1110       9.353       8.4      12.0    0.7%
+... rest <1%
+------------------------------------------------------------------------------------
+```
+
+**Next levers (ranked, dorm levers excluded):**
+1. **`cl_qcom_recordable_queues`** — extension IS available on this device (vs Razr Adreno 618 where it was blocked). Launch overhead is ~12% of decode wall on Adreno 619 v2 (not 50% like Razr — fewer compute units make per-kernel time dominate). Expected win: +5-10% decode.
+2. **WG-size sweep** on the 4 hot kernels (`fused_gate_up_silu_m1_v4_img_int8`, `gemv_m1_k576_no4_img_int8`, `fused_down_residual_m1_no4_img_int8`, `fused_oproj_residual_m1_no4_img_int8`) — try {32, 64, 128, 256}. Requires removing `reqd_work_group_size(WG_SIZE)` pinning.
+3. **Q4_0 quantization** — 4× weight BW savings vs fp16. Would push decode much closer to the (recomputed) Q4 roofline of ~80 tok/s, but high accuracy risk on a 135M model.
+4. **Sparse top-k lm_head** — fuse argmax INTO lm_head GEMV (running-max tracking per WG) to eliminate the 98 KB fp16 logits materialization that dominates the lm_head's per-call cost (~2.4 ms). Greedy-only.
+
+---
+
+## Step 10 — int8 lm_head via `lm_head.weight` alias (dodges tied-embedding conflict)
+
+> **Status:** MEASURED — 2026-05-15
+
+**What changed:** Two-line tweak in `scripts/quantize_weights.py` adds `--emit-lm-head-int8` flag which writes a dedicated `lm_head.weight` int8 tensor (per-row symmetric quant of the embedding) + `lm_head.weight.scale` to `weights/model.int8.bin`, leaving `model.embed_tokens.weight` fp16 (so the fp16 embedding-lookup kernel keeps working under tied embeddings). `src/layers/lm_head.cpp::initialize()` prefers `lm_head.weight` int8 when present; otherwise falls back to `model.embed_tokens.weight`. Image-tiled int8 dispatch via `gemv_m1_k576_no4_img_int8` (3 sub-image tiles for V=49152 > 16384 height cap).
+
+Weight size: 162 → 192 MB on disk (+30 MB embed-as-int8 duplicate).
+
+**5-run median (warm):**
+| Run | decode tok/s |
+|---|---:|
+| 1 | 20.1096 |
+| 2 | 20.3197 |
+| 3 | 20.2811 |
+| 4 | 19.8708 |
+| 5 | 20.2753 |
+| **median** | **20.28** |
+
+**Δ vs Step 9:** +0.4% (20.19 → 20.28) — within run-to-run variance.
+
+**Drift:** none — tokens identical to Step 9 reference.
+
+**Per-kernel profile (int8 lm_head):**
+```
+=========== GPU per-kernel profile ===========
+Total recorded GPU time: 1309.7 ms across 10 distinct kernels
+kernel                                 count    total_ms    avg_us    max_us   % tot
+------------------------------------------------------------------------------------
+fused_gate_up_silu_m1_v4_img_int8       1110     490.481     441.9     459.0   37.4%
+gemv_m1_k576_no4_img_int8               3441     460.469     133.8    2435.1   35.2%
+fused_down_residual_m1_no4_img_int8     1110     173.842     156.6     172.0   13.3%
+fused_oproj_residual_m1_no4_img_int8    1110     106.773      96.2     102.9    8.2%
+... rest <3%
+------------------------------------------------------------------------------------
+```
+
+**Per-call analysis:** the merged `gemv_m1_k576_no4_img_int8` counter (3441 calls) covers both QKV (3330 calls × 57.6 µs ≈ 191.7 ms) and the 3 lm_head tile dispatches (111 calls × 2421 µs ≈ 269 ms). Compared to Step 9's fp16 lm_head (2566 µs/call), int8 lm_head saves **~6% per call** (2566 → 2421 µs). But lm_head share of total GPU time only dropped 21% → 20% — confirming the lm_head bottleneck is NOT weight BW. The dominant cost is the **98 KB fp16 logits write** per call (49152 × 2 bytes), which int8 weights don't touch.
+
+**Conclusion:** lm_head weight BW is roughly tied with output-write BW on Adreno 619 v2. Beating the lm_head requires fusing argmax INTO the GEMV (eliminating the 98 KB materialization). Listed as a Tier C lever above for future work.
+
+---
+
+## Step 11 — `cl_qcom_recordable_queues` probe (extension confirmed, integration pending)
+
+> **Status:** PROBE LANDED — 2026-05-15
+
+**What changed:** Ported the LFM2 record/replay probe into `src/main.cpp::run_record_probe()` (gated on `NNOPT_RECORD_PROBE=1`) + added `probe_noop` kernel to `kernels/block_fused.cl`. Loads the four `cl_qcom_*` recording entry points via `dlsym` (LFM2's proven approach), creates a recordable command queue with `CL_QUEUE_RECORDABLE_QCOM = 0x40000000` alone (not combined with profiling/out-of-order), records 240 atomic-add dispatches, replays 32 times, compares against a sequential 7680-dispatch baseline on the live queue.
+
+**Probe result on Adreno 619 v2 / SM6375:**
+```
+Record: recordable queue created OK
+Baseline: 7680 sequential dispatches -> 148.176 ms, counter=7680
+Replay:   7680 dispatches -> 30.1189 ms,  counter=7680
+Record: speedup = 4.91971x (19.2938 us/dispatch baseline -> 3.92173 us/dispatch replay)
+```
+
+**Implications for decode integration:**
+- Per-dispatch host overhead: **19.3 µs → 3.9 µs** (4.9× cheaper per replay)
+- SmolLM2 decode dispatches ~240/token. Per-token launch overhead today: 240 × 19.3 µs = **4.6 ms**; with recording: 240 × 3.9 µs = 0.9 ms. **Per-token savings ≈ 3.7 ms**.
+- Over 32 generated tokens: ~118 ms of decode wall (~8% of current 1.5 s decode wall).
+- Counter parity (7680 == 7680) confirms replay is dispatch-equivalent — no semantic divergence.
+
+**Why integration is not landed in this session:** building the recording with correct per-step args requires plumbing 60 arg-update entries per replay (30 layers × `fused_rope_kvwrite_m1` arg 10 = `start_pos` + 30 layers × `fused_decode_attn_m1` arg = `seq_k`) plus a persistent `ids_buf_persistent_` for the embedding's token-id input. Estimated 1.5–2 hours of careful refactoring across `src/model.cpp`, `src/layers/attention.cpp`, and `src/opencl_context.{h,cpp}`. **Probe lands the infrastructure; integration is a clean follow-up.**
+
+**Integration plan (for the next session):**
+1. Promote the dlsym fn-pointer loader from `main.cpp::run_record_probe` to `OpenCLContext` members so `Model` can reuse them.
+2. Add `cl_command_queue record_queue_` + `cl_recording_qcom recording_` + `bool recording_built_` to `Model`.
+3. Add `cl_mem ids_buf_persistent_` (1×int32) for embedding input; update per call via `clEnqueueWriteBuffer` (cheap 4-byte write).
+4. Expose `fused_rope_kvwrite_m1_` and `fused_decode_attn_m1_` kernel handles from `Attention` via getters; collect into `std::vector<PerStepArg>` in `Model::initialize`.
+5. Modify `Model::forward_decode_greedy`:
+   - First call: normal dispatch + parallel record (same dispatches on `record_queue_`), `clEndRecordingQCOM`.
+   - Subsequent calls: build `cl_array_arg_qcom` args vector (60 entries: 30 × start_pos + 30 × seq_k), `clEnqueueRecordingQCOM(live_q, recording_, args, ...)`, read back argmax.
+6. Gate behind `NNOPT_RECORD=1` so it's opt-in until tested.
+
+Expected post-integration target: **~22 tok/s decode** (20.28 × 1.08 wall improvement) on this device.
+
+---
+
+## Step 12 — RoPE table prewarm to MAX_POSITION_EMBEDDINGS at init
+
+> **Status:** MEASURED — 2026-05-15
+
+**What changed:** `Model::initialize` now calls `Attention::prewarm_rope_tables(MAX_POSITION_EMBEDDINGS)` for every layer at startup. Previously each decode step called `ensure_rope_tables(seq_k)` which, because `seq_k = start_pos + 1` grows by one each token, found the cached table too small and **rebuilt cos/sin tables from scratch** every step — an fp32 trig loop on the host plus `clCreateBuffer` × 2 for ~30 layers per token. The cost was hidden inside ensure_rope_tables and never showed up in the kernel profile.
+
+Discovered while attempting the `cl_qcom_recordable_queues` integration: the recording replay was failing with `CL_INVALID_OPERATION (-59)` because the captured cos/sin cl_mem references were freed and re-created mid-decode. The fix to prevent re-allocation also revealed it was a real perf bug independent of recording.
+
+**5-run median (warm), int8 + prewarm, NO recording:**
+| Run | decode tok/s | TTFT (s) | total wall (s) |
+|---|---:|---:|---:|
+| 1 | 24.4589 | 0.2731 | 1.5405 |
+| 2 | 24.6416 | 0.2710 | 1.5291 |
+| 3 | 24.3189 | 0.2687 | 1.5434 |
+| 4 | 24.1973 | 0.2657 | 1.5469 |
+| 5 | 24.4368 | 0.2830 | 1.5516 |
+| **median** | **24.44** | **0.2710** | **1.5434** |
+
+**Δ vs Step 10:** decode **+20.5%** (20.28 → 24.44), wall −13.3% (1.78 → 1.54s).
+**Δ vs Step 8.B fp16 baseline:** decode **+16.4%** (20.99 → 24.44), wall **−59.2%** (3.78 → 1.54s).
+**Δ vs original Step 0 fp32 baseline (1.48 tok/s on Razr 2020):** decode **+16.5×**.
+**Roofline efficiency:** 24.44 / 38.5 = **63.5%** of image-cache ceiling.
+
+**Drift:** none — tokens match Step 9/10 int8 reference exactly.
+
+**Why this was hidden so long:** the `ensure_rope_tables` cost was on the HOST (Python-like fp32 trig loop + a small `clCreateBuffer`), not in any GPU kernel. Per-kernel profile showed `fused_rope_kvwrite_m1` at only 8 µs/call — but the **host overhead BEFORE that kernel** was ~120 µs/step (4 ms/run across 32 generated tokens × 30 layers = 38ms estimated saved). The total wall savings (~240 ms) outsizes the trig math itself because `clCreateBuffer` + `clCreateBuffer` per layer per step amplifies the trig cost into a driver-bound pattern.
+
+**Bonus side effect:** RoPE tables are now sized to `MAX_POSITION_EMBEDDINGS` (8192 × head_dim × 2 = 1 MB each per layer × 30 layers × 2 (cos+sin) = ~60 MB up-front GPU memory). Trade memory for stable decode throughput.
+
+---
+
+## Step 13 — `cl_qcom_recordable_queues` integration (PARTIAL — replay still err=-59)
+
+> **Status:** INFRASTRUCTURE LANDED, REPLAY UNRESOLVED — 2026-05-15
+
+**What changed:** Plumbed the full recordable-queues path through `src/opencl_context.{h,cpp}` (extension type definitions, dlsym fn-pointer loader, helper methods `create_recordable_queue`/`new_recording`/`end_recording`/`enqueue_recording`/`release_recording`) and `src/model.cpp` (`Model::initialize` creates the recordable queue + pre-warms RoPE tables + collects per-layer `(kernel, arg_idx)` slots for start_pos and seq_k; `Model::forward_decode_greedy` records the 30-layer chain on first call, replays it with per-step arg updates on subsequent calls).
+
+**Current behavior under `NNOPT_RECORD=1`:**
+- Recording build succeeds: `RecordQ: recording built (30 layers, start_pos@record=6)` printed
+- First replay fails: `enqueue_recording failed err=-59` (CL_INVALID_OPERATION)
+- Fallback path correctly disables recording and continues with live dispatch — no functional regression
+
+**Theory on -59:** the dispatches inside the 30-layer chain include `fused_decode_attn_m1`, which is enqueued with a **dynamic local memory size** (`ls_bytes = (seq_k + WG_SIZE) * sizeof(float)`). At record time the local-mem arg is captured for `seq_k = 7`; replay with `seq_k = 8+` may be rejected because the local-mem size is encoded in the recording and not overridable via the standard `cl_array_arg_qcom` mechanism (or the override path differs for `__local` args). The 5-run median of 23.76 tok/s with `NNOPT_RECORD=1` (vs 24.20 without) reflects ~150 µs of wasted replay-attempt overhead per token plus the one-time ~4ms recording-build cost.
+
+**To resolve in a follow-up session:**
+1. Either size the dynamic local memory at record time to `(MAX_POSITION_EMBEDDINGS + WG_SIZE) * sizeof(float)` (always allocate max, kernel only uses `seq_k` worth) — eliminates the per-step size mismatch.
+2. Or override the local-mem `__local` arg via `cl_array_arg_qcom` with `arg_value = nullptr` and `arg_size = current_seq_k_bytes` per replay — needs verification that the QC ext supports this.
+3. Or restructure `fused_decode_attn_m1` to use a fixed-size `__local` array sized for the worst case (32 KB device limit allows ~8192-position context).
+
+Expected gain at full integration: another ~+3-5% wall (probe measured 4.9× per-dispatch host savings; 30 layers × ~7 dispatches/layer × 14.5 µs saved each = ~3 ms/token).
+
+---
+
 ## Steps (to be filled as further optimizations land)
 
 *(Each step: narrative + 3-run table + Δ vs Step N-1 + Δ vs Step 0 + per-kernel profile every 2-3 steps)*

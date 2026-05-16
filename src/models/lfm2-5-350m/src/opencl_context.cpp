@@ -195,11 +195,13 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
 
     // CL_QUEUE_PROFILING_ENABLE forces the GPU to record start/end timestamps
     // on every dispatch — measurable overhead (~1–3% at our 240-disp/tok rate).
-    // Only set it when the per-kernel profiler is requested via NNOPT_PROFILE=1.
+    // Set it under either NNOPT_PROFILE=1 (legacy) or NNOPT_KERNEL_PROFILE=1
+    // (kernel_profiler.h) so the per-label timings actually populate.
     cl_command_queue_properties q_props = 0;
     {
-        const char* e = std::getenv("NNOPT_PROFILE");
-        if (e && e[0] == '1') q_props |= CL_QUEUE_PROFILING_ENABLE;
+        const char* a = std::getenv("NNOPT_PROFILE");
+        const char* b = std::getenv("NNOPT_KERNEL_PROFILE");
+        if ((a && a[0] == '1') || (b && b[0] == '1')) q_props |= CL_QUEUE_PROFILING_ENABLE;
     }
     queue_ = clCreateCommandQueue(context_, device_, q_props, &err);
     if (err != CL_SUCCESS) return false;
@@ -237,7 +239,61 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
         }
     }
 
+    // cl_qcom_recordable_queues entry-point load (PDF §9.1.3). dlsym from the
+    // already-loaded libOpenCL.so — same pattern as run_record_probe in main.cpp.
+    fn_new_recording_     = (clNewRecordingQCOM_fn)    dlsym(RTLD_DEFAULT, "clNewRecordingQCOM");
+    fn_end_recording_     = (clEndRecordingQCOM_fn)    dlsym(RTLD_DEFAULT, "clEndRecordingQCOM");
+    fn_release_recording_ = (clReleaseRecordingQCOM_fn)dlsym(RTLD_DEFAULT, "clReleaseRecordingQCOM");
+    fn_enqueue_recording_ = (clEnqueueRecordingQCOM_fn)dlsym(RTLD_DEFAULT, "clEnqueueRecordingQCOM");
+    record_fns_loaded_ = (fn_new_recording_ && fn_end_recording_ &&
+                          fn_release_recording_ && fn_enqueue_recording_);
+    if (record_fns_loaded_) {
+        std::cerr << "RecordQ: cl_qcom_recordable_queues entry points loaded" << std::endl;
+    } else {
+        std::cerr << "RecordQ: cl_qcom_recordable_queues NOT available" << std::endl;
+    }
+
     return true;
+}
+
+cl_command_queue OpenCLContext::create_recordable_queue() {
+    if (!record_fns_loaded_) return nullptr;
+    constexpr cl_command_queue_properties RECORD_BIT = (cl_command_queue_properties)1 << 30;
+    cl_int err = CL_SUCCESS;
+    cl_command_queue q = clCreateCommandQueue(context_, device_, RECORD_BIT, &err);
+    if (err != CL_SUCCESS || !q) {
+        std::cerr << "RecordQ: clCreateCommandQueue(RECORD_BIT) failed err=" << err << std::endl;
+        return nullptr;
+    }
+    return q;
+}
+
+cl_recording_qcom OpenCLContext::new_recording(cl_command_queue q) const {
+    if (!fn_new_recording_) return nullptr;
+    cl_int err = CL_SUCCESS;
+    cl_recording_qcom rec = fn_new_recording_(q, &err);
+    if (err != CL_SUCCESS) return nullptr;
+    return rec;
+}
+
+cl_int OpenCLContext::end_recording(cl_recording_qcom rec) const {
+    if (!fn_end_recording_) return CL_INVALID_OPERATION;
+    return fn_end_recording_(rec);
+}
+
+cl_int OpenCLContext::release_recording(cl_recording_qcom rec) const {
+    if (!fn_release_recording_) return CL_INVALID_OPERATION;
+    return fn_release_recording_(rec);
+}
+
+cl_int OpenCLContext::enqueue_recording(cl_command_queue live_q,
+                                        cl_recording_qcom rec,
+                                        size_t num_args,
+                                        const cl_array_arg_qcom* args) const {
+    if (!fn_enqueue_recording_) return CL_INVALID_OPERATION;
+    return fn_enqueue_recording_(live_q, rec, num_args, args,
+                                 0, nullptr, 0, nullptr, 0, nullptr,
+                                 0, nullptr, nullptr);
 }
 
 // Helper: append USE_FP16 + fast-relaxed-math to options if not present.

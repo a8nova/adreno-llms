@@ -1,6 +1,6 @@
 # Mamba-130M on Adreno (Android)
 
-State-spaces' selective SSM (Mamba) ported to C++/OpenCL for Adreno 6xx GPUs on non-flagship Android. Verified on Motorola Razr 2020 (Adreno 618).
+State-spaces' selective SSM (Mamba) ported to C++/OpenCL for Adreno 6xx GPUs on non-flagship Android. Verified on Motorola Razr 2020 (Adreno 620 / Snapdragon 765G).
 
 - **Upstream:** [state-spaces/mamba-130m-hf](https://huggingface.co/state-spaces/mamba-130m-hf)
 - **Parameters:** 130M
@@ -27,13 +27,12 @@ NNOPT_DTYPE=fp16 ./scripts/run_android.sh "Once upon a time" 64
 
 ## Performance
 
-Razr 2020 / Adreno 618, fp16, greedy (`temperature=0, seed=42`), 32-token generation, canonical token IDs, 5-run warm median measured 2026-05-06.
+Razr 2020 / Adreno 620 / Snapdragon 765G, fp16, greedy (`--temperature 0`), 32-token generation, 3-run warm median measured 2026-05-16.
 
-| | Decode tok/s | TTFT (s) |
-|---|---:|---:|
-| Measured today | **22.15** | **1.60** |
-| min / max across 5 runs | 21.68 / 23.20 | — |
-| Roofline ceiling (10 GB/s) | 38.7 | — |
+| | Decode tok/s | TTFT (s) | Peak CPU mem (MB) |
+|---|---:|---:|---:|
+| Measured today | **21.52** | **1.62** | **686** |
+| Roofline ceiling (10 GB/s) | 38.7 | — | — |
 
 Per-token weight footprint: ~258 MB. Full optimization log + bottleneck census in [BENCHMARK.md](./BENCHMARK.md).
 

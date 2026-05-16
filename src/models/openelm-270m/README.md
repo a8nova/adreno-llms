@@ -1,6 +1,6 @@
 # OpenELM-270M on Adreno (Android)
 
-Apple's OpenELM (LLaMA-style efficient transformer) ported to C++/OpenCL for Adreno 6xx GPUs on non-flagship Android. Verified on Motorola Razr 2020 (Adreno 618).
+Apple's OpenELM (LLaMA-style efficient transformer) ported to C++/OpenCL for Adreno 6xx GPUs on non-flagship Android. Verified on Motorola Razr 2020 (Adreno 620 / Snapdragon 765G).
 
 - **Upstream:** [apple/OpenELM-270M](https://huggingface.co/apple/OpenELM-270M)
 - **Parameters:** 270M
@@ -29,13 +29,12 @@ NNOPT_DTYPE=fp16 ./scripts/run_android.sh "Once upon a time" 64
 
 ## Performance
 
-Razr 2020 / Adreno 618, fp16, greedy (`temperature=0, seed=42`), 32-token generation, 5-run warm median measured 2026-05-06. (No `reference/test_input_ids.bin` shipped — uses live encoder.)
+Razr 2020 / Adreno 620 / Snapdragon 765G, fp16, greedy (`--temperature 0`), 32-token generation, 3-run warm median measured 2026-05-16. (No `reference/test_input_ids.bin` shipped — uses live encoder.)
 
-| | Decode tok/s | TTFT (s) |
-|---|---:|---:|
-| Measured today | **4.47** | **2.13** |
-| min / max across 5 runs | 4.40 / 4.50 | — |
-| Roofline ceiling (10 GB/s) | 19.3 | — |
+| | Decode tok/s | TTFT (s) | Peak CPU mem (MB) |
+|---|---:|---:|---:|
+| Measured today | **14.65** | **2.00** | **1371** |
+| Roofline ceiling (10 GB/s) | 19.3 | — | — |
 
 Per-token weight footprint: ~518 MB. Full optimization log in [BENCHMARK.md](./BENCHMARK.md).
 

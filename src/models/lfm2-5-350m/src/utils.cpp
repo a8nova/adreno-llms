@@ -161,6 +161,73 @@ static cl_kernel  s_gemv_m1_k1024_no2_img = nullptr;
 static cl_kernel  s_gemv_m1_k1024_no8_silufused_img = nullptr;
 static cl_kernel  s_gemv_m1_k4608_no4_img = nullptr;
 
+// Int8 image-path variants (kernels/gemv_m1_int8.cl). Loaded by
+// ensure_gemv_m1_int8_program(); each one is the int8 counterpart of the
+// matching s_gemv_m1_k*_no*_img kernel above. Null if the build failed
+// (treated as "int8 path unavailable" → caller falls through to fp16).
+static cl_program s_gemv_m1_int8_prog            = nullptr;
+static cl_kernel  s_gemv_m1_k1024_no4_img_int8   = nullptr;
+static cl_kernel  s_gemv_m1_k1024_no8_img_int8   = nullptr;
+static cl_kernel  s_gemv_m1_k4608_no4_img_int8   = nullptr;
+static cl_kernel  s_gemv_m1_k4608_no8_img_int8   = nullptr;
+
+// Block-32 symmetric Q4 image-path variants (kernels/gemv_m1_q4.cl). Same
+// dispatch geometry as int8 but the W reads come back as uint4 (RGBA UINT8)
+// and have to be nibble-unpacked + scale-multiplied per-block. Per-token
+// weight footprint is ~half of int8.
+static cl_program s_gemv_m1_q4_prog              = nullptr;
+static cl_kernel  s_gemv_m1_k1024_no4_img_q4     = nullptr;
+static cl_kernel  s_gemv_m1_k1024_no8_img_q4     = nullptr;
+static cl_kernel  s_gemv_m1_k4608_no4_img_q4     = nullptr;
+
+// Per-weight int8 metadata. Keyed by the int8 cl_mem buffer that the layer
+// passes into pytorch_linear() as W. Holds:
+//   image  — image2d_t view of W (CL_RGBA / CL_SIGNED_INT8, K/4 px × N rows)
+//   scale  — fp16 per-row absolute-max scale buffer [N]
+//   N, K   — explicit dims so the dispatch site doesn't have to re-derive
+// Single-image entries store {image, scale} directly. Weights whose row count
+// exceeds CL_DEVICE_IMAGE2D_MAX_HEIGHT (e.g. lm_head N=65536 > 16384 on
+// Adreno 6xx) take the tiled path: row-major sub-buffers of W_int8 and
+// scale_fp16, with a per-tile image2d_t view of the W sub-buffer.
+struct Int8Tile {
+    cl_mem sub_W     = nullptr;
+    cl_mem image     = nullptr;
+    cl_mem scale_sub = nullptr;
+    int    row_offset = 0;
+    int    row_count  = 0;
+};
+struct Int8Aux {
+    cl_mem image = nullptr;      // single-image path (nullptr → tiled or pending)
+    cl_mem scale = nullptr;      // single-image path
+    std::vector<Int8Tile> tiles; // tiled path (V > image-height cap)
+    int N = 0;
+    int K = 0;
+    cl_mem W_int8     = nullptr; // root W buffer, kept for sub-buffer creation
+    cl_mem scale_root = nullptr; // root scale buffer, for sub-buffer creation
+};
+static std::unordered_map<cl_mem, Int8Aux> s_int8_aux;
+
+// Q4 weight registry. Same shape as Int8Aux but the image is built from a
+// uint8 buffer (K/2 bytes per row), and scales are per-block (K/32 fp16 per
+// row). Block size is fixed at 32.
+struct Q4Tile {
+    cl_mem sub_W     = nullptr;
+    cl_mem image     = nullptr;
+    cl_mem scale_sub = nullptr;
+    int    row_offset = 0;
+    int    row_count  = 0;
+};
+struct Q4Aux {
+    cl_mem image = nullptr;
+    cl_mem scale = nullptr;
+    std::vector<Q4Tile> tiles;
+    int N = 0;
+    int K = 0;
+    cl_mem W_q4       = nullptr;
+    cl_mem scale_root = nullptr;
+};
+static std::unordered_map<cl_mem, Q4Aux> s_q4_aux;
+
 // Per-buffer image2d_t view cache (lazy). Standard entries hold one image;
 // tiled entries hold multiple sub-buffer/sub-image pairs for weights whose
 // row count exceeds CL_DEVICE_IMAGE2D_MAX_HEIGHT (e.g. lm_head N=65536).
@@ -228,6 +295,437 @@ static bool ensure_gemv_m1_program(cl_command_queue queue) {
     s_gemv_m1_k4608_no4_img = clCreateKernel(s_gemv_m1_prog, "gemv_m1_k4608_no4_img", &err);
     if (err != CL_SUCCESS) { s_gemv_m1_k4608_no4_img = nullptr; }
     return s_gemv_m1_k1024 && s_gemv_m1_k4608_no4;
+}
+
+// Build kernels/gemv_m1_int8.cl. Same context/device as the fp16 program.
+// Failures are silent — int8 path stays unavailable; callers fall through.
+static bool ensure_gemv_m1_int8_program(cl_command_queue queue) {
+    if (s_gemv_m1_int8_prog) return true;
+
+    cl_context   ctx    = nullptr;
+    cl_device_id device = nullptr;
+    clGetCommandQueueInfo(queue, CL_QUEUE_CONTEXT, sizeof(ctx),    &ctx,    nullptr);
+    clGetCommandQueueInfo(queue, CL_QUEUE_DEVICE,  sizeof(device), &device, nullptr);
+    if (!ctx || !device) return false;
+
+    std::ifstream f("kernels/gemv_m1_int8.cl", std::ios::binary);
+    if (!f.is_open()) {
+        NNOPT_ERROR_FMT("gemv_m1_int8: cannot open kernels/gemv_m1_int8.cl%s", "");
+        return false;
+    }
+    std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const char* src_cstr = src.c_str();
+    size_t src_len = src.size();
+    cl_int err;
+    s_gemv_m1_int8_prog = clCreateProgramWithSource(ctx, 1, &src_cstr, &src_len, &err);
+    if (err != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("gemv_m1_int8: clCreateProgramWithSource failed (%d)", (int)err);
+        return false;
+    }
+    err = clBuildProgram(s_gemv_m1_int8_prog, 1, &device, "-cl-fast-relaxed-math", nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        size_t log_size = 0;
+        clGetProgramBuildInfo(s_gemv_m1_int8_prog, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
+        if (log_size > 0) {
+            std::vector<char> log(log_size + 1, 0);
+            clGetProgramBuildInfo(s_gemv_m1_int8_prog, device, CL_PROGRAM_BUILD_LOG, log_size, log.data(), nullptr);
+            fprintf(stderr, "gemv_m1_int8 build log: %s\n", log.data());
+        }
+        clReleaseProgram(s_gemv_m1_int8_prog);
+        s_gemv_m1_int8_prog = nullptr;
+        return false;
+    }
+    s_gemv_m1_k1024_no4_img_int8 = clCreateKernel(s_gemv_m1_int8_prog, "gemv_m1_k1024_no4_img_int8", &err);
+    if (err != CL_SUCCESS) { s_gemv_m1_k1024_no4_img_int8 = nullptr; }
+    s_gemv_m1_k1024_no8_img_int8 = clCreateKernel(s_gemv_m1_int8_prog, "gemv_m1_k1024_no8_img_int8", &err);
+    if (err != CL_SUCCESS) { s_gemv_m1_k1024_no8_img_int8 = nullptr; }
+    s_gemv_m1_k4608_no4_img_int8 = clCreateKernel(s_gemv_m1_int8_prog, "gemv_m1_k4608_no4_img_int8", &err);
+    if (err != CL_SUCCESS) { s_gemv_m1_k4608_no4_img_int8 = nullptr; }
+    s_gemv_m1_k4608_no8_img_int8 = clCreateKernel(s_gemv_m1_int8_prog, "gemv_m1_k4608_no8_img_int8", &err);
+    if (err != CL_SUCCESS) { s_gemv_m1_k4608_no8_img_int8 = nullptr; }
+    return true;
+}
+
+// Register an int8 weight buffer with utils so pytorch_linear() can pick it up
+// at M=1. Called from main.cpp after Weights::load() under NNOPT_QUANT=int8.
+// Builds the int8 image2d_t view lazily on first dispatch (needs a queue);
+// the registration only records the {scale, N, K} sidecar for now.
+bool nnopt_register_int8_weight(cl_mem W_int8, cl_mem scale_fp16, int N, int K) {
+    if (!W_int8 || !scale_fp16 || N <= 0 || K <= 0) return false;
+    Int8Aux a;
+    a.image = nullptr;       // built lazily on first GEMV call
+    a.scale = nullptr;       // single-image path: scale is just scale_fp16
+    a.N = N;
+    a.K = K;
+    a.W_int8     = W_int8;
+    a.scale_root = scale_fp16;
+    s_int8_aux[W_int8] = a;
+    return true;
+}
+
+// Lazily build the single image2d_t view or the per-tile views for an int8
+// weight. Returns true if the entry is ready for dispatch. The choice
+// between single-image and tiled depends on N vs the device's image-height
+// cap (CL_DEVICE_IMAGE2D_MAX_HEIGHT). Adreno 6xx caps at 16384, so any
+// weight with N > 16384 (only lm_head at V=65536) tiles into 4 chunks.
+static bool prepare_int8_entry(cl_command_queue queue, cl_mem W) {
+    auto it = s_int8_aux.find(W);
+    if (it == s_int8_aux.end()) return false;
+    Int8Aux& a = it->second;
+    if (a.image || !a.tiles.empty()) return true;  // already prepared
+
+    cl_context   ctx = nullptr;
+    cl_device_id dev = nullptr;
+    if (clGetCommandQueueInfo(queue, CL_QUEUE_CONTEXT, sizeof(ctx), &ctx, nullptr) != CL_SUCCESS ||
+        clGetCommandQueueInfo(queue, CL_QUEUE_DEVICE,  sizeof(dev), &dev, nullptr) != CL_SUCCESS) return false;
+
+    // Use the same image-limit globals the fp16 path probes once.
+    if (!s_img_limits_known) {
+        clGetDeviceInfo(dev, CL_DEVICE_IMAGE2D_MAX_WIDTH,  sizeof(s_img_max_w), &s_img_max_w, nullptr);
+        clGetDeviceInfo(dev, CL_DEVICE_IMAGE2D_MAX_HEIGHT, sizeof(s_img_max_h), &s_img_max_h, nullptr);
+        s_img_limits_known = true;
+    }
+    if ((size_t)(a.K / 4) > s_img_max_w) {
+        NNOPT_ERROR_FMT("int8 image too wide: K/4=%d > %zu", a.K/4, s_img_max_w);
+        return false;
+    }
+
+    cl_image_format fmt;
+    fmt.image_channel_order = CL_RGBA;
+    fmt.image_channel_data_type = CL_SIGNED_INT8;
+
+    // Single-image path: weight fits in one image2d_t.
+    if ((size_t)a.N <= s_img_max_h) {
+        cl_image_desc desc; std::memset(&desc, 0, sizeof(desc));
+        desc.image_type   = CL_MEM_OBJECT_IMAGE2D;
+        desc.image_width  = (size_t)(a.K / 4);
+        desc.image_height = (size_t)a.N;
+        desc.buffer       = W;
+        cl_int err = CL_SUCCESS;
+        cl_mem img = clCreateImage(ctx, CL_MEM_READ_ONLY, &fmt, &desc, nullptr, &err);
+        if (err != CL_SUCCESS || !img) {
+            NNOPT_ERROR_FMT("int8 clCreateImage failed (%d) N=%d K=%d", (int)err, a.N, a.K);
+            return false;
+        }
+        a.image = img;
+        a.scale = a.scale_root;
+        return true;
+    }
+
+    // Tiled path: split N into chunks of s_img_max_h rows. Each tile gets
+    // a sub-buffer of W (int8) + a sub-buffer of scale (fp16) + an
+    // image2d_t view of the W sub-buffer.
+    //
+    // Sub-buffer base offsets must be 128-byte aligned on Adreno. Check:
+    //   W_int8 offset = row_offset * K bytes; aligned if K%128==0 — K=1024 ✓
+    //   scale offset  = row_offset * 2 bytes; aligned if row_offset%64==0
+    //                   — tile height 16384 is a multiple of 64 ✓
+    const int TILE_H = (int)s_img_max_h;
+    int rows_left = a.N, row_off = 0;
+    while (rows_left > 0) {
+        const int tile_n = rows_left < TILE_H ? rows_left : TILE_H;
+        Int8Tile t; t.row_offset = row_off; t.row_count = tile_n;
+
+        cl_buffer_region w_region  { (size_t)row_off * (size_t)a.K,             (size_t)tile_n * (size_t)a.K };
+        cl_buffer_region s_region  { (size_t)row_off * sizeof(nnopt_storage_t), (size_t)tile_n * sizeof(nnopt_storage_t) };
+        cl_int err = CL_SUCCESS;
+        t.sub_W     = clCreateSubBuffer(W,              CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &w_region, &err);
+        if (err != CL_SUCCESS || !t.sub_W)     { NNOPT_ERROR_FMT("int8 tile sub_W create: %d row=%d", err, row_off); return false; }
+        t.scale_sub = clCreateSubBuffer(a.scale_root,   CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &s_region, &err);
+        if (err != CL_SUCCESS || !t.scale_sub) { NNOPT_ERROR_FMT("int8 tile scale_sub create: %d row=%d", err, row_off); return false; }
+
+        cl_image_desc desc; std::memset(&desc, 0, sizeof(desc));
+        desc.image_type   = CL_MEM_OBJECT_IMAGE2D;
+        desc.image_width  = (size_t)(a.K / 4);
+        desc.image_height = (size_t)tile_n;
+        desc.buffer       = t.sub_W;
+        t.image = clCreateImage(ctx, CL_MEM_READ_ONLY, &fmt, &desc, nullptr, &err);
+        if (err != CL_SUCCESS || !t.image)     { NNOPT_ERROR_FMT("int8 tile clCreateImage: %d row=%d", err, row_off); return false; }
+
+        a.tiles.push_back(t);
+        row_off   += tile_n;
+        rows_left -= tile_n;
+    }
+    return true;
+}
+
+// Int8 image-path GEMV dispatch. Returns false on miss/failure (caller falls
+// through to fp16). Eligibility:
+//   - W is registered as int8 (via nnopt_register_int8_weight)
+//   - K is 1024 or 4608, matches a built kernel
+//   - N is divisible by 4 (or 8 for the no8 fast path on N≥2048)
+static bool run_gemv_m1_image_int8(cl_command_queue queue, int N, int K, cl_mem W, cl_mem x, cl_mem out) {
+    auto it = s_int8_aux.find(W);
+    if (it == s_int8_aux.end()) return false;
+    if (!ensure_gemv_m1_int8_program(queue)) return false;
+    if (!prepare_int8_entry(queue, W)) return false;
+
+    // Lambda picks kernel + stride from the active K/N. For single-image
+    // path it runs once; for tiled it runs once per tile with the tile's
+    // own row count as N.
+    auto pick_kernel = [&](int Nlocal) -> std::pair<cl_kernel,int> {
+        if (K == 1024 && Nlocal >= 2048 && (Nlocal % 8) == 0 && s_gemv_m1_k1024_no8_img_int8) return {s_gemv_m1_k1024_no8_img_int8, 8};
+        if (K == 1024 &&                   (Nlocal % 4) == 0 && s_gemv_m1_k1024_no4_img_int8) return {s_gemv_m1_k1024_no4_img_int8, 4};
+        // K=4608 only happens at w2 (down-proj). _no8 variant exists in the
+        // kernel file (gemv_m1_k4608_no8_img_int8) but measured −6.5% decode
+        // on Tab A9+: 8 fp32 acc + 18 K-iters × 8 W reads spilled registers.
+        // Stick with no4 here. K=4608 was already at 85% of texture ceiling
+        // per Razr 2020 BENCHMARK — there's no room to extract via wider tiles.
+        if (K == 4608 &&                   (Nlocal % 4) == 0 && s_gemv_m1_k4608_no4_img_int8) return {s_gemv_m1_k4608_no4_img_int8, 4};
+        return {nullptr, 0};
+    };
+
+    Int8Aux& a = it->second;
+
+    // Tiled dispatch: loop over the prebuilt tiles, slice `out` by row.
+    if (!a.tiles.empty()) {
+        for (const auto& t : a.tiles) {
+            auto [kt, stride_t] = pick_kernel(t.row_count);
+            if (!kt) return false;
+            cl_buffer_region out_region{ (size_t)t.row_offset * sizeof(nnopt_storage_t),
+                                         (size_t)t.row_count  * sizeof(nnopt_storage_t) };
+            cl_int err = CL_SUCCESS;
+            cl_mem out_sub = clCreateSubBuffer(out, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &out_region, &err);
+            if (err != CL_SUCCESS || !out_sub) { NNOPT_ERROR_FMT("int8 tile out_sub: %d row=%d", err, t.row_offset); return false; }
+            int tile_n = t.row_count;
+            clSetKernelArg(kt, 0, sizeof(cl_mem), &x);
+            clSetKernelArg(kt, 1, sizeof(cl_mem), &t.image);
+            clSetKernelArg(kt, 2, sizeof(cl_mem), &t.scale_sub);
+            clSetKernelArg(kt, 3, sizeof(cl_mem), &out_sub);
+            clSetKernelArg(kt, 4, sizeof(int),    &tile_n);
+            const size_t WG = 64;
+            size_t gws = (size_t)(tile_n / stride_t) * WG;
+            size_t lws = WG;
+            char lbl[64]; snprintf(lbl, sizeof(lbl), "gemv_m1_K%d_N%d_no%d_img_int8_tile", K, tile_n, stride_t);
+            cl_event* evt = KernelProfiler::event_for(lbl);
+            err = clEnqueueNDRangeKernel(queue, kt, 1, nullptr, &gws, &lws, 0, nullptr, evt);
+            clReleaseMemObject(out_sub);
+            if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("int8 tile enqueue: %d row=%d", err, t.row_offset); return false; }
+        }
+        return true;
+    }
+
+    // Single-image dispatch.
+    auto [k, stride] = pick_kernel(N);
+    if (!k || !a.image) return false;
+
+    char lbl[64]; snprintf(lbl, sizeof(lbl), "gemv_m1_K%d_N%d_no%d_img_int8", K, N, stride);
+    clSetKernelArg(k, 0, sizeof(cl_mem), &x);
+    clSetKernelArg(k, 1, sizeof(cl_mem), &a.image);
+    clSetKernelArg(k, 2, sizeof(cl_mem), &a.scale);
+    clSetKernelArg(k, 3, sizeof(cl_mem), &out);
+    clSetKernelArg(k, 4, sizeof(int),    &N);
+    const size_t WG = 64;
+    size_t gws = (size_t)(N / stride) * WG;
+    size_t lws = WG;
+    cl_event* evt = KernelProfiler::event_for(lbl);
+    cl_int err = clEnqueueNDRangeKernel(queue, k, 1, nullptr, &gws, &lws, 0, nullptr, evt);
+    if (err != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("gemv_m1_image_int8 enqueue: %d (K=%d N=%d)", err, K, N);
+        return false;
+    }
+    return true;
+}
+
+// ─── Q4 program build + dispatch (mirrors the int8 path) ───
+static bool ensure_gemv_m1_q4_program(cl_command_queue queue) {
+    if (s_gemv_m1_q4_prog) return true;
+    cl_context   ctx    = nullptr;
+    cl_device_id device = nullptr;
+    clGetCommandQueueInfo(queue, CL_QUEUE_CONTEXT, sizeof(ctx),    &ctx,    nullptr);
+    clGetCommandQueueInfo(queue, CL_QUEUE_DEVICE,  sizeof(device), &device, nullptr);
+    if (!ctx || !device) return false;
+
+    std::ifstream f("kernels/gemv_m1_q4.cl", std::ios::binary);
+    if (!f.is_open()) {
+        NNOPT_ERROR_FMT("gemv_m1_q4: cannot open kernels/gemv_m1_q4.cl%s", "");
+        return false;
+    }
+    std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const char* src_cstr = src.c_str();
+    size_t src_len = src.size();
+    cl_int err;
+    s_gemv_m1_q4_prog = clCreateProgramWithSource(ctx, 1, &src_cstr, &src_len, &err);
+    if (err != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("gemv_m1_q4: clCreateProgramWithSource failed (%d)", (int)err);
+        return false;
+    }
+    err = clBuildProgram(s_gemv_m1_q4_prog, 1, &device, "-cl-fast-relaxed-math", nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        size_t log_size = 0;
+        clGetProgramBuildInfo(s_gemv_m1_q4_prog, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
+        if (log_size > 0) {
+            std::vector<char> log(log_size + 1, 0);
+            clGetProgramBuildInfo(s_gemv_m1_q4_prog, device, CL_PROGRAM_BUILD_LOG, log_size, log.data(), nullptr);
+            fprintf(stderr, "gemv_m1_q4 build log: %s\n", log.data());
+        }
+        clReleaseProgram(s_gemv_m1_q4_prog);
+        s_gemv_m1_q4_prog = nullptr;
+        return false;
+    }
+    s_gemv_m1_k1024_no4_img_q4 = clCreateKernel(s_gemv_m1_q4_prog, "gemv_m1_k1024_q4_no4_img", &err);
+    if (err != CL_SUCCESS) { s_gemv_m1_k1024_no4_img_q4 = nullptr; }
+    s_gemv_m1_k1024_no8_img_q4 = clCreateKernel(s_gemv_m1_q4_prog, "gemv_m1_k1024_q4_no8_img", &err);
+    if (err != CL_SUCCESS) { s_gemv_m1_k1024_no8_img_q4 = nullptr; }
+    s_gemv_m1_k4608_no4_img_q4 = clCreateKernel(s_gemv_m1_q4_prog, "gemv_m1_k4608_q4_no4_img", &err);
+    if (err != CL_SUCCESS) { s_gemv_m1_k4608_no4_img_q4 = nullptr; }
+    return true;
+}
+
+bool nnopt_register_q4_weight(cl_mem W_q4, cl_mem scale_fp16, int N, int K) {
+    if (!W_q4 || !scale_fp16 || N <= 0 || K <= 0) return false;
+    Q4Aux a;
+    a.image = nullptr;
+    a.scale = nullptr;
+    a.N = N;
+    a.K = K;
+    a.W_q4       = W_q4;
+    a.scale_root = scale_fp16;
+    s_q4_aux[W_q4] = a;
+    return true;
+}
+
+// Lazy build of the per-W image2d_t view(s). Q4 packs 2 weights/byte, so the
+// image width is K/8 pixels (RGBA UINT8 = 4 bytes = 8 weights per pixel).
+// Tiled path handles N > image-height cap (lm_head V=65536 > 16384).
+static bool prepare_q4_entry(cl_command_queue queue, cl_mem W) {
+    auto it = s_q4_aux.find(W);
+    if (it == s_q4_aux.end()) return false;
+    Q4Aux& a = it->second;
+    if (a.image || !a.tiles.empty()) return true;
+
+    cl_context   ctx = nullptr;
+    cl_device_id dev = nullptr;
+    if (clGetCommandQueueInfo(queue, CL_QUEUE_CONTEXT, sizeof(ctx), &ctx, nullptr) != CL_SUCCESS ||
+        clGetCommandQueueInfo(queue, CL_QUEUE_DEVICE,  sizeof(dev), &dev, nullptr) != CL_SUCCESS) return false;
+    if (!s_img_limits_known) {
+        clGetDeviceInfo(dev, CL_DEVICE_IMAGE2D_MAX_WIDTH,  sizeof(s_img_max_w), &s_img_max_w, nullptr);
+        clGetDeviceInfo(dev, CL_DEVICE_IMAGE2D_MAX_HEIGHT, sizeof(s_img_max_h), &s_img_max_h, nullptr);
+        s_img_limits_known = true;
+    }
+    if ((size_t)(a.K / 8) > s_img_max_w) {
+        NNOPT_ERROR_FMT("q4 image too wide: K/8=%d > %zu", a.K/8, s_img_max_w);
+        return false;
+    }
+
+    cl_image_format fmt;
+    fmt.image_channel_order = CL_RGBA;
+    fmt.image_channel_data_type = CL_UNSIGNED_INT8;
+
+    if ((size_t)a.N <= s_img_max_h) {
+        cl_image_desc desc; std::memset(&desc, 0, sizeof(desc));
+        desc.image_type   = CL_MEM_OBJECT_IMAGE2D;
+        desc.image_width  = (size_t)(a.K / 8);
+        desc.image_height = (size_t)a.N;
+        desc.buffer       = W;
+        cl_int err = CL_SUCCESS;
+        cl_mem img = clCreateImage(ctx, CL_MEM_READ_ONLY, &fmt, &desc, nullptr, &err);
+        if (err != CL_SUCCESS || !img) {
+            NNOPT_ERROR_FMT("q4 clCreateImage failed (%d) N=%d K=%d", (int)err, a.N, a.K);
+            return false;
+        }
+        a.image = img;
+        a.scale = a.scale_root;
+        return true;
+    }
+
+    // Tiled path. Each tile: sub-buffer of W (uint8, K/2 bytes/row),
+    // sub-buffer of scale (fp16, K/32 elems/row), image view of the W sub-buffer.
+    const int TILE_H = (int)s_img_max_h;
+    const size_t row_bytes_W     = (size_t)(a.K / 2);              // 2 weights per byte
+    const size_t row_bytes_scale = (size_t)(a.K / 32) * sizeof(nnopt_storage_t);
+    int rows_left = a.N, row_off = 0;
+    while (rows_left > 0) {
+        const int tile_n = rows_left < TILE_H ? rows_left : TILE_H;
+        Q4Tile t; t.row_offset = row_off; t.row_count = tile_n;
+
+        cl_buffer_region w_region  { (size_t)row_off * row_bytes_W,     (size_t)tile_n * row_bytes_W };
+        cl_buffer_region s_region  { (size_t)row_off * row_bytes_scale, (size_t)tile_n * row_bytes_scale };
+        cl_int err = CL_SUCCESS;
+        t.sub_W     = clCreateSubBuffer(W,              CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &w_region, &err);
+        if (err != CL_SUCCESS || !t.sub_W)     { NNOPT_ERROR_FMT("q4 tile sub_W: %d row=%d", err, row_off); return false; }
+        t.scale_sub = clCreateSubBuffer(a.scale_root,   CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &s_region, &err);
+        if (err != CL_SUCCESS || !t.scale_sub) { NNOPT_ERROR_FMT("q4 tile scale_sub: %d row=%d", err, row_off); return false; }
+
+        cl_image_desc desc; std::memset(&desc, 0, sizeof(desc));
+        desc.image_type   = CL_MEM_OBJECT_IMAGE2D;
+        desc.image_width  = (size_t)(a.K / 8);
+        desc.image_height = (size_t)tile_n;
+        desc.buffer       = t.sub_W;
+        t.image = clCreateImage(ctx, CL_MEM_READ_ONLY, &fmt, &desc, nullptr, &err);
+        if (err != CL_SUCCESS || !t.image)     { NNOPT_ERROR_FMT("q4 tile clCreateImage: %d row=%d", err, row_off); return false; }
+
+        a.tiles.push_back(t);
+        row_off   += tile_n;
+        rows_left -= tile_n;
+    }
+    return true;
+}
+
+// Q4 image-path GEMV dispatch. Returns false on miss (caller falls through to
+// int8 if registered there, otherwise to fp16).
+static bool run_gemv_m1_image_q4(cl_command_queue queue, int N, int K, cl_mem W, cl_mem x, cl_mem out) {
+    auto it = s_q4_aux.find(W);
+    if (it == s_q4_aux.end()) return false;
+    if (!ensure_gemv_m1_q4_program(queue)) return false;
+    if (!prepare_q4_entry(queue, W)) return false;
+
+    auto pick_kernel = [&](int Nlocal) -> std::pair<cl_kernel,int> {
+        if (K == 1024 && (Nlocal % 4) == 0 && s_gemv_m1_k1024_no4_img_q4) return {s_gemv_m1_k1024_no4_img_q4, 4};
+        // K=1024 _no8 variant exists in the kernel file (gemv_m1_k1024_q4_no8_img)
+        // but measured −38% decode on Tab A9+: 8 fp32 acc + 8 unpacks of 8 weights
+        // each spilled the register file hard on Adreno 619 v2. Stick with no4.
+        // K=4608 _no8 also off-table — int8 no8 spilled at this K (T2 −6.5%);
+        // Q4 has more ALU per byte, would be worse.
+        if (K == 4608 && (Nlocal % 4) == 0 && s_gemv_m1_k4608_no4_img_q4) return {s_gemv_m1_k4608_no4_img_q4, 4};
+        return {nullptr, 0};
+    };
+
+    Q4Aux& a = it->second;
+
+    if (!a.tiles.empty()) {
+        for (const auto& t : a.tiles) {
+            auto [kt, stride_t] = pick_kernel(t.row_count);
+            if (!kt) return false;
+            cl_buffer_region out_region{ (size_t)t.row_offset * sizeof(nnopt_storage_t),
+                                         (size_t)t.row_count  * sizeof(nnopt_storage_t) };
+            cl_int err = CL_SUCCESS;
+            cl_mem out_sub = clCreateSubBuffer(out, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &out_region, &err);
+            if (err != CL_SUCCESS || !out_sub) { NNOPT_ERROR_FMT("q4 tile out_sub: %d row=%d", err, t.row_offset); return false; }
+            int tile_n = t.row_count;
+            clSetKernelArg(kt, 0, sizeof(cl_mem), &x);
+            clSetKernelArg(kt, 1, sizeof(cl_mem), &t.image);
+            clSetKernelArg(kt, 2, sizeof(cl_mem), &t.scale_sub);
+            clSetKernelArg(kt, 3, sizeof(cl_mem), &out_sub);
+            clSetKernelArg(kt, 4, sizeof(int),    &tile_n);
+            const size_t WG = 64;
+            size_t gws = (size_t)(tile_n / stride_t) * WG;
+            size_t lws = WG;
+            char lbl[64]; snprintf(lbl, sizeof(lbl), "gemv_m1_K%d_N%d_no%d_img_q4_tile", K, tile_n, stride_t);
+            cl_event* evt = KernelProfiler::event_for(lbl);
+            err = clEnqueueNDRangeKernel(queue, kt, 1, nullptr, &gws, &lws, 0, nullptr, evt);
+            clReleaseMemObject(out_sub);
+            if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("q4 tile enqueue: %d row=%d", err, t.row_offset); return false; }
+        }
+        return true;
+    }
+
+    auto [k, stride] = pick_kernel(N);
+    if (!k || !a.image) return false;
+
+    char lbl[64]; snprintf(lbl, sizeof(lbl), "gemv_m1_K%d_N%d_no%d_img_q4", K, N, stride);
+    clSetKernelArg(k, 0, sizeof(cl_mem), &x);
+    clSetKernelArg(k, 1, sizeof(cl_mem), &a.image);
+    clSetKernelArg(k, 2, sizeof(cl_mem), &a.scale);
+    clSetKernelArg(k, 3, sizeof(cl_mem), &out);
+    clSetKernelArg(k, 4, sizeof(int),    &N);
+    const size_t WG = 64;
+    size_t gws = (size_t)(N / stride) * WG;
+    size_t lws = WG;
+    cl_event* evt = KernelProfiler::event_for(lbl);
+    cl_int err = clEnqueueNDRangeKernel(queue, k, 1, nullptr, &gws, &lws, 0, nullptr, evt);
+    if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("gemv_m1_image_q4 enqueue: %d K=%d N=%d", err, K, N); return false; }
+    return true;
 }
 
 // Separate cl_program for the silufused kernel — keeping it in gemv_m1.cl
@@ -775,6 +1273,19 @@ bool pytorch_linear(cl_command_queue queue,
     // flip greedy-decode token rankings. Our GEMV reads half weights but
     // accumulates via float4/dot → float, matching PyTorch CPU fp16 behavior.
     if (M == 1) {
+        // Q4 image path: quarter the weight bytes vs fp16, half of int8.
+        // Only dispatched if `nnopt_register_q4_weight` registered W.
+        if (run_gemv_m1_image_q4(queue, N, K, W, x, out)) {
+            NNOPT_DEBUG_SYNC(queue);
+            return true;
+        }
+        // Int8 image path: half the weight bytes, hits the texture L1. Only
+        // dispatched if `nnopt_register_int8_weight` registered W; otherwise
+        // falls through to the fp16 image kernels below.
+        if (run_gemv_m1_image_int8(queue, N, K, W, x, out)) {
+            NNOPT_DEBUG_SYNC(queue);
+            return true;
+        }
         // Phase 2: Adreno texture-cache image2d_t path (1.71× faster L1 vs L2 on Razr 2020,
         // measured 13.46 vs 7.85 GB/s in --bw-probe). Tries no4 first, no2 fallback for
         // K=1024 (lower register pressure if no4 spills), tiles for lm_head N=65536.

@@ -42,8 +42,19 @@ private:
         int    row_offset = 0;
         int    row_count  = 0;
         cl_mem out_sub    = nullptr;  // pre-created sub-buffer of decode_logits_buf_
+
+        // ── int8 quantized variants (NNOPT_QUANT=int8 + embed_tokens.weight=int8).
+        cl_mem int8_image = nullptr;   // CL_SIGNED_INT8 RGBA image over this tile's int8 sub-buffer
+        cl_mem int8_sub   = nullptr;   // sub-buffer of int8 W (separate from sub_buffer above)
+        cl_mem scale_sub  = nullptr;   // fp16 scale sub-buffer [row_count]
     };
     std::vector<WImageTile> w_tiles_;
     cl_mem  w_image_single_ = nullptr;  // single-image fast path (if W fits)
     bool    img_path_ready_ = false;
+
+    // ── int8 quantized path
+    bool       quantized_ = false;
+    cl_mem     w_scale_full_ = nullptr;   // [V] fp16 scales (whole vocab, before tiling)
+    cl_program block_fused_int8_prog_ = nullptr;
+    cl_kernel  gemv_k576_no4_img_int8_ = nullptr;
 };

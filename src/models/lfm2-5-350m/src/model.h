@@ -70,7 +70,7 @@ private:
     static constexpr int NUM_HEADS = 16;
     static constexpr int NUM_KV_HEADS = 8;
     static constexpr int HEAD_DIM = 64;
-    static constexpr int MAX_SEQ_LEN = 128000;
+    static constexpr int MAX_SEQ_LEN = 2048;  // capped from 128000 — see model_config.h
 
     // Hybrid-architecture per-layer-class dispatch helpers
     static constexpr int ATTENTION_LAYER_INDICES[6] = {2, 5, 8, 10, 12, 14};
@@ -114,4 +114,21 @@ private:
     cl_mem     argmax_out_idx_      = nullptr;  // int   [1]
     bool       argmax_initialized_  = false;
     bool ensure_argmax_resources_();
+
+    // ── cl_qcom_recordable_queues integration (NNOPT_RECORD=1).
+    // Records the 16-layer-block decode-step dispatch sequence once at the
+    // first decode call, replays it on subsequent steps with per-step arg
+    // overrides for start_pos / seq_k. lm_head + argmax stay outside the
+    // recording (the tiled int8 lm_head needs clCreateSubBuffer per call,
+    // and only clEnqueueNDRangeKernel is recordable per PDF §9.1.3).
+    bool                record_enabled_   = false;
+    cl_command_queue    record_queue_     = nullptr;
+    cl_recording_qcom   recording_        = nullptr;
+    bool                recording_built_  = false;
+    struct PerStepArg { cl_kernel kernel; cl_uint arg_indx; };
+    std::vector<PerStepArg> rec_start_pos_args_;
+    std::vector<PerStepArg> rec_seq_k_args_;
+    int32_t             cur_start_pos_ = 0;
+    int32_t             cur_seq_k_     = 0;
+    void collect_record_args_();
 };

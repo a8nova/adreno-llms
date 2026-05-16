@@ -1,6 +1,6 @@
 # Mamba2-130M on Adreno (Android)
 
-State-spaces' Mamba2 (state-space duality) ported to C++/OpenCL for Adreno 6xx GPUs on non-flagship Android. Verified on Motorola Razr 2020 (Adreno 618).
+State-spaces' Mamba2 (state-space duality) ported to C++/OpenCL for Adreno 6xx GPUs on non-flagship Android. Verified on Motorola Razr 2020 (Adreno 620 / Snapdragon 765G).
 
 - **Upstream:** [state-spaces/mamba2-130m](https://huggingface.co/state-spaces/mamba2-130m)
 - **Parameters:** 130M
@@ -27,13 +27,12 @@ NNOPT_DTYPE=fp16 ./scripts/run_android.sh "Once upon a time" 64
 
 ## Performance
 
-Razr 2020 / Adreno 618, fp16, greedy (`temperature=0, seed=42`), 32-token generation, canonical token IDs, 5-run warm median measured 2026-05-06.
+Razr 2020 / Adreno 620 / Snapdragon 765G, fp16, greedy (`--temperature 0`), 32-token generation, 3-run warm median measured 2026-05-16.
 
-| | Decode tok/s | TTFT (s) |
-|---|---:|---:|
-| Measured today | **23.18** | **1.53** |
-| min / max across 5 runs | 23.06 / 23.90 | — |
-| Roofline ceiling (10 GB/s) | 37.2 | — |
+| | Decode tok/s | TTFT (s) | Peak CPU mem (MB) |
+|---|---:|---:|---:|
+| Measured today | **24.26** | **1.61** | **946** |
+| Roofline ceiling (10 GB/s) | 37.2 | — | — |
 
 Per-token weight footprint: ~250 MB. Includes a `kernel_profiler` (set `NNOPT_KERNEL_PROFILE=1`) that aggregates per-label GPU time across the decode loop. Full optimization log in [BENCHMARK.md](./BENCHMARK.md).
 

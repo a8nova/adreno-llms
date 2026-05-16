@@ -75,12 +75,25 @@ fi
 DUMP_ENV=""
 if [ "${NNOPT_DUMP_LAYERS:-}" = "1" ]; then DUMP_ENV="NNOPT_DUMP_LAYERS=1"; fi
 
+# NNOPT_QUANT=int8 switches the loader to weights/model.int8.bin and triggers
+# the int8 GEMV registration in main.cpp.
+QUANT_ENV=""
+if [ -n "${NNOPT_QUANT:-}" ]; then QUANT_ENV="NNOPT_QUANT=${NNOPT_QUANT}"; fi
+
+# NNOPT_RECORD=1 enables the cl_qcom_recordable_queues path in Model.
+RECORD_ENV=""
+if [ -n "${NNOPT_RECORD:-}" ]; then RECORD_ENV="NNOPT_RECORD=${NNOPT_RECORD}"; fi
+
+# NNOPT_KERNEL_PROFILE=1 enables per-kernel GPU-time accounting via cl_event.
+PROFILE_ENV=""
+if [ -n "${NNOPT_KERNEL_PROFILE:-}" ]; then PROFILE_ENV="NNOPT_KERNEL_PROFILE=${NNOPT_KERNEL_PROFILE}"; fi
+
 # Execute on device — let stdout and stderr flow through adb to host.
 # adb shell merges remote stdout+stderr into host stdout. The Infer tool
 # separates them using pattern matching (CHECKPOINT/ERROR/LAYER_CHECK = stderr).
 # No device file redirect — no stale logs/device_run_stderr.log to confuse the agent.
 set +e
-$ADB shell "cd $REMOTE_DIR && $DEBUG_ENV $DUMP_ENV LD_LIBRARY_PATH=$REMOTE_DIR/lib:/system/vendor/lib64:\$LD_LIBRARY_PATH ./$BINARY_NAME '$ESCAPED_PROMPT' $MAX_TOKENS $EXTRA_ARGS"
+$ADB shell "cd $REMOTE_DIR && $DEBUG_ENV $DUMP_ENV $QUANT_ENV $RECORD_ENV $PROFILE_ENV LD_LIBRARY_PATH=$REMOTE_DIR/lib:/system/vendor/lib64:\$LD_LIBRARY_PATH ./$BINARY_NAME '$ESCAPED_PROMPT' $MAX_TOKENS $EXTRA_ARGS"
 INFERENCE_EXIT=$?
 set -e
 

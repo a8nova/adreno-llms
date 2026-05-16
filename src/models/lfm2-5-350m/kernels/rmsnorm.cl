@@ -57,8 +57,7 @@ __kernel void rmsnorm_forward(
     if (lid < s) partial[lid] += partial[lid + s];
     barrier(CLK_LOCAL_MEM_FENCE);
   }
-  // Use full-precision rsqrt for numerical parity with PyTorch (torch.rsqrt).
-  const float inv_rms = rsqrt((partial[0] / (float)cols) + eps);
+  const float inv_rms = native_rsqrt((partial[0] / (float)cols) + eps);
 
   __global half* oh = (__global half*)out + base;
   for (int c4 = lid; c4 < C4; c4 += WG_SIZE) {
@@ -83,8 +82,7 @@ __kernel void rmsnorm_forward(
     if (lid < s) partial[lid] += partial[lid + s];
     barrier(CLK_LOCAL_MEM_FENCE);
   }
-  // Use full-precision rsqrt for numerical parity with PyTorch (torch.rsqrt).
-  const float inv_rms = rsqrt((partial[0] / (float)cols) + eps);
+  const float inv_rms = native_rsqrt((partial[0] / (float)cols) + eps);
   for (int c = lid; c < cols; c += WG_SIZE) {
     float v = LOAD(x, base + c);
     float w = LOAD(weight, c);

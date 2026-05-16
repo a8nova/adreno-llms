@@ -118,6 +118,19 @@ bool pytorch_linear(cl_command_queue queue,
                     int M, int N, int K,
                     cl_mem x, cl_mem W, cl_mem out);
 
+// Register an int8 weight buffer so that pytorch_linear() at M=1 takes the
+// int8 image-path GEMV instead of fp16. Called from main.cpp after weight
+// load under NNOPT_QUANT=int8.
+//   W_int8      : cl_mem buffer holding int8 row-major [N, K] data
+//   scale_fp16  : cl_mem buffer holding fp16 per-row scales [N]
+//   N, K        : weight dims (must match the GEMV call site exactly)
+bool nnopt_register_int8_weight(cl_mem W_int8, cl_mem scale_fp16, int N, int K);
+
+// Q4 (block-32 symmetric) register. W_q4 holds K/2 packed bytes per row;
+// scale_fp16 holds K/32 fp16 scales per row. pytorch_linear() at M=1 prefers
+// the Q4 path over int8 over fp16.
+bool nnopt_register_q4_weight(cl_mem W_q4, cl_mem scale_fp16, int N, int K);
+
 // MLP w3 + silu_mul fused into one kernel. Reads gate_inout[n] (= w1·x
 // from a prior pytorch_linear call), reads W3 via image2d, computes
 // silu(gate_inout[n]) * (W3·x), and writes the result back into

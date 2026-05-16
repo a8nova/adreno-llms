@@ -17,7 +17,12 @@
   #define STORE(p, i, v) ((p)[(i)] = (v))
 #endif
 
+#ifdef USE_SUBGROUP_REDUCE
+  #pragma OPENCL EXTENSION cl_khr_subgroups : enable
+#endif
+
 #define WG_SIZE 64
+#define MAX_SUBGROUPS 8   // WG_SIZE / smallest plausible Adreno wave (8)
 
 __kernel void rmsnorm_forward(
     __global const storage_t* x,
@@ -31,7 +36,11 @@ __kernel void rmsnorm_forward(
   if (row >= rows) return;
 
   const int base = row * cols;
+#ifdef USE_SUBGROUP_REDUCE
+  __local float subg_scratch[MAX_SUBGROUPS];
+#else
   __local float partial[WG_SIZE];
+#endif
 
 #ifdef USE_FP16
   // Vec4 fp16 path — cols expected to be multiple of 4 (head_dim ⌃
@@ -51,6 +60,27 @@ __kernel void rmsnorm_forward(
     float v = LOAD(x, base + c);
     acc += v * v;
   }
+
+#ifdef USE_SUBGROUP_REDUCE
+  // Subgroup reduce (PDF §6.5/§8.9/§9.2): hardware-accelerated, no __local round-trip.
+  // Most Adreno 6xx kernels run as 1 full-wave subgroup at WG=64, in which case
+  // the cross-subgroup roll-up below is a single-element no-op. The pattern stays
+  // correct under half-wave (sub_group_size=32 → 2 subgroups) as well.
+  float subg_sum = sub_group_reduce_add(acc);
+  const uint sg_id  = get_sub_group_id();
+  const uint sg_lid = get_sub_group_local_id();
+  const uint nsg    = get_num_sub_groups();
+  if (sg_lid == 0) subg_scratch[sg_id] = subg_sum;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  float total;
+  if (sg_id == 0) {
+    float v = (sg_lid < nsg) ? subg_scratch[sg_lid] : 0.0f;
+    total = sub_group_reduce_add(v);
+    if (sg_lid == 0) subg_scratch[0] = total;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  const float inv_rms = native_rsqrt((subg_scratch[0] / (float)cols) + eps);
+#else
   partial[lid] = acc;
   barrier(CLK_LOCAL_MEM_FENCE);
 
@@ -59,6 +89,7 @@ __kernel void rmsnorm_forward(
     barrier(CLK_LOCAL_MEM_FENCE);
   }
   const float inv_rms = native_rsqrt((partial[0] / (float)cols) + eps);
+#endif
 
   // Pass 2: vec4 normalize+weight write.
   __global half* oh = (__global half*)out + base;

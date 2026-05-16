@@ -95,4 +95,27 @@ private:
     std::unique_ptr<Attention> self_attn_[MODEL_CONFIG::NUM_HIDDEN_LAYERS];
     std::unique_ptr<LayerNorm> post_attention_layernorm_[MODEL_CONFIG::NUM_HIDDEN_LAYERS];
     std::unique_ptr<Mlp> mlp_[MODEL_CONFIG::NUM_HIDDEN_LAYERS];
+
+    // ── cl_qcom_recordable_queues integration (NNOPT_RECORD=1).
+    //   Records the 30 transformer-block dispatch sequence once at first
+    //   decode step, replays it with per-step arg updates (start_pos, seq_k)
+    //   on subsequent steps. Embedding + lm_head stay outside the recording
+    //   for simplicity (their per-call alloc patterns aren't recording-safe).
+    //   Per-dispatch host overhead 19.3 µs → 3.9 µs measured (Step 11 probe).
+    bool                record_enabled_ = false;
+    cl_command_queue    record_queue_   = nullptr;
+    cl_recording_qcom   recording_      = nullptr;
+    bool                recording_built_ = false;
+    cl_mem              decode_hidden_buf_ = nullptr;   // [H] fp16 — persistent embedding output
+    struct PerStepArg {
+        cl_kernel kernel;
+        cl_uint   arg_indx;
+    };
+    std::vector<PerStepArg> rec_start_pos_args_;
+    std::vector<PerStepArg> rec_seq_k_args_;
+    // Storage for per-replay scalar args. clEnqueueRecordingQCOM may read
+    // args[] asynchronously after enqueue returns, so the int storage must
+    // outlive the call (member, not stack-local).
+    int32_t cur_start_pos_ = 0;
+    int32_t cur_seq_k_     = 0;
 };

@@ -13,7 +13,7 @@
 #endif
 
 inline float sigmoid_f(float x) {
-    return 1.0f / (1.0f + exp(-x));
+    return 1.0f / (1.0f + native_exp(-x));
 }
 
 __kernel void silu_mul(__global const storage_t* gate,

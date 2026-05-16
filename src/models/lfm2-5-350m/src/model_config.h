@@ -29,7 +29,12 @@ constexpr int   EOS_TOKEN_ID             = 7;
 constexpr int   HIDDEN_SIZE              = 1024;
 constexpr float INITIALIZER_RANGE        = 0.02f;
 constexpr int   INTERMEDIATE_SIZE        = 6656;
-constexpr int   MAX_POSITION_EMBEDDINGS  = 128000;
+// Architectural max is 128000 (LFM2.5 long-context). At that size KV cache for
+// 6 attention layers needs 6 * 2 * 128000 * 8 * 64 * sizeof(fp16) = 1572 MB —
+// blows the 1.8 GB GPU budget on Adreno 619 v2 alongside 676 MB weights.
+// Capped to 2048: KV cache ~25 MB total, fits Tab A9+. Bump if longer
+// contexts are needed and a bigger device is available.
+constexpr int   MAX_POSITION_EMBEDDINGS  = 2048;
 constexpr float NORM_EPS                 = 1.000000e-5f;
 constexpr int   NUM_ATTENTION_HEADS      = 16;
 constexpr int   NUM_HEADS                = 16;

@@ -16,6 +16,160 @@
 #include <cstdio>
 #include <cstdint>
 #include <vector>
+#include <fstream>
+#include <sstream>
+#include <chrono>
+#include <dlfcn.h>
+
+// ── cl_qcom_recordable_queues probe (PDF §9.1.3).
+//   Mirrors the LFM2 probe (proven on Adreno 620, driver E031.37.12.07).
+//   Confirms record/replay works on this device + measures the per-dispatch
+//   speedup vs sequential clEnqueueNDRangeKernel. Triggered by NNOPT_RECORD_PROBE=1.
+static int run_record_probe(OpenCLContext& cl_ctx) {
+    using namespace std::chrono;
+    cl_context  ctx = cl_ctx.context();
+    cl_command_queue q = cl_ctx.queue();
+    cl_int err = CL_SUCCESS;
+
+    typedef void* cl_recording_qcom;
+    typedef cl_recording_qcom (CL_API_CALL *clNewRecordingQCOM_fn)(cl_command_queue, cl_int*);
+    typedef cl_int (CL_API_CALL *clEndRecordingQCOM_fn)(cl_recording_qcom);
+    typedef cl_int (CL_API_CALL *clReleaseRecordingQCOM_fn)(cl_recording_qcom);
+    struct cl_array_arg_qcom {
+        cl_kernel    kernel;
+        cl_uint      arg_indx;
+        size_t       arg_size;
+        const void*  arg_value;
+    };
+    struct cl_array_kernel_exec_info_qcom {
+        cl_kernel       kernel;
+        cl_uint         indx;
+        size_t          param_value_size;
+        const void*     param_value;
+    };
+    typedef cl_int (CL_API_CALL *clEnqueueRecordingQCOM_fn)(
+        cl_command_queue queue,
+        cl_recording_qcom recording,
+        size_t num_args,
+        const cl_array_arg_qcom* args,
+        size_t num_global_offsets,
+        const cl_array_kernel_exec_info_qcom* global_offsets,
+        size_t num_global_work_sizes,
+        const cl_array_kernel_exec_info_qcom* global_work_sizes,
+        size_t num_local_work_sizes,
+        const cl_array_kernel_exec_info_qcom* local_work_sizes,
+        cl_uint num_events_in_wait_list,
+        const cl_event* event_wait_list,
+        cl_event* event);
+
+    auto fnNew     = (clNewRecordingQCOM_fn)    dlsym(RTLD_DEFAULT, "clNewRecordingQCOM");
+    auto fnEnd     = (clEndRecordingQCOM_fn)    dlsym(RTLD_DEFAULT, "clEndRecordingQCOM");
+    auto fnRelease = (clReleaseRecordingQCOM_fn)dlsym(RTLD_DEFAULT, "clReleaseRecordingQCOM");
+    auto fnEnqueue = (clEnqueueRecordingQCOM_fn)dlsym(RTLD_DEFAULT, "clEnqueueRecordingQCOM");
+    if (!fnNew || !fnEnd || !fnRelease || !fnEnqueue) {
+        std::cerr << "Record: missing one or more entry points\n";
+        return 1;
+    }
+
+    cl_device_id dev = cl_ctx.device();
+    constexpr cl_command_queue_properties RECORD_BIT = (cl_command_queue_properties)1 << 30;
+    cl_int qerr = 0;
+    cl_command_queue probe_q = clCreateCommandQueue(ctx, dev, RECORD_BIT, &qerr);
+    if (qerr != CL_SUCCESS || !probe_q) {
+        std::cerr << "Record: clCreateCommandQueue(RECORD_BIT alone) failed err=" << qerr << "\n";
+        return 1;
+    }
+    std::cerr << "Record: recordable queue created OK\n";
+
+    cl_command_queue live_q = q;
+
+    // Build probe_noop kernel from block_fused.cl.
+    std::ifstream f("kernels/block_fused.cl", std::ios::binary);
+    std::string src_text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    cl_program prog = cl_ctx.build_program(src_text, "");
+    if (!prog) { std::cerr << "Record: build kernels fail\n"; clReleaseCommandQueue(probe_q); return 1; }
+    cl_kernel k = clCreateKernel(prog, "probe_noop", &err);
+    if (err != CL_SUCCESS) { std::cerr << "Record: createKernel fail " << err << "\n"; clReleaseCommandQueue(probe_q); return 1; }
+
+    cl_mem counter = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_int), nullptr, &err);
+    if (err != CL_SUCCESS) { std::cerr << "Record: alloc counter fail\n"; return 1; }
+    int incr = 1;
+    clSetKernelArg(k, 0, sizeof(cl_mem), &counter);
+    clSetKernelArg(k, 1, sizeof(int),    &incr);
+
+    constexpr int N_DISPATCH_PER_RECORDING = 240;  // approx 1 forward_decode worth
+    constexpr int N_REPLAYS                = 32;   // approx 1 benchmark worth of decode steps
+    constexpr int N_BASELINE_DISPATCHES    = N_DISPATCH_PER_RECORDING * N_REPLAYS;
+
+    auto reset_counter = [&]() {
+        cl_int zero = 0;
+        clEnqueueWriteBuffer(live_q, counter, CL_TRUE, 0, sizeof(int), &zero, 0, nullptr, nullptr);
+    };
+    auto read_counter = [&]() {
+        cl_int v = 0;
+        clEnqueueReadBuffer(live_q, counter, CL_TRUE, 0, sizeof(int), &v, 0, nullptr, nullptr);
+        return v;
+    };
+
+    reset_counter();
+    size_t gws = 1, lws = 1;
+    auto t0 = high_resolution_clock::now();
+    for (int i = 0; i < N_BASELINE_DISPATCHES; ++i) {
+        clEnqueueNDRangeKernel(live_q, k, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+    }
+    clFinish(live_q);
+    auto t1 = high_resolution_clock::now();
+    double base_ms = duration<double, std::milli>(t1 - t0).count();
+    int base_val = read_counter();
+    std::cerr << "Baseline: " << N_BASELINE_DISPATCHES << " sequential dispatches -> "
+              << base_ms << " ms, counter=" << base_val << "\n";
+
+    reset_counter();
+    cl_int new_err = 0;
+    cl_recording_qcom rec = fnNew(probe_q, &new_err);
+    if (new_err != CL_SUCCESS || !rec) {
+        std::cerr << "Record: clNewRecordingQCOM failed err=" << new_err << "\n";
+        return 1;
+    }
+    for (int i = 0; i < N_DISPATCH_PER_RECORDING; ++i) {
+        cl_int e = clEnqueueNDRangeKernel(probe_q, k, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+        if (e != CL_SUCCESS) { std::cerr << "Record: enqueue during record failed err=" << e << "\n"; fnRelease(rec); return 1; }
+    }
+    cl_int end_err = fnEnd(rec);
+    if (end_err != CL_SUCCESS) { std::cerr << "Record: end failed err=" << end_err << "\n"; fnRelease(rec); return 1; }
+
+    reset_counter();
+    auto t2 = high_resolution_clock::now();
+    for (int r = 0; r < N_REPLAYS; ++r) {
+        cl_int e = fnEnqueue(live_q, rec, 0, nullptr, 0, nullptr, 0, nullptr, 0, nullptr,
+                             0, nullptr, nullptr);
+        if (e != CL_SUCCESS) { std::cerr << "Record: replay failed err=" << e << "\n"; fnRelease(rec); return 1; }
+    }
+    clFinish(live_q);
+    auto t3 = high_resolution_clock::now();
+    double replay_ms = duration<double, std::milli>(t3 - t2).count();
+    int replay_val = read_counter();
+    std::cerr << "Replay: " << N_BASELINE_DISPATCHES << " dispatches -> "
+              << replay_ms << " ms, counter=" << replay_val << "\n";
+
+    if (replay_val != base_val) {
+        std::cerr << "Record: COUNTER MISMATCH (replay isn't equivalent)\n";
+    } else {
+        double speedup = base_ms / replay_ms;
+        double per_baseline = base_ms / N_BASELINE_DISPATCHES * 1000.0;
+        double per_replay   = replay_ms / N_BASELINE_DISPATCHES * 1000.0;
+        std::cerr << "Record: speedup = " << speedup << "x ("
+                  << per_baseline << " us/dispatch baseline -> "
+                  << per_replay   << " us/dispatch replay)\n";
+    }
+
+    fnRelease(rec);
+    clReleaseMemObject(counter);
+    clReleaseKernel(k);
+    clReleaseProgram(prog);
+    clReleaseCommandQueue(probe_q);
+    return 0;
+}
 
 static std::vector<int> load_token_ids_from_file(const std::string& path) {
     std::vector<int> ids;
@@ -89,6 +243,11 @@ int main(int argc, char* argv[]) {
     std::cerr << "Device: " << cl_ctx.device_description() << std::endl;
     NNOPT_CHECKPOINT("OpenCL initialized");
 
+    // cl_qcom_recordable_queues probe — exits early if NNOPT_RECORD_PROBE=1.
+    if (const char* r = std::getenv("NNOPT_RECORD_PROBE"); r && r[0] == '1') {
+        return run_record_probe(cl_ctx);
+    }
+
     // Load tokenizer (still needed for decoding output)
     NNOPT_CHECKPOINT("loading tokenizer");
     Tokenizer tokenizer;
@@ -114,6 +273,14 @@ int main(int argc, char* argv[]) {
     const char* nnopt_weights_bin  = "weights/model.bin";
     const char* nnopt_weights_meta = "weights/model.meta.json";
 #endif
+    // NNOPT_QUANT=int8 → mixed int8 weights (linear blocks int8, norms/lm_head fp16).
+    // Quantize via scripts/quantize_weights.py. Triggers int8 image path in layers
+    // when the corresponding weight tensor dtype is "int8".
+    if (const char* q = std::getenv("NNOPT_QUANT"); q && std::string(q) == "int8") {
+        nnopt_weights_bin  = "weights/model.int8.bin";
+        nnopt_weights_meta = "weights/model.int8.meta.json";
+        std::cerr << "NNOPT_QUANT=int8: using " << nnopt_weights_bin << std::endl;
+    }
     if (!weights.load(nnopt_weights_bin, nnopt_weights_meta, cl_ctx.context())) {
         std::cerr << "Failed to load weights from " << nnopt_weights_bin << std::endl;
         return 1;

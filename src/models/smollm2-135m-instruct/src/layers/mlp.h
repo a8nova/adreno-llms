@@ -50,4 +50,13 @@ private:
     cl_kernel fused_down_no4_img_ = nullptr;  // fused_down_residual_m1_no4_img
     bool      down_img_ready_     = false;
     bool      gate_up_img_ready_  = false;
+
+    // ── int8 quantized path (NNOPT_QUANT=int8 + weights/model.int8.bin)
+    //   Per-row symmetric int8: image2d (CL_SIGNED_INT8 RGBA) + fp16 scale buffer.
+    bool      quantized_ = false;
+    cl_program block_fused_int8_prog_ = nullptr;
+    cl_kernel fused_gate_up_silu_m1_v4_img_int8_ = nullptr;
+    cl_kernel fused_down_no4_img_int8_           = nullptr;
+    cl_mem w_gate_int8_img_ = nullptr, w_up_int8_img_ = nullptr, w_down_int8_img_ = nullptr;
+    cl_mem w_gate_scale_    = nullptr, w_up_scale_    = nullptr, w_down_scale_    = nullptr;
 };

@@ -142,6 +142,10 @@ static bool parse_meta_json(const std::string& json,
 // Bytes-per-element for the recognized dtype strings emitted by ConvertWeights.
 static inline size_t _nnopt_bytes_per_element(const std::string& dtype) {
     if (dtype == "float16" || dtype == "bfloat16") return 2;
+    if (dtype == "int8") return 1;
+    // q4_packed is "2 weights per byte" — meta.json declares shape [N, K/2]
+    // (number-of-bytes, not number-of-weights), so 1 byte per element here.
+    if (dtype == "q4_packed") return 1;
     return 4;  // float32 default
 }
 
@@ -319,6 +323,13 @@ std::string Weights::get_dtype(const std::string& key) const {
     auto it = tensors_.find(key);
     if (it == tensors_.end()) return "";
     return it->second.dtype;
+}
+
+std::vector<std::string> Weights::all_keys() const {
+    std::vector<std::string> out;
+    out.reserve(tensors_.size());
+    for (const auto& kv : tensors_) out.push_back(kv.first);
+    return out;
 }
 
 // IEEE 754 binary16 → float32. Bit-exact, branch-light. Same algorithm as
