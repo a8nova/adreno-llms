@@ -25,9 +25,15 @@ cl_event* event_for(const char* label) {
     return &g_pending.back().second;
 }
 
-// Sorted timeline of (start_ns, end_ns) across every captured kernel so we
-// can compute REAL inter-kernel gap times (end_n to start_n+1).
-static std::vector<std::pair<cl_ulong, cl_ulong>> g_timeline;
+// Sorted timeline of (start_ns, end_ns, label) across every captured kernel so we
+// can compute REAL inter-kernel gap times (end_n to start_n+1) and report which
+// two kernels bracket each gap.
+struct TimelineEntry {
+    cl_ulong start_ns;
+    cl_ulong end_ns;
+    std::string label;
+};
+static std::vector<TimelineEntry> g_timeline;
 
 void process_pending() {
     if (g_pending.empty()) return;
@@ -44,7 +50,7 @@ void process_pending() {
                 p.queue_ns += (t_end - t_queued);
             }
             p.count    += 1;
-            g_timeline.push_back({t_start, t_end});
+            g_timeline.push_back(TimelineEntry{t_start, t_end, kv.first});
         }
         clReleaseEvent(kv.second);
         kv.second = nullptr;
@@ -97,24 +103,28 @@ void dump_summary() {
     // sum(end-start)/wall_span. The gaps are end_n -> start_n+1.
     if (!g_timeline.empty()) {
         std::sort(g_timeline.begin(), g_timeline.end(),
-                  [](const std::pair<cl_ulong, cl_ulong>& a,
-                     const std::pair<cl_ulong, cl_ulong>& b) {
-                      return a.first < b.first;
+                  [](const TimelineEntry& a, const TimelineEntry& b) {
+                      return a.start_ns < b.start_ns;
                   });
-        const cl_ulong wall_start = g_timeline.front().first;
-        const cl_ulong wall_end   = g_timeline.back().second;
+        const cl_ulong wall_start = g_timeline.front().start_ns;
+        const cl_ulong wall_end   = g_timeline.back().end_ns;
         const double   wall_ms    = (wall_end - wall_start) / 1.0e6;
         uint64_t gap_ns = 0;
         int gap_count = 0;
         uint64_t max_gap_ns = 0;
+        // Collect (gap_ns, before_label, after_label, idx) so we can rank.
+        struct GapEntry { uint64_t g; size_t i; };
+        std::vector<GapEntry> gaps;
+        gaps.reserve(g_timeline.size());
         for (size_t i = 1; i < g_timeline.size(); ++i) {
-            const cl_ulong prev_end   = g_timeline[i-1].second;
-            const cl_ulong this_start = g_timeline[i].first;
+            const cl_ulong prev_end   = g_timeline[i-1].end_ns;
+            const cl_ulong this_start = g_timeline[i].start_ns;
             if (this_start > prev_end) {
                 const uint64_t g = this_start - prev_end;
                 gap_ns += g;
                 if (g > max_gap_ns) max_gap_ns = g;
                 ++gap_count;
+                gaps.push_back({g, i});
             }
         }
         fprintf(stderr, "=== GPU TIMELINE ===\n");
@@ -127,6 +137,22 @@ void dump_summary() {
                 gap_count > 0 ? (gap_ns / 1.0e6) / gap_count : 0.0);
         fprintf(stderr, "    max gap:                                       %.3f ms\n",
                 max_gap_ns / 1.0e6);
+
+        // Rank the top-10 biggest gaps with the kernels that bracket them.
+        std::sort(gaps.begin(), gaps.end(),
+                  [](const GapEntry& a, const GapEntry& b) { return a.g > b.g; });
+        const size_t top_n = std::min((size_t)10, gaps.size());
+        if (top_n > 0) {
+            fprintf(stderr, "    top %zu gaps (between which kernels):\n", top_n);
+            for (size_t k = 0; k < top_n; ++k) {
+                const size_t i = gaps[k].i;
+                const double g_ms = gaps[k].g / 1.0e6;
+                const double t_from_start_ms = (g_timeline[i-1].end_ns - wall_start) / 1.0e6;
+                fprintf(stderr, "      %7.2f ms  @ %.2f s  after [%s]  before [%s]\n",
+                        g_ms, t_from_start_ms / 1000.0,
+                        g_timeline[i-1].label.c_str(), g_timeline[i].label.c_str());
+            }
+        }
         fprintf(stderr, "\n");
     }
 }

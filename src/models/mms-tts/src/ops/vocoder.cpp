@@ -520,6 +520,18 @@ static cl_mem conv1d_gemm_fused_bias_path(OpenCLContext& cl_ctx,
   ok = ok && set_arg_checked(kim_fused, 15, sizeof(int),    &has_resid_flag, "has_resid");
   if (!ok) { pool_release_or_release(out); return nullptr; }
 
+  // Per Adreno guide §4.5.1: clFlush forces the driver to submit batched
+  // kernels to the GPU instead of waiting for its internal queue threshold
+  // (which adds ~75 ms QUEUED→START delay per call on Adreno 620). We flush
+  // both before and after the im2col so the previous batch reaches the GPU
+  // before HGemm is enqueued. NNOPT_VOC_FLUSH_FINE=0 disables.
+  static int s_flush_fine = -1;
+  if (s_flush_fine < 0) {
+    const char* e = std::getenv("NNOPT_VOC_FLUSH_FINE");
+    s_flush_fine = (e && e[0] == '1') ? 1 : 0;  // default OFF: measured slightly slower
+  }
+  if (s_flush_fine) clFlush(queue);
+
   const size_t gws_im[3] = {(size_t)L_out, (size_t)K, (size_t)C_in};
   err = clEnqueueNDRangeKernel(queue, kim_fused, 3, nullptr, gws_im, nullptr, 0, nullptr,
                                KernelProfiler::event_for(leaky_in ? "conv1d_gemm.leaky_im2col" : "conv1d_gemm.im2col"));
@@ -528,6 +540,7 @@ static cl_mem conv1d_gemm_fused_bias_path(OpenCLContext& cl_ctx,
     pool_release_or_release(out);
     return nullptr;
   }
+  if (s_flush_fine) clFlush(queue);
 
   // HGemm with beta=1: C = alpha*A*B + 1*C  where C had bias_broadcast(+resid)
   // pre-filled by the fused kernel above. Equivalent to running a separate
@@ -1015,9 +1028,40 @@ static cl_mem conv1d_resblock(OpenCLContext& cl_ctx,
                                K, stride, padding, dilation, has_bias,
                                leaky_in, leaky_slope, residual_add, label);
   }
-  return conv1d_gemm_fused(cl_ctx, queue, in, w, b, C_in, C_out, L_in,
-                           K, stride, padding, dilation, has_bias,
-                           leaky_in, leaky_slope, residual_add, label);
+  // conv1d_image: single-dispatch fused path (leaky+conv+bias+resid in one kernel).
+  // Cuts 3 dispatches/conv → 1 vs conv1d_gemm_fused, BUT empirically slower per
+  // kernel for resblock shapes (small C, dilated, K=3/7/11) because the tiled
+  // image kernel isn't tuned for these — CLBlast HGemm carries the compute
+  // weight in the GEMM path. Default OFF here; flip ON with
+  // NNOPT_VOC_RESBLOCK_IMAGE=1 if a future image-kernel rewrite catches up.
+  static int s_use_image = -1;
+  if (s_use_image < 0) {
+    const char* env = std::getenv("NNOPT_VOC_RESBLOCK_IMAGE");
+    s_use_image = (env && env[0] == '1') ? 1 : 0;
+  }
+  if (s_use_image && stride == 1) {
+    return conv1d_image(cl_ctx, queue, in, w, b, C_in, C_out, L_in,
+                        K, padding, dilation, has_bias,
+                        leaky_in, residual_add, label);
+  }
+  cl_mem r = conv1d_gemm_fused(cl_ctx, queue, in, w, b, C_in, C_out, L_in,
+                               K, stride, padding, dilation, has_bias,
+                               leaky_in, leaky_slope, residual_add, label);
+  // Per Qualcomm Adreno OpenCL guide §4.5.1 / Fig 4-1: "The OpenCL software
+  // may queue the kernel first and submit it along with several following
+  // kernels in the queue later … Developers may use the clFlush function to
+  // speed up the submission." Our profile shows ~75 ms QUEUED→START on HGemm
+  // calls — exactly this driver batching. clFlush once per logical conv
+  // (= 3 underlying dispatches) forces the driver to kick the batch to the
+  // GPU instead of waiting for its internal threshold. Default ON; disable
+  // with NNOPT_VOC_FLUSH=0 for A/B.
+  static int s_flush = -1;
+  if (s_flush < 0) {
+    const char* e = std::getenv("NNOPT_VOC_FLUSH");
+    s_flush = (e && e[0] == '1') ? 1 : 0;  // default OFF: measured ~0 net effect
+  }
+  if (s_flush && r) clFlush(queue);
+  return r;
 }
 
 static cl_mem conv1d(OpenCLContext& cl_ctx,
@@ -1371,6 +1415,21 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
     return -4;
   }
 
+  // ── sub-stage profiling (NNOPT_VOC_SUBSTAGE=1) ───────────────────────
+  // Wraps each major vocoder phase with clFinish + chrono to expose where the
+  // ~7.5s wall-time inside this op actually lives. clFinish forces serialization
+  // so the wall numbers reflect real GPU-completion order, not just enqueue.
+  // Off by default — only set when profiling.
+  const bool VOC_SUB = []{ const char* e = std::getenv("NNOPT_VOC_SUBSTAGE"); return e && e[0]!='0'; }();
+  auto sub_now = []{ return std::chrono::steady_clock::now(); };
+  auto sub_dt_ms = [](std::chrono::steady_clock::time_point a,
+                      std::chrono::steady_clock::time_point b) {
+    return std::chrono::duration<double, std::milli>(b - a).count();
+  };
+  auto t_sub_pre = sub_now();
+  if (VOC_SUB) clFinish(queue);
+  auto t_sub_after_finish = sub_now();
+
   // (a) conv_pre: [flow_size=192] -> [upsample_initial_channel=512], K=7, stride=1, pad=3
   cl_mem x = conv1d(cl_ctx, queue, conv_prog, mel_in, w_pre, b_pre,
                     /*C_in=*/C_mel,
@@ -1389,6 +1448,13 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
   int C = MODEL_CONFIG::UPSAMPLE_INITIAL_CHANNEL;
   int L = T_mel;
   NNOPT_LAYER_CHECK("vocoder_conv_pre_out", queue, x, (size_t)C * (size_t)L);
+  if (VOC_SUB) {
+    clFinish(queue);
+    auto t = sub_now();
+    fprintf(stderr, "    voc.sub conv_pre              %8.2f ms  (initial_sync %.2f ms)\n",
+            sub_dt_ms(t_sub_after_finish, t), sub_dt_ms(t_sub_pre, t_sub_after_finish));
+    fflush(stderr);
+  }
 
   // (b) upsample stages
   // upsample_rates: [8,8,2,2], upsample_kernel_sizes: [16,16,4,4]
@@ -1399,6 +1465,8 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
                         MODEL_CONFIG::UPSAMPLE_KERNEL_SIZES[2], MODEL_CONFIG::UPSAMPLE_KERNEL_SIZES[3]};
 
   for (int i = 0; i < 4; ++i) {
+    auto t_stage_start = sub_now();
+    auto t_after_up = t_stage_start;
     // leaky_relu
     if (!run_leaky_relu(cl_ctx, queue, act_prog, x, C * L, (float)MODEL_CONFIG::LEAKY_RELU_SLOPE)) {
       pool_release_or_release(x);
@@ -1445,6 +1513,8 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
 
     C = C_out;
     L = L_out;
+
+    if (VOC_SUB) { clFinish(queue); t_after_up = sub_now(); }
 
     // ResBlocks: 3 per stage, average their outputs.
     // resblock_kernel_sizes: [3,7,11]; dilation_sizes per kernel: (1,3,5)
@@ -1600,9 +1670,20 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
       pool_release_or_release(x);
       x = out_reduce;
     }
+    if (VOC_SUB) {
+      clFinish(queue);
+      auto t_stage_end = sub_now();
+      fprintf(stderr,
+              "    voc.sub stage%d L_out=%d C=%d   leaky+convT %7.2f ms  resblocks %7.2f ms  total %7.2f ms\n",
+              i, L, C,
+              sub_dt_ms(t_stage_start, t_after_up),
+              sub_dt_ms(t_after_up,   t_stage_end),
+              sub_dt_ms(t_stage_start, t_stage_end));
+      fflush(stderr);
+    }
   }
 
-
+  auto t_after_stages = sub_now();
   // (c) final leaky_relu then conv_post then tanh
   if (!run_leaky_relu(cl_ctx, queue, act_prog, x, C * L, (float)MODEL_CONFIG::LEAKY_RELU_SLOPE)) {
     pool_release_or_release(x);
@@ -1648,6 +1729,12 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
                                    y_f32.data(), 0, nullptr, nullptr);
 #endif
   pool_release_or_release(y);
+  if (VOC_SUB) {
+    auto t_post = sub_now();
+    fprintf(stderr, "    voc.sub conv_post+tanh+read    %8.2f ms  L=%d\n",
+            sub_dt_ms(t_after_stages, t_post), L);
+    fflush(stderr);
+  }
   if (err != CL_SUCCESS) {
     NNOPT_ERROR_FMT("op_Vocoder: read waveform failed (%d)", (int)err);
     // Programs are owned/cached by OpenCLContext; do not clReleaseProgram() here.

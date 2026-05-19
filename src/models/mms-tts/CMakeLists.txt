@@ -234,6 +234,7 @@ file(GLOB THIRD_PARTY_SOURCES "${CMAKE_SOURCE_DIR}/src/third_party/*.cpp")
 file(GLOB CORE_SOURCES "${CMAKE_SOURCE_DIR}/src/*.cpp")
 # Exclude standalone probe binaries (each defines its own main()).
 list(FILTER CORE_SOURCES EXCLUDE REGEX ".*/probe_recordable\\.cpp$")
+list(FILTER CORE_SOURCES EXCLUDE REGEX ".*/bench_recordable\\.cpp$")
 
 # Source files
 set(SOURCES
@@ -266,6 +267,18 @@ target_link_libraries(mms_tts_eng_inference ${BACKEND_LIBRARIES})
 # pointers on this device before refactoring vocoder dispatch to use it.
 add_executable(probe_recordable src/probe_recordable.cpp)
 target_link_libraries(probe_recordable ${BACKEND_LIBRARIES})
+
+# Microbenchmark: A/B plain enqueue vs record+replay on a trivial noop kernel.
+# Decides whether the full vocoder integration is worth the multi-hour refactor.
+add_executable(bench_recordable src/bench_recordable.cpp)
+target_link_libraries(bench_recordable ${BACKEND_LIBRARIES})
+if(ANDROID)
+    target_link_options(bench_recordable PRIVATE
+        "-Wl,--allow-shlib-undefined"
+        "-Wl,--unresolved-symbols=ignore-all"
+        "-Wl,--no-copy-dt-needed-entries"
+    )
+endif()
 
 # OpenMP path explored and rejected: on Android NDK 26 with libomp.so the
 # parallel-for overhead was higher than the savings even with a work-size

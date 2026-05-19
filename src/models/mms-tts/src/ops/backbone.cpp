@@ -343,6 +343,7 @@ extern "C" int tts_forward_graph(OpenCLContext& cl_ctx,
   }
 
   // (1) text encoder
+  fprintf(stderr, "▶ text_encoder  T_chars=%d\n", T_chars); fflush(stderr);
   auto t_te_start = std::chrono::steady_clock::now();
   NNOPT_CHECKPOINT("forward_graph: about to call op_text_encoder");
   cl_mem enc_hidden = nullptr;
@@ -362,9 +363,11 @@ extern "C" int tts_forward_graph(OpenCLContext& cl_ctx,
   NNOPT_LAYER_CHECK("text_encoder_stats", queue, stats, (size_t)T_chars * (size_t)(2 * H));
   auto t_te_end = std::chrono::steady_clock::now();
   double te_ms = std::chrono::duration<double, std::milli>(t_te_end - t_te_start).count();
-  fprintf(stderr, "PHASE text_encoder wall: %.1f ms\n", te_ms);
+  fprintf(stderr, "✓ text_encoder  %.2f s\n", te_ms / 1000.0);
 
   // (2) duration predictor
+  fprintf(stderr, "▶ duration_predictor\n"); fflush(stderr);
+  auto t_dp_start = std::chrono::steady_clock::now();
   NNOPT_CHECKPOINT("forward_graph: about to call op_duration_predictor");
   // Weight keys MUST match .nnport/layer_contracts/DurationPredictor.json.
   // Note: contract uses the "duration_predictor_*" flattened keys, not the HF dotted module path.
@@ -391,6 +394,11 @@ extern "C" int tts_forward_graph(OpenCLContext& cl_ctx,
     return -20;
   }
   NNOPT_LAYER_CHECK("log_durations", queue, log_durations_dev, (size_t)T_chars);
+  {
+    auto t_dp_end = std::chrono::steady_clock::now();
+    double dp_ms = std::chrono::duration<double, std::milli>(t_dp_end - t_dp_start).count();
+    fprintf(stderr, "✓ duration_predictor  %.2f s\n", dp_ms / 1000.0);
+  }
 
   // (3) host durations
   NNOPT_CHECKPOINT("forward_graph: about to call host_compute_durations");
@@ -515,6 +523,8 @@ extern "C" int tts_forward_graph(OpenCLContext& cl_ctx,
   }
 
   // (4) length regulator (expand stats to frames)
+  fprintf(stderr, "▶ length_regulator  T_frames=%d\n", T_frames); fflush(stderr);
+  auto t_lr_start = std::chrono::steady_clock::now();
   NNOPT_CHECKPOINT("forward_graph: about to call op_length_regulator");
 
   // Do NOT abort on small T_frames; HF clamps predicted_lengths>=1 and the rest
@@ -576,10 +586,17 @@ extern "C" int tts_forward_graph(OpenCLContext& cl_ctx,
   }
 
   NNOPT_LAYER_CHECK("expanded_stats", queue, reg.expanded_hidden, (size_t)T_frames * (size_t)(2 * H));
+  {
+    auto t_lr_end = std::chrono::steady_clock::now();
+    double lr_ms = std::chrono::duration<double, std::milli>(t_lr_end - t_lr_start).count();
+    fprintf(stderr, "✓ length_regulator  %.2f s\n", lr_ms / 1000.0);
+  }
 
   // (5) sample prior
   // Reference: prior_latents = prior_means + randn_like(prior_means) * exp(prior_log_variances) * noise_scale
   // We treat expanded_stats as [B=1, T_frames, 2*FLOW_C] (means || log_vars).
+  fprintf(stderr, "▶ sample_prior\n"); fflush(stderr);
+  auto t_sp_start = std::chrono::steady_clock::now();
   NNOPT_CHECKPOINT("forward_graph: about to call op_SamplePrior");
   cl_mem means = nullptr;
   cl_mem logvars = nullptr;
@@ -647,26 +664,72 @@ extern "C" int tts_forward_graph(OpenCLContext& cl_ctx,
   // the reference prior_noise.bin fixture which is channels-first. Without
   // this, sample_prior combines mu[t,c] with noise[c,t] and produces a
   // transposed z_prior that breaks every downstream SxS comparison.
+  //
+  // GPU path: reuse kernels/transpose.cl::transpose_btc_to_ncl (B=1 collapses
+  // to a 2-D transpose). Replaces a pair of blocking ReadBuffer + host loop +
+  // blocking WriteBuffer round-trips (4 sync points) with a single GPU
+  // dispatch per buffer. Same kernel is already wired up in convolution.cpp.
   {
+    cl_program tprog = cl_ctx.get_program("kernels/transpose.cl");
+    if (!tprog) tprog = cl_ctx.build_program_from_file("kernels/transpose.cl");
+    if (!tprog) {
+      NNOPT_ERROR("transpose.cl program missing");
+      clReleaseMemObject(logvars); clReleaseMemObject(means);
+      clReleaseMemObject(reg.expanded_hidden);
+      if (reg.expanded_mask) clReleaseMemObject(reg.expanded_mask);
+      clReleaseMemObject(enc_hidden);
+      if (pad_mask) clReleaseMemObject(pad_mask);
+      clReleaseMemObject(prior_noise_buf); clReleaseMemObject(ids_buf);
+      return -49;
+    }
+    cl_int tkerr = CL_SUCCESS;
+    cl_kernel ktr = clCreateKernel(tprog, "transpose_btc_to_ncl", &tkerr);
+    if (tkerr != CL_SUCCESS || !ktr) {
+      NNOPT_ERROR_FMT("clCreateKernel(transpose_btc_to_ncl) failed (%d)", (int)tkerr);
+      clReleaseMemObject(logvars); clReleaseMemObject(means);
+      clReleaseMemObject(reg.expanded_hidden);
+      if (reg.expanded_mask) clReleaseMemObject(reg.expanded_mask);
+      clReleaseMemObject(enc_hidden);
+      if (pad_mask) clReleaseMemObject(pad_mask);
+      clReleaseMemObject(prior_noise_buf); clReleaseMemObject(ids_buf);
+      return -49;
+    }
     const size_t n_total = (size_t)T_frames * (size_t)FLOW_C;
-    std::vector<uint8_t> buf(n_total * sizeof(nnopt_storage_t));
-    auto transpose_inplace_cf = [&](cl_mem dev) -> bool {
-      cl_int e2 = clEnqueueReadBuffer(queue, dev, CL_TRUE, 0, buf.size(), buf.data(), 0, nullptr, nullptr);
-      if (e2 != CL_SUCCESS) return false;
-      std::vector<uint8_t> out(buf.size());
-      const size_t es = sizeof(nnopt_storage_t);
-      for (int t = 0; t < T_frames; ++t) {
-        for (int c = 0; c < FLOW_C; ++c) {
-          size_t src = ((size_t)t * FLOW_C + c) * es;
-          size_t dst = ((size_t)c * T_frames + t) * es;
-          std::memcpy(out.data() + dst, buf.data() + src, es);
-        }
-      }
-      e2 = clEnqueueWriteBuffer(queue, dev, CL_TRUE, 0, out.size(), out.data(), 0, nullptr, nullptr);
-      return e2 == CL_SUCCESS;
+    const size_t bytes   = n_total * sizeof(nnopt_storage_t);
+    const int B_one = 1;
+    const int T_arg = T_frames;
+    const int C_arg = FLOW_C;
+
+    auto transpose_on_gpu = [&](cl_mem& dev) -> bool {
+      cl_mem out_buf = clCreateBuffer(ctx, CL_MEM_READ_WRITE, bytes, nullptr, &tkerr);
+      if (tkerr != CL_SUCCESS || !out_buf) return false;
+      cl_int ke = CL_SUCCESS;
+      ke |= clSetKernelArg(ktr, 0, sizeof(cl_mem), &dev);
+      ke |= clSetKernelArg(ktr, 1, sizeof(cl_mem), &out_buf);
+      ke |= clSetKernelArg(ktr, 2, sizeof(int), &B_one);
+      ke |= clSetKernelArg(ktr, 3, sizeof(int), &T_arg);
+      ke |= clSetKernelArg(ktr, 4, sizeof(int), &C_arg);
+      if (ke != CL_SUCCESS) { clReleaseMemObject(out_buf); return false; }
+      const size_t gws[1] = { n_total };
+      ke = clEnqueueNDRangeKernel(queue, ktr, 1, nullptr, gws, nullptr, 0, nullptr, nullptr);
+      if (ke != CL_SUCCESS) { clReleaseMemObject(out_buf); return false; }
+      clReleaseMemObject(dev);
+      dev = out_buf;
+      return true;
     };
-    transpose_inplace_cf(means);
-    transpose_inplace_cf(logvars);
+
+    bool ok_t = transpose_on_gpu(means) && transpose_on_gpu(logvars);
+    clReleaseKernel(ktr);
+    if (!ok_t) {
+      NNOPT_ERROR("GPU transpose of means/logvars failed");
+      clReleaseMemObject(logvars); clReleaseMemObject(means);
+      clReleaseMemObject(reg.expanded_hidden);
+      if (reg.expanded_mask) clReleaseMemObject(reg.expanded_mask);
+      clReleaseMemObject(enc_hidden);
+      if (pad_mask) clReleaseMemObject(pad_mask);
+      clReleaseMemObject(prior_noise_buf); clReleaseMemObject(ids_buf);
+      return -49;
+    }
   }
   NNOPT_LAYER_CHECK("prior_means_in", queue, means, (size_t)T_frames * (size_t)FLOW_C);
   NNOPT_LAYER_CHECK("prior_logvars_in", queue, logvars, (size_t)T_frames * (size_t)FLOW_C);
@@ -686,14 +749,20 @@ extern "C" int tts_forward_graph(OpenCLContext& cl_ctx,
     return -50;
   }
   NNOPT_LAYER_CHECK("z_prior", queue, z_prior, (size_t)T_frames * (size_t)FLOW_C);
+  {
+    auto t_sp_end = std::chrono::steady_clock::now();
+    double sp_ms = std::chrono::duration<double, std::milli>(t_sp_end - t_sp_start).count();
+    fprintf(stderr, "✓ sample_prior  %.2f s\n", sp_ms / 1000.0);
+  }
 
   // (6) flow inverse
+  fprintf(stderr, "▶ flow_inverse  (this is the slow one; ~7s)\n"); fflush(stderr);
   auto t_flow_start = std::chrono::steady_clock::now();
   NNOPT_CHECKPOINT("forward_graph: about to call op_FlowInverse");
   cl_mem z_latent = op_FlowInverse(cl_ctx, weights, queue, z_prior, B, FLOW_C, T_frames, "flow");
   auto t_flow_end = std::chrono::steady_clock::now();
   double flow_ms = std::chrono::duration<double, std::milli>(t_flow_end - t_flow_start).count();
-  fprintf(stderr, "PHASE flow_inverse wall: %.1f ms\n", flow_ms);
+  fprintf(stderr, "✓ flow_inverse  %.2f s\n", flow_ms / 1000.0);
   clReleaseMemObject(z_prior);
   if (!z_latent) {
     NNOPT_ERROR("op_FlowInverse returned null");
@@ -708,13 +777,14 @@ extern "C" int tts_forward_graph(OpenCLContext& cl_ctx,
   NNOPT_LAYER_CHECK("z_latent", queue, z_latent, (size_t)B * (size_t)FLOW_C * (size_t)T_frames);
 
   // (7) vocoder
+  fprintf(stderr, "▶ vocoder  (the other slow one; ~7s)\n"); fflush(stderr);
   auto t_voc_start = std::chrono::steady_clock::now();
   NNOPT_CHECKPOINT("forward_graph: about to call op_Vocoder");
   std::vector<int16_t> pcm;
   rc = op_Vocoder(cl_ctx, weights, queue, z_latent, B, FLOW_C, T_frames, pcm);
   auto t_voc_end = std::chrono::steady_clock::now();
   double voc_ms = std::chrono::duration<double, std::milli>(t_voc_end - t_voc_start).count();
-  fprintf(stderr, "PHASE vocoder wall: %.1f ms\n", voc_ms);
+  fprintf(stderr, "✓ vocoder  %.2f s\n", voc_ms / 1000.0);
   (void)op_vocoder;
   clReleaseMemObject(z_latent);
   if (rc != 0) {

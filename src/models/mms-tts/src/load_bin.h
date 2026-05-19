@@ -32,8 +32,13 @@ inline bool read_bin(const std::string& path, std::vector<T>& out) {
 inline std::vector<int32_t> load_int32_bin(const std::string& path) {
     std::vector<int32_t> v;
     if (!read_bin<int32_t>(path, v)) {
-        // Keep error reporting consistent with the rest of the runtime.
-        std::fprintf(stderr, "ERROR: failed to load int32 bin %s (cwd may differ on Android)\n", path.c_str());
+#ifdef NNOPT_DEBUG
+        // Debug-only: missing fixture is harmless in production-text mode, so
+        // this message would otherwise spam release-mode stderr. The real
+        // hard-fail (no fixtures AND no --token-ids AND tokenizer failed) is
+        // reported by an explicit NNOPT_ERROR_FMT in main.cpp.
+        std::fprintf(stderr, "CHECKPOINT: load_int32_bin: missing or unreadable %s\n", path.c_str());
+#endif
     }
     return v;
 }
@@ -82,8 +87,9 @@ inline std::vector<float> load_float_bin(const std::string& path) {
         return v;
     }
 
-    // Keep error reporting consistent with the rest of the runtime.
-    std::fprintf(stderr, "ERROR: failed to load float bin %s (cwd may differ on Android)\n", path.c_str());
+#ifdef NNOPT_DEBUG
+    std::fprintf(stderr, "CHECKPOINT: load_float_bin: missing or unreadable %s\n", path.c_str());
+#endif
     return v;
 }
 

@@ -203,6 +203,7 @@ int main(int argc, char** argv) {
     int max_new_tokens = 16;
     std::string token_ids_path;
     std::string lang_code;   // empty = flat layout (weights/…, assets/…); else weights/<lang>/, assets/<lang>/
+    bool interactive_mode = false;
 
     SamplerConfig sampler_config;
     sampler_config.temperature = 0.0f;          // greedy by default — matches PyTorch reference
@@ -219,6 +220,8 @@ int main(int argc, char** argv) {
 
             } else if (a == "--lang" && i + 1 < argc) {
                 lang_code = argv[++i];
+            } else if (a == "--interactive") {
+                interactive_mode = true;
             } else if (a == "--temperature" && i + 1 < argc) {
                 sampler_config.temperature = std::stof(argv[++i]);
             } else if (a == "--top-k" && i + 1 < argc) {
@@ -296,9 +299,16 @@ int main(int argc, char** argv) {
     const std::string nnopt_weights_bin  = "weights" + lang_sub + "/model.bin";
     const std::string nnopt_weights_meta = "weights" + lang_sub + "/model.meta.json";
 #endif
+    std::fprintf(stderr, "▶ load weights  %s\n", nnopt_weights_bin.c_str()); std::fflush(stderr);
+    auto t_load_start = std::chrono::steady_clock::now();
     if (!weights.load(nnopt_weights_bin, nnopt_weights_meta, cl_ctx.context())) {
         NNOPT_ERROR_FMT("weights load failed: %s", nnopt_weights_bin.c_str());
         return 1;
+    }
+    {
+        auto t_load_end = std::chrono::steady_clock::now();
+        double load_ms = std::chrono::duration<double, std::milli>(t_load_end - t_load_start).count();
+        std::fprintf(stderr, "✓ load weights  %.2f s\n", load_ms / 1000.0);
     }
 
     Sampler sampler(sampler_config);
@@ -307,6 +317,115 @@ int main(int argc, char** argv) {
     if (!model.initialize()) {
         NNOPT_ERROR("Model::initialize() failed — see prior NNOPT_ERROR for the layer that failed");
         return 1;
+    }
+
+    // ── Pre-warm at load time ────────────────────────────────────────────────
+    // Run one discard-output forward with a tiny synthetic input to pay JIT +
+    // first-call CLBlast tuning + per-process kernel/weight-cache costs
+    // BEFORE the user-visible per-utterance latency. A/B measurement showed
+    // ~1.25 s vocoder savings (7.32 s → 6.07 s) when the warmup uses the same
+    // shape as the real input; with a synthetic 4-token shape we capture the
+    // shape-independent costs (program loads, weight uploads, host caches,
+    // conv_pre weight-image pack) — partial savings of ~0.5-1 s expected.
+    //
+    // Off with NNOPT_PREWARM=0. Skipped in REF_TEST modes and when no
+    // tokenizer is available (we synthesize ids directly, but the safeguard
+    // matches existing skip conditions).
+    {
+        const char* prewarm_env = std::getenv("NNOPT_PREWARM");
+        const bool prewarm_on = !(prewarm_env && prewarm_env[0] == '0');
+        if (prewarm_on && !flow_ref_test) {
+            // Synthetic ids: a few small token values in vocab range. Any short
+            // sequence works — we discard the output.
+            std::vector<int32_t> warm_ids = {1, 2, 3, 4, 5, 6, 7, 8};
+            constexpr size_t H_ = MODEL_CONFIG::HIDDEN_SIZE;
+            constexpr size_t T_FRAMES_WARM = 256;  // upper bound for the synthetic 8-token input
+            std::vector<float> warm_dur_noise(2 * warm_ids.size(), 0.0f);
+            std::vector<float> warm_prior_noise(H_ * T_FRAMES_WARM, 0.0f);
+            GaussianRng warm_rng(0xC0FFEEu);
+            warm_rng.fill(warm_dur_noise.data(), warm_dur_noise.size());
+            warm_rng.fill(warm_prior_noise.data(), warm_prior_noise.size());
+
+            std::fprintf(stderr, "▶ prewarm (synthetic forward to bake JIT + caches)\n");
+            std::fflush(stderr);
+            auto t_pw_start = std::chrono::steady_clock::now();
+            std::vector<int16_t> _warm_pcm;
+            int warm_rc = model.forward_graph(warm_ids, warm_dur_noise, warm_prior_noise, _warm_pcm);
+            auto t_pw_end = std::chrono::steady_clock::now();
+            double pw_ms = std::chrono::duration<double, std::milli>(t_pw_end - t_pw_start).count();
+            std::fprintf(stderr, "✓ prewarm  %.2f s  (rc=%d, pcm=%zu)\n",
+                         pw_ms / 1000.0, warm_rc, _warm_pcm.size());
+            std::fflush(stderr);
+            // Wipe profiler state so the user's run shows only their own kernels.
+            KernelProfiler::reset();
+            // Re-baseline the BenchmarkTimer so warmup doesn't count against RTF.
+            bench.mark_inference_start();
+        }
+    }
+
+    // ── Interactive REPL: load model once, then loop reading lines from stdin ──
+    // Triggered by `--interactive`. Each line of stdin becomes one utterance —
+    // tokenize on-device, run forward, write output.wav, emit a TTS_WAV_READY
+    // marker for the host wrapper (scripts/say.sh) to pull and play. Blank
+    // line or EOF exits.
+    if (interactive_mode) {
+        if (!tokenizer_ok) {
+            NNOPT_ERROR("--interactive needs a working tokenizer (weights/<lang>/tokenizer_vocab.bin)");
+            return 1;
+        }
+        std::fprintf(stderr, "ready. type text, blank line or Ctrl-D to quit.\n");
+        std::fflush(stderr);
+        constexpr size_t H_ = MODEL_CONFIG::HIDDEN_SIZE;
+        constexpr size_t T_FRAMES_MAX_ = 4096;
+        std::vector<float> duration_noise_buf;
+        std::vector<float> prior_noise_buf(H_ * T_FRAMES_MAX_);
+        int utt = 0;
+        std::string line;
+        while (true) {
+            std::fprintf(stderr, "\n> "); std::fflush(stderr);
+            if (!std::getline(std::cin, line)) break;
+            if (line.empty()) break;
+            auto in_ids = tok.encode(line);
+            if (in_ids.empty()) {
+                std::fprintf(stderr, "no ids — try different text\n");
+                continue;
+            }
+            // Deterministic noise from seed+utt index so repeats are reproducible.
+            GaussianRng rng(sampler_config.seed + (uint32_t)utt);
+            duration_noise_buf.assign(2 * in_ids.size(), 0.0f);
+            rng.fill(duration_noise_buf.data(), duration_noise_buf.size());
+            rng.fill(prior_noise_buf.data(), prior_noise_buf.size());
+
+            std::fprintf(stderr, "▶ tokenize  T_chars=%zu  lang=%s  utt=%d\n",
+                         in_ids.size(),
+                         lang_code.empty() ? "(flat)" : lang_code.c_str(), utt);
+            std::fflush(stderr);
+
+            std::vector<int16_t> utt_pcm;
+            auto t0 = std::chrono::steady_clock::now();
+            int rc = model.forward_graph(in_ids, duration_noise_buf, prior_noise_buf, utt_pcm);
+            auto t1 = std::chrono::steady_clock::now();
+            if (rc != 0 || utt_pcm.empty()) {
+                NNOPT_ERROR_FMT("forward_graph rc=%d pcm=%zu", rc, utt_pcm.size());
+                continue;
+            }
+            double fwd_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            double audio_ms = (double)utt_pcm.size() * 1000.0 / 16000.0;
+            const std::string utt_wav = "output.wav";   // overwrite each turn
+            if (!write_wav(utt_wav, utt_pcm.data(), (int)utt_pcm.size(), 16000)) {
+                NNOPT_ERROR_FMT("write_wav failed: %s", utt_wav.c_str());
+                continue;
+            }
+            std::fprintf(stderr,
+                "done  audio=%.2f s  rtf=%.2f  fwd=%.2f s\n",
+                audio_ms / 1000.0, audio_ms > 0 ? fwd_ms / audio_ms : 0.0, fwd_ms / 1000.0);
+            // Host-watcher contract: pull + play this file.
+            std::fprintf(stderr, "TTS_WAV_READY %s\n", utt_wav.c_str());
+            std::fflush(stderr);
+            utt++;
+        }
+        std::fprintf(stderr, "\nbye.\n");
+        return 0;
     }
 
     // ── Debug-only: isolated flow_inverse test against captured reference ──
@@ -683,29 +802,40 @@ int main(int argc, char** argv) {
     // a live karaoke display. The char ticks are an *estimate* (VITS is
     // non-autoregressive so we can't know real per-char timing without
     // touching the vocoder). The PCM chunk markers after forward are real.
-    std::fprintf(stderr, "TTS_STAGE begin T_chars=%zu lang=%s seed=%u\n",
+    // One concise begin line that always prints.
+    std::fprintf(stderr, "▶ tokenize  T_chars=%zu  lang=%s  seed=%u\n",
                  input_ids.size(), lang_code.empty() ? "(flat)" : lang_code.c_str(),
                  sampler_config.seed);
-    std::fprintf(stderr, "TTS_INPUT_IDS [");
-    for (size_t i = 0; i < input_ids.size(); ++i) {
-        std::fprintf(stderr, "%d%s", input_ids[i], i + 1 == input_ids.size() ? "" : " ");
-    }
-    std::fprintf(stderr, "]\n");
-
-    std::atomic<bool> playhead_stop{false};
-    std::thread playhead([&]{
-        // ~80 ms per char is the rough VITS speaking rate; close enough for demo.
-        const auto tick = std::chrono::milliseconds(80);
-        auto t_start = std::chrono::steady_clock::now();
+    // The full id list is debug-only — gate behind NNOPT_VERBOSE.
+    if (const char* v = std::getenv("NNOPT_VERBOSE"); v && v[0] == '1') {
+        std::fprintf(stderr, "TTS_INPUT_IDS [");
         for (size_t i = 0; i < input_ids.size(); ++i) {
-            if (playhead_stop.load()) return;
-            auto ms = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - t_start).count();
-            std::fprintf(stderr, "TTS_CHAR_TICK idx=%zu wall_ms=%.1f\n", i, ms);
-            std::fflush(stderr);
-            std::this_thread::sleep_for(tick);
+            std::fprintf(stderr, "%d%s", input_ids[i], i + 1 == input_ids.size() ? "" : " ");
         }
-    });
+        std::fprintf(stderr, "]\n");
+    }
+
+    // The "karaoke" playhead is a demo aid that streams TTS_CHAR_TICK idx=N
+    // wall_ms=X. Useful only when a host wrapper renders them. Default off —
+    // the per-stage ▶ / ✓ banners from backbone.cpp give better progress signal.
+    const bool tick_stream =
+        ([](){ const char* e = std::getenv("NNOPT_TICKS"); return e && e[0] == '1'; })();
+    std::atomic<bool> playhead_stop{false};
+    std::thread playhead;
+    if (tick_stream) {
+        playhead = std::thread([&]{
+            const auto tick = std::chrono::milliseconds(80);
+            auto t_start = std::chrono::steady_clock::now();
+            for (size_t i = 0; i < input_ids.size(); ++i) {
+                if (playhead_stop.load()) return;
+                auto ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t_start).count();
+                std::fprintf(stderr, "TTS_CHAR_TICK idx=%zu wall_ms=%.1f\n", i, ms);
+                std::fflush(stderr);
+                std::this_thread::sleep_for(tick);
+            }
+        });
+    }
 
     std::vector<int16_t> pcm;
     // Set NNOPT_WARMUP=1 to do a discard-output warmup pass first. Used to
@@ -723,8 +853,6 @@ int main(int argc, char** argv) {
     bench.mark_prefill_start();
     NNOPT_BENCH_FIRST_TOKEN();   // repurposed: marks first sample produced
     auto t_fwd_start = std::chrono::steady_clock::now();
-    std::fprintf(stderr, "TTS_STAGE forward_start\n"); std::fflush(stderr);
-
     const int rc = model.forward_graph(input_ids, duration_noise, prior_noise, pcm);
 
     playhead_stop.store(true);
@@ -739,16 +867,17 @@ int main(int argc, char** argv) {
             std::chrono::steady_clock::now() - t_fwd_start).count();
         double audio_ms = pcm.size() * 1000.0 / 16000.0;
         std::fprintf(stderr,
-            "TTS_STAGE forward_end fwd_ms=%.1f pcm_samples=%zu audio_ms=%.1f rtf=%.3f\n",
-            fwd_ms, pcm.size(), audio_ms, audio_ms > 0 ? fwd_ms / audio_ms : 0.0);
+            "done  audio=%.2f s  rtf=%.2f  fwd=%.2f s\n",
+            audio_ms / 1000.0, audio_ms > 0 ? fwd_ms / audio_ms : 0.0, fwd_ms / 1000.0);
 
-        // Post-hoc PCM chunk markers — real bytes, 50 ms chunks @ 16 kHz.
-        // When Phase 2 (chunked vocoder) lands, these will fire DURING forward
-        // instead of after. Same event format → demo wrapper unchanged.
-        constexpr size_t CHUNK = 800;
-        for (size_t off = 0; off < pcm.size(); off += CHUNK) {
-            size_t n = std::min(CHUNK, pcm.size() - off);
-            std::fprintf(stderr, "TTS_PCM_CHUNK off=%zu n=%zu\n", off, n);
+        // Optional 50ms PCM chunk markers for a host-side karaoke renderer.
+        // Default off (NNOPT_TICKS=1 enables together with the playhead ticks).
+        if (tick_stream) {
+            constexpr size_t CHUNK = 800;
+            for (size_t off = 0; off < pcm.size(); off += CHUNK) {
+                size_t n = std::min(CHUNK, pcm.size() - off);
+                std::fprintf(stderr, "TTS_PCM_CHUNK off=%zu n=%zu\n", off, n);
+            }
         }
         std::fflush(stderr);
     }

@@ -62,9 +62,11 @@ for arg in $EXTRA_ARGS; do
     prev_arg="$arg"
 done
 
-# Debug layer validation is on by default; set NNOPT_DEBUG_LAYERS=0 to disable
-DEBUG_ENV="NNOPT_DEBUG_LAYERS=1"
-if [ "${NNOPT_DEBUG_LAYERS:-}" = "0" ]; then DEBUG_ENV=""; fi
+# Debug layer validation is OFF by default for demo runs — the per-layer
+# LAYER_CHECK[pass=0]: spam adds 30+ stderr lines and is only useful for
+# bring-up. Opt back in with NNOPT_DEBUG_LAYERS=1.
+DEBUG_ENV=""
+if [ "${NNOPT_DEBUG_LAYERS:-}" = "1" ]; then DEBUG_ENV="NNOPT_DEBUG_LAYERS=1"; fi
 
 # Layer dump mode (Infer tool sets NNOPT_DUMP_LAYERS=1 for SxSDebug)
 DUMP_ENV=""
@@ -87,7 +89,7 @@ if [ "${NNOPT_ABORT_ON_FAIL_LAYER:-1}" != "0" ]; then ABORT_ENV="NNOPT_ABORT_ON_
 # separates them using pattern matching (CHECKPOINT/ERROR/LAYER_CHECK = stderr).
 # No device file redirect — no stale logs/device_run_stderr.log to confuse the agent.
 set +e
-$ADB shell "cd $REMOTE_DIR && $DEBUG_ENV $DUMP_ENV $ABORT_ENV LD_LIBRARY_PATH=$REMOTE_DIR/lib:/system/vendor/lib64:\$LD_LIBRARY_PATH ./$BINARY_NAME '$ESCAPED_PROMPT' $MAX_TOKENS $EXTRA_ARGS" 2> >(tee /tmp/nnopt_adb_stderr.txt >&2)
+$ADB shell "cd $REMOTE_DIR && $DEBUG_ENV $DUMP_ENV $ABORT_ENV LD_LIBRARY_PATH=$REMOTE_DIR/lib:/system/vendor/lib64:\$LD_LIBRARY_PATH ./$BINARY_NAME '$ESCAPED_PROMPT' $MAX_TOKENS $EXTRA_ARGS"
 # Pull reference/ if it exists (fixtures for TTS graph)
 $ADB pull "$REMOTE_DIR/reference" "$(pwd)/reference" >/dev/null 2>&1 || true
 # Pull the generated WAV to /tmp/tts_out.wav so a single invocation produces

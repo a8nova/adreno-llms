@@ -6,6 +6,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 
 OpenCLContext::OpenCLContext() {}
 
@@ -84,6 +85,69 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
     if (prof_env && prof_env[0] != '0') qprops |= CL_QUEUE_PROFILING_ENABLE;
     queue_ = clCreateCommandQueue(context_, device_, qprops, &err);
     if (err != CL_SUCCESS) return false;
+
+    // ── cl_qcom_recordable_queues entry-point load (Adreno guide §9.1.3).
+    //   dlsym from the already-loaded libOpenCL.so. Same pattern as
+    //   lfm2-5-350m/src/opencl_context.cpp:244-254, which validated this on
+    //   the same A6xx driver family. Symbols may also be ICD-blocked — fall
+    //   back to clGetExtensionFunctionAddressForPlatform if dlsym misses.
+    fn_new_recording_     = (clNewRecordingQCOM_fn)    dlsym(RTLD_DEFAULT, "clNewRecordingQCOM");
+    fn_end_recording_     = (clEndRecordingQCOM_fn)    dlsym(RTLD_DEFAULT, "clEndRecordingQCOM");
+    fn_release_recording_ = (clReleaseRecordingQCOM_fn)dlsym(RTLD_DEFAULT, "clReleaseRecordingQCOM");
+    fn_enqueue_recording_ = (clEnqueueRecordingQCOM_fn)dlsym(RTLD_DEFAULT, "clEnqueueRecordingQCOM");
+    if (!fn_new_recording_) {
+        fn_new_recording_ = (clNewRecordingQCOM_fn)clGetExtensionFunctionAddressForPlatform(platform_, "clNewRecordingQCOM");
+        fn_end_recording_ = (clEndRecordingQCOM_fn)clGetExtensionFunctionAddressForPlatform(platform_, "clEndRecordingQCOM");
+        fn_release_recording_ = (clReleaseRecordingQCOM_fn)clGetExtensionFunctionAddressForPlatform(platform_, "clReleaseRecordingQCOM");
+        fn_enqueue_recording_ = (clEnqueueRecordingQCOM_fn)clGetExtensionFunctionAddressForPlatform(platform_, "clEnqueueRecordingQCOM");
+    }
+    record_fns_loaded_ = (fn_new_recording_ && fn_end_recording_ &&
+                          fn_release_recording_ && fn_enqueue_recording_);
+    if (!std::getenv("NNOPT_QUIET")) {
+        fprintf(stderr, "  recordable_qs   %s\n", record_fns_loaded_ ? "yes" : "no");
+    }
+
+    // One-shot device banner so the demo shows exactly which OpenCL stack is
+    // running. Mirrors the info nnopt's last_probe.json captures host-side, but
+    // queried live from the actual device this binary connected to. Suppress
+    // with NNOPT_QUIET=1 (test harnesses, perf scripts).
+    if (!std::getenv("NNOPT_QUIET")) {
+        char platform_name[128] = {0};
+        char device_name[128]   = {0};
+        char device_version[128]= {0};
+        char driver_version[256]= {0};
+        char ext_buf[8192]      = {0};
+        cl_uint cu = 0;
+        size_t max_wg = 0;
+        cl_ulong gmem = 0, lmem = 0;
+        cl_uint clock_mhz = 0;
+        clGetPlatformInfo(platform_, CL_PLATFORM_NAME, sizeof(platform_name), platform_name, nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_NAME,                 sizeof(device_name),    device_name,    nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_VERSION,              sizeof(device_version), device_version, nullptr);
+        clGetDeviceInfo(device_, CL_DRIVER_VERSION,              sizeof(driver_version), driver_version, nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_MAX_COMPUTE_UNITS,    sizeof(cu),       &cu,       nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_MAX_WORK_GROUP_SIZE,  sizeof(max_wg),   &max_wg,   nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_GLOBAL_MEM_SIZE,      sizeof(gmem),     &gmem,     nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_LOCAL_MEM_SIZE,       sizeof(lmem),     &lmem,     nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_MAX_CLOCK_FREQUENCY,  sizeof(clock_mhz),&clock_mhz,nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_EXTENSIONS, sizeof(ext_buf) - 1, ext_buf, nullptr);
+        const bool has_fp16    = std::strstr(ext_buf, "cl_khr_fp16")       != nullptr;
+        const bool has_perfhnt = std::strstr(ext_buf, "cl_qcom_perf_hint") != nullptr;
+        fprintf(stderr, "── OpenCL device ────────────────────────────────────────────\n");
+        fprintf(stderr, "  platform        %s\n", platform_name);
+        fprintf(stderr, "  device          %s\n", device_name);
+        fprintf(stderr, "  version         %s\n", device_version);
+        fprintf(stderr, "  driver          %s\n", driver_version);
+        fprintf(stderr, "  compute_units   %u\n", (unsigned)cu);
+        fprintf(stderr, "  max_clock_MHz   %u\n", (unsigned)clock_mhz);
+        fprintf(stderr, "  max_workgroup   %zu\n", max_wg);
+        fprintf(stderr, "  global_mem      %.0f MB\n", (double)gmem / (1024.0 * 1024.0));
+        fprintf(stderr, "  local_mem       %.0f KB\n", (double)lmem / 1024.0);
+        fprintf(stderr, "  cl_khr_fp16     %s\n", has_fp16    ? "yes" : "no");
+        fprintf(stderr, "  qcom_perf_hint  %s\n", has_perfhnt ? "yes" : "no");
+        fprintf(stderr, "─────────────────────────────────────────────────────────────\n");
+        fflush(stderr);
+    }
 
     // Build and cache commonly-used programs at init time.
     // This avoids long compile times and extra RAM pressure mid-inference.
@@ -201,4 +265,47 @@ size_t OpenCLContext::local_mem_size() const {
     cl_ulong size;
     clGetDeviceInfo(device_, CL_DEVICE_LOCAL_MEM_SIZE, sizeof(size), &size, nullptr);
     return (size_t)size;
+}
+
+// ── cl_qcom_recordable_queues helpers ────────────────────────────────────────
+// Lifted from lfm2-5-350m/src/opencl_context.cpp:259-297 — same A6xx driver
+// family. The recordable bit is (cl_command_queue_properties)1 << 30.
+cl_command_queue OpenCLContext::create_recordable_queue() {
+    if (!record_fns_loaded_) return nullptr;
+    constexpr cl_command_queue_properties RECORD_BIT = (cl_command_queue_properties)1 << 30;
+    cl_int err = CL_SUCCESS;
+    cl_command_queue q = clCreateCommandQueue(context_, device_, RECORD_BIT, &err);
+    if (err != CL_SUCCESS || !q) {
+        fprintf(stderr, "RecordQ: clCreateCommandQueue(RECORD_BIT) failed err=%d\n", (int)err);
+        return nullptr;
+    }
+    return q;
+}
+
+cl_recording_qcom OpenCLContext::new_recording(cl_command_queue q) const {
+    if (!fn_new_recording_) return nullptr;
+    cl_int err = CL_SUCCESS;
+    cl_recording_qcom rec = fn_new_recording_(q, &err);
+    if (err != CL_SUCCESS) return nullptr;
+    return rec;
+}
+
+cl_int OpenCLContext::end_recording(cl_recording_qcom rec) const {
+    if (!fn_end_recording_) return CL_INVALID_OPERATION;
+    return fn_end_recording_(rec);
+}
+
+cl_int OpenCLContext::release_recording(cl_recording_qcom rec) const {
+    if (!fn_release_recording_) return CL_INVALID_OPERATION;
+    return fn_release_recording_(rec);
+}
+
+cl_int OpenCLContext::enqueue_recording(cl_command_queue live_q,
+                                        cl_recording_qcom rec,
+                                        size_t num_args,
+                                        const cl_array_arg_qcom* args) const {
+    if (!fn_enqueue_recording_) return CL_INVALID_OPERATION;
+    return fn_enqueue_recording_(live_q, rec, num_args, args,
+                                 0, nullptr, 0, nullptr, 0, nullptr,
+                                 0, nullptr, nullptr);
 }
