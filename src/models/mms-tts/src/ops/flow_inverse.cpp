@@ -123,6 +123,56 @@ static cl_mem upload_storage(cl_context ctx, cl_command_queue queue,
   return b;
 }
 
+// Reorder a weight tensor from [OC, IC, K] to [OC, K, IC] layout. The fused
+// WN kernel reads K with an outer loop and IC with an inner stride-1 loop,
+// which lets us vload_half4 over IC. Used only for the in_layers conv (K=5);
+// the legacy 8-dispatch path still consumes the original [OC, IC, K] layout
+// from the separate cache.
+static std::vector<float> transpose_ic_k(const std::vector<float>& src,
+                                         int OC, int IC, int K) {
+  std::vector<float> out(src.size());
+  for (int oc = 0; oc < OC; ++oc) {
+    for (int ic = 0; ic < IC; ++ic) {
+      for (int k = 0; k < K; ++k) {
+        // src[(oc, ic, k)] = oc*IC*K + ic*K + k
+        // dst[(oc, k, ic)] = oc*K*IC + k*IC + ic
+        out[(size_t)oc * K * IC + (size_t)k * IC + ic] =
+            src[(size_t)oc * IC * K + (size_t)ic * K + k];
+      }
+    }
+  }
+  return out;
+}
+
+// Reordered-layout cache for the fused WN path (key = original prefix + "@kic")
+// so the legacy path keeps its [OC, IC, K] cache unchanged.
+static const GpuW* get_or_make_wn_weights_kic(const std::string& prefix,
+                                              Weights& weights,
+                                              OpenCLContext& cl_ctx,
+                                              cl_command_queue queue,
+                                              int OC, int IC, int K) {
+  const std::string cache_key = prefix + "@kic";
+  auto it = g_gpu_w_cache.find(cache_key);
+  if (it != g_gpu_w_cache.end()) return &it->second;
+  auto v = weights.get_host_vec(prefix + ".weight_v");
+  auto g = weights.get_host_vec(prefix + ".weight_g");
+  auto b = weights.get_host_vec(prefix + ".bias");
+  if (v.empty() || g.empty()) return nullptr;
+  std::vector<float> W = apply_weight_norm(v, g, OC, IC, K);
+  std::vector<float> W_kic = transpose_ic_k(W, OC, IC, K);
+  GpuW e;
+  e.OC = OC; e.IC = IC; e.K = K;
+  e.weight = upload_storage(cl_ctx.context(), queue, W_kic);
+  e.bias   = upload_storage(cl_ctx.context(), queue, b);
+  if (!e.weight || !e.bias) {
+    if (e.weight) clReleaseMemObject(e.weight);
+    if (e.bias) clReleaseMemObject(e.bias);
+    return nullptr;
+  }
+  auto ins = g_gpu_w_cache.emplace(cache_key, std::move(e));
+  return &ins.first->second;
+}
+
 static const GpuW* get_or_make_wn_weights(const std::string& prefix,
                                           Weights& weights,
                                           OpenCLContext& cl_ctx,
@@ -393,6 +443,54 @@ static bool coupling_inverse_stage_gpu(OpenCLContext& cl_ctx,
     }
   }
 
+  // ── WaveNet residual loop ─────────────────────────────────────────────
+  //
+  // Two implementations selectable at runtime:
+  //   (A) per-op default: 8 dispatches per layer (in conv + gated_act + rs
+  //       conv + split_rs_fold) — see the branch under !wn_fused.
+  //   (B) NNOPT_FLOW_WN_FUSED=1: one dispatch per layer via
+  //       kernels/flow_wn_fused.cl::flow_wn_layer_fused. Cuts the WaveNet
+  //       inner loop from 64 dispatches (8×16) to 16 — directly attacks the
+  //       per-dispatch idle gap that dominates Adreno 620 flow_inverse wall.
+  //
+  // (B) needs a second h buffer because the K=5 in conv reads h positions
+  // adjacent to the one each workitem writes — pinging across layers.
+  static int s_wn_fused = -1;
+  if (s_wn_fused < 0) {
+    const char* e = std::getenv("NNOPT_FLOW_WN_FUSED");
+    s_wn_fused = (e && e[0] == '1') ? 1 : 0;
+  }
+
+  // Allocate the ping-pong h buffer up front when fused path is on.
+  cl_mem h_alt = nullptr;
+  cl_kernel k_wn_fused = nullptr;
+  if (s_wn_fused) {
+    h_alt = clCreateBuffer(ctx, CL_MEM_READ_WRITE, flow_bytes, nullptr, &err);
+    if (err != CL_SUCCESS || !h_alt) {
+      NNOPT_ERROR_FMT("flow_wn_fused: alloc h_alt (%d)", (int)err);
+      clReleaseMemObject(h); clReleaseMemObject(y_a); clReleaseMemObject(y_b);
+      clReleaseMemObject(skip_sum); return false;
+    }
+    cl_program prog = cl_ctx.get_program("kernels/flow_wn_fused.cl");
+    if (!prog) prog = cl_ctx.build_program_from_file("kernels/flow_wn_fused.cl");
+    if (!prog) {
+      NNOPT_ERROR("flow_wn_fused: program missing");
+      clReleaseMemObject(h_alt);
+      clReleaseMemObject(h); clReleaseMemObject(y_a); clReleaseMemObject(y_b);
+      clReleaseMemObject(skip_sum); return false;
+    }
+    k_wn_fused = clCreateKernel(prog, "flow_wn_layer_fused", &err);
+    if (err != CL_SUCCESS || !k_wn_fused) {
+      NNOPT_ERROR_FMT("flow_wn_fused: clCreateKernel (%d)", (int)err);
+      clReleaseMemObject(h_alt);
+      clReleaseMemObject(h); clReleaseMemObject(y_a); clReleaseMemObject(y_b);
+      clReleaseMemObject(skip_sum); return false;
+    }
+  }
+
+  cl_mem h_in_buf  = h;       // ping
+  cl_mem h_out_buf = h_alt;   // pong (used only on fused path)
+
   for (int li = 0; li < kWnLayers; ++li) {
     std::snprintf(buf, sizeof(buf), "flow.flows.%d.wavenet.in_layers.%d", stage_idx, li);
     const GpuW* w_in = get_or_make_wn_weights(buf, weights, cl_ctx, queue,
@@ -402,10 +500,65 @@ static bool coupling_inverse_stage_gpu(OpenCLContext& cl_ctx,
     const GpuW* w_rs = get_or_make_wn_weights(buf, weights, cl_ctx, queue,
                                               rs_oc, kFlowChannels, 1);
     if (!w_in || !w_rs) {
+      if (h_alt) clReleaseMemObject(h_alt);
+      if (k_wn_fused) clReleaseKernel(k_wn_fused);
       clReleaseMemObject(h); clReleaseMemObject(y_a); clReleaseMemObject(y_b);
       clReleaseMemObject(skip_sum); return false;
     }
 
+    if (s_wn_fused) {
+      // ── Fused single-dispatch layer ──────────────────────────────────
+      // Re-fetch w_in from the reordered [OC, K, IC] cache (vectorized inner
+      // loop reads contiguous IC). w_rs (K=1) stays in the default cache.
+      std::snprintf(buf, sizeof(buf), "flow.flows.%d.wavenet.in_layers.%d", stage_idx, li);
+      const GpuW* w_in_kic = get_or_make_wn_weights_kic(buf, weights, cl_ctx, queue,
+                                                        2 * kFlowChannels, kFlowChannels, kWnKernel);
+      if (!w_in_kic) {
+        NNOPT_ERROR("flow_wn_fused: failed to build [OC,K,IC] weight cache");
+        clReleaseKernel(k_wn_fused); clReleaseMemObject(h_alt);
+        clReleaseMemObject(h); clReleaseMemObject(y_a); clReleaseMemObject(y_b);
+        clReleaseMemObject(skip_sum); return false;
+      }
+      const int is_last = (li == kWnLayers - 1) ? 1 : 0;
+      bool ok = true;
+      ok = ok && (clSetKernelArg(k_wn_fused, 0, sizeof(cl_mem), &h_in_buf)  == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_wn_fused, 1, sizeof(cl_mem), &h_out_buf) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_wn_fused, 2, sizeof(cl_mem), &w_in_kic->weight) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_wn_fused, 3, sizeof(cl_mem), &w_in_kic->bias)   == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_wn_fused, 4, sizeof(cl_mem), &w_rs->weight) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_wn_fused, 5, sizeof(cl_mem), &w_rs->bias)   == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_wn_fused, 6, sizeof(cl_mem), &skip_sum)     == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_wn_fused, 7, sizeof(int),    &T)            == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_wn_fused, 8, sizeof(int),    &is_last)      == CL_SUCCESS);
+      if (!ok) {
+        NNOPT_ERROR("flow_wn_fused: setKernelArg failed");
+        clReleaseKernel(k_wn_fused); clReleaseMemObject(h_alt);
+        clReleaseMemObject(h); clReleaseMemObject(y_a); clReleaseMemObject(y_b);
+        clReleaseMemObject(skip_sum); return false;
+      }
+      const size_t gws[2] = { (size_t)kFlowChannels, (size_t)T };
+      const size_t lws[2] = { (size_t)kFlowChannels, 1 };
+      cl_int de = clEnqueueNDRangeKernel(queue, k_wn_fused, 2, nullptr, gws, lws,
+                                         0, nullptr, KernelProfiler::event_for("flow.wn.fused"));
+      if (de != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("flow_wn_fused: enqueue (%d)", (int)de);
+        clReleaseKernel(k_wn_fused); clReleaseMemObject(h_alt);
+        clReleaseMemObject(h); clReleaseMemObject(y_a); clReleaseMemObject(y_b);
+        clReleaseMemObject(skip_sum); return false;
+      }
+      // Ping-pong h buffers for next layer (last layer doesn't write h_out).
+      if (!is_last) {
+        cl_mem tmp = h_in_buf; h_in_buf = h_out_buf; h_out_buf = tmp;
+      }
+      if (stage_idx == 3 && li == 0) {
+        // peek skip_sum after layer 0 (acts/pre_acts no longer materialized)
+        dbg_gpu_stats("st3.gpu.fused.l0.skip_sum_after",
+                      queue, skip_sum, (size_t)kFlowChannels * T);
+      }
+      continue;
+    }
+
+    // ── Legacy 8-dispatch path ──────────────────────────────────────────
     // pre_acts = conv(h, in_layer, K=5, pad=2) → [2*C, T]
     cl_mem pre_acts = conv1d_gpu(cl_ctx, queue, h, w_in->weight, w_in->bias,
                                  kFlowChannels, 2 * kFlowChannels, T,
@@ -447,9 +600,6 @@ static bool coupling_inverse_stage_gpu(OpenCLContext& cl_ctx,
     }
 
     if (li < kWnLayers - 1) {
-      // Fused: split rs[2C,T] into (res, skip), add res to h, add skip to skip_sum,
-      // all in one kernel dispatch. Saves 2 dispatches × 12 layers = 24 dispatches
-      // × ~54 ms gap ≈ 1.3 s wall.
       if (!dispatch_split_rs_fold(cl_ctx, queue, rs, h, skip_sum, kFlowChannels, T)) {
         clReleaseMemObject(rs); clReleaseMemObject(h);
         clReleaseMemObject(y_a); clReleaseMemObject(y_b);
@@ -457,7 +607,6 @@ static bool coupling_inverse_stage_gpu(OpenCLContext& cl_ctx,
       }
       clReleaseMemObject(rs);
     } else {
-      // Last layer: rs is [C, T] skip-only.
       if (!dispatch_add_inplace(cl_ctx, queue, skip_sum, rs, kFlowChannels * T)) {
         clReleaseMemObject(rs); clReleaseMemObject(h); clReleaseMemObject(y_a);
         clReleaseMemObject(y_b); clReleaseMemObject(skip_sum); return false;
@@ -465,6 +614,8 @@ static bool coupling_inverse_stage_gpu(OpenCLContext& cl_ctx,
       clReleaseMemObject(rs);
     }
   }
+  if (k_wn_fused) clReleaseKernel(k_wn_fused);
+  if (h_alt) clReleaseMemObject(h_alt);
   clReleaseMemObject(h);
 
   if (stage_idx == 3) {

@@ -4,9 +4,11 @@ End-to-end picture of how an input string becomes a 16 kHz waveform on a Razr 20
 
 Upstream model: **`facebook/mms-tts-eng`** (VITS-family — non-autoregressive TTS with stochastic duration prediction + normalizing-flow latent + HiFi-GAN vocoder). 762 tensors total.
 
+**Current best RTF (long English, 7.81s audio):** **1.66**, achieved with `NNOPT_FLOW_GPU=1 NNOPT_FLOW_WN_FUSED=1 NNOPT_PREWARM=1` (default).
+
 ---
 
-## TL;DR — the pipeline in one picture
+## TL;DR — the pipeline in one picture (post-fused-WN landed)
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────────┐
@@ -18,7 +20,7 @@ Upstream model: **`facebook/mms-tts-eng`** (VITS-family — non-autoregressive T
                                      │ clCreateBuffer + COPY_HOST_PTR
                                      ▼
 ┌───────────────────────────────────────────────────────────────────────────────┐
-│                                  GPU (Adreno)                                  │
+│                                  GPU (Adreno) — stays on device end-to-end     │
 │                                                                                │
 │  ids_buf ──▶ [1] text_encoder ──▶ enc_hidden [T_chars, 192]                    │
 │                                   stats      [T_chars, 384]   (means‖logvars)  │
@@ -26,7 +28,7 @@ Upstream model: **`facebook/mms-tts-eng`** (VITS-family — non-autoregressive T
 │  enc_hidden ──▶ [2] duration_predictor ──▶ log_durations [T_chars]             │
 │                                                                                │
 └──────────────────────────────────┬─────────────────────────────────────────────┘
-                                   │ clEnqueueReadBuffer (BLOCKING)              ◀── sync point #1
+                                   │ clEnqueueReadBuffer (BLOCKING, T_chars × 2B) ◀── sync point #1  (essential — T_frames is needed to size everything downstream)
                                    ▼
 ┌───────────────────────────────────────────────────────────────────────────────┐
 │  CPU: [3] host_compute_durations: ceil(exp(log_durations) * length_scale)     │
@@ -41,41 +43,30 @@ Upstream model: **`facebook/mms-tts-eng`** (VITS-family — non-autoregressive T
 │  stats + durations ──▶ [4] length_regulator ──▶ expanded_stats                 │
 │                                                  [T_frames, 384]               │
 │                                                                                │
-│  split last dim:                                                               │
-│    expanded_stats ──▶ means  [T_frames, 192]                                   │
-│                  ╰──▶ logvars[T_frames, 192]                                   │
-└──────────────────────────────────┬─────────────────────────────────────────────┘
-                                   │ clEnqueueReadBuffer ×2 (means, logvars)     ◀── sync point #3
-                                   ▼
-┌───────────────────────────────────────────────────────────────────────────────┐
-│  CPU: transpose [T_frames, 192] → [192, T_frames] (channels-first)            │
-│  ──▶ clEnqueueWriteBuffer ×2 (BLOCKING)             ◀── sync point #4          │
-└──────────────────────────────────┬─────────────────────────────────────────────┘
-                                   ▼
-┌───────────────────────────────────────────────────────────────────────────────┐
-│                                  GPU                                           │
+│  split last dim:    expanded_stats ──▶ means    [T_frames, 192]                │
+│                                  ╰──▶ logvars   [T_frames, 192]                │
+│                                                                                │
+│  GPU transpose (kernels/transpose.cl::transpose_btc_to_ncl):                   │
+│       means, logvars ──▶ [192, T_frames]  (channels-first)                     │
+│                          (was 4 CL_TRUE round-trips — fixed in this session)   │
+│                                                                                │
 │  means + logvars + prior_noise ──▶ [5] sample_prior ──▶ z_prior [192,T_frames] │
-└──────────────────────────────────┬─────────────────────────────────────────────┘
-                                   │ clEnqueueReadBuffer (BLOCKING, full tensor) ◀── sync point #5
-                                   ▼
-┌───────────────────────────────────────────────────────────────────────────────┐
-│  CPU: [6] flow_inverse  (4 coupling flows, all running on host today)          │
-│       z_prior [192,T_frames] ──▶ z_latent [192,T_frames]                       │
-│  ──▶ clEnqueueWriteBuffer (BLOCKING)               ◀── sync point #6           │
-└──────────────────────────────────┬─────────────────────────────────────────────┘
-                                   ▼
-┌───────────────────────────────────────────────────────────────────────────────┐
-│                                  GPU                                           │
+│                                                                                │
+│  z_prior ──▶ [6] flow_inverse — DEFAULT: HOST. OPT-IN: GPU fused.              │
+│              with NNOPT_FLOW_GPU=1 + NNOPT_FLOW_WN_FUSED=1                     │
+│              (16 dispatches, not 160) ──▶ z_latent [192, T_frames]             │
 │                                                                                │
 │  z_latent ──▶ [7] vocoder (HiFi-GAN: conv_pre + 4 upsample stages + conv_post) │
 │              ──▶ waveform [T_frames * 256]                                     │
 └──────────────────────────────────┬─────────────────────────────────────────────┘
-                                   │ clEnqueueReadBuffer (BLOCKING, audio)       ◀── sync point #7
+                                   │ clEnqueueReadBuffer (BLOCKING, audio)       ◀── sync point #3
                                    ▼
                        CPU: int16 PCM ──▶ output.wav (16 kHz)
 ```
 
-Six host↔GPU round-trips on the critical path. Every one is a `CL_TRUE` blocking transfer — pipeline-killing.
+**With `NNOPT_FLOW_GPU=1 NNOPT_FLOW_WN_FUSED=1`: only 3 host↔GPU round-trips on the critical path** (was 7). All inter-stage data stays on the device. The remaining 3 round-trips are essential: (#1) duration readback for sizing, (#2) durations upload, (#3) final PCM readback.
+
+If `NNOPT_FLOW_GPU=0` (current default — host path is still faster for short utterances): two extra `CL_TRUE` round-trips around `flow_inverse` reappear (z_prior down to host, z_latent back up to GPU).
 
 ---
 
@@ -83,17 +74,17 @@ Six host↔GPU round-trips on the critical path. Every one is a `CL_TRUE` blocki
 
 All op functions live in `src/ops/` and are dispatched from `src/ops/backbone.cpp::tts_forward_graph()`.
 
-| # | Stage | File | Where it runs | Measured wall (eng-short) | Output shape |
+| # | Stage | File | Where it runs | Measured wall (eng-long 7.8s audio) | Output shape |
 |---|---|---|---|---|---|
-| 1 | `op_text_encoder` | `src/ops/text_encoder.cpp` | GPU | 0.20–1.70 s | hidden `[T_chars, 192]`, stats `[T_chars, 384]` |
-| 2 | `op_duration_predictor` | `src/ops/duration_predictor.cpp` | GPU | 0.02–0.20 s | log_durations `[T_chars]` |
-| 3 | `host_compute_durations` | `src/ops/backbone.cpp` | **CPU** | <0.01 s | int32 durations, scalar T_frames |
-| 4 | `op_length_regulator` | `src/ops/length_regulator.cpp` | GPU | 0.05 s | expanded `[T_frames, 384]` |
+| 1 | `op_text_encoder` | `src/ops/text_encoder.cpp` | GPU | 1.27 s | hidden `[T_chars, 192]`, stats `[T_chars, 384]` |
+| 2 | `op_duration_predictor` | `src/ops/duration_predictor.cpp` | GPU | 0.11 s | log_durations `[T_chars]` |
+| 3 | `host_compute_durations` | `src/ops/backbone.cpp` | **CPU (unavoidable)** | <0.01 s | int32 durations, scalar T_frames |
+| 4 | `op_length_regulator` + transpose | `src/ops/length_regulator.cpp`, `kernels/transpose.cl` | **GPU** (was CPU before this session) | 0.05 s | expanded `[T_frames, 384]`, transposed means/logvars `[192, T_frames]` |
 | 5 | `op_SamplePrior` | `src/ops/sample_prior.cpp` | GPU | 0.06 s | z_prior `[192, T_frames]` |
-| 6 | `op_FlowInverse` | `src/ops/flow_inverse.cpp` | **CPU (default)** | 0.77–6.60 s | z_latent `[192, T_frames]` |
-| 7 | `op_Vocoder` | `src/ops/vocoder.cpp` | GPU | **7.32–7.99 s** | int16 PCM `[T_frames * 256]` |
+| 6 | `op_FlowInverse` | `src/ops/flow_inverse.cpp` | **HOST default; GPU fused opt-in** | 3.10 s host / **3.77 s GPU fused** | z_latent `[192, T_frames]` |
+| 7 | `op_Vocoder` | `src/ops/vocoder.cpp` | GPU | **7.66–8.77 s** (faster when prev stage on GPU; no upload) | int16 PCM `[T_frames * 256]` |
 
-Vocoder + flow_inverse together are >90% of the wall on every measured run.
+Vocoder + flow_inverse together are still ~85% of the wall on long-audio runs. Vocoder alone is the largest remaining lever.
 
 ---
 
@@ -195,21 +186,19 @@ Each `leaky_im2col → hgemm` pair has a measured **75–226 ms gap** (CL_PROFIL
 
 ---
 
-## Host ↔ GPU sync points (the parallelism killers)
+## Host ↔ GPU sync points — current state
 
-These are the seven blocking transfers on the critical path. Every one stalls the GPU and the CPU at the same time.
-
-| # | Sync point | Direction | Reason | Roughly avoidable? |
+| # | Sync point | Direction | Status | Notes |
 |---|---|---|---|---|
-| 1 | After duration_predictor — `clEnqueueReadBuffer(log_durations, CL_TRUE)` | GPU → CPU | Need the actual numbers to compute `T_frames` and the per-char duration map | **Hard** — T_frames is needed to size all downstream buffers |
-| 2 | Before length_regulator — `clEnqueueWriteBuffer(durations, CL_TRUE)` | CPU → GPU | Upload host-computed int32 durations | Easy: make non-blocking |
-| 3 | After length_regulator — read means, logvars | GPU → CPU | Only because we transpose channels-last → channels-first on host | **Yes** — do the transpose in a GPU kernel |
-| 4 | Before sample_prior — write transposed buffers | CPU → GPU | Same | Same — fold into a GPU transpose |
-| 5 | After sample_prior — read z_prior | GPU → CPU | flow_inverse currently runs on CPU | **Big**: move flow_inverse to GPU and this whole stage vanishes |
-| 6 | Before vocoder — write z_latent | CPU → GPU | Same | Same |
-| 7 | After vocoder — read waveform | GPU → CPU | Need to write the WAV | Necessary; could be async + WAV write off the hot path |
+| 1 | After duration_predictor — `clEnqueueReadBuffer(log_durations, CL_TRUE)` | GPU → CPU | **Essential, kept** | T_frames needed to size downstream buffers |
+| 2 | Before length_regulator — `clEnqueueWriteBuffer(durations, CL_TRUE)` | CPU → GPU | **Essential, kept** | Tiny payload (T_chars ints) |
+| 3 | ~~After length_regulator — read means/logvars~~ | ~~GPU → CPU~~ | **REMOVED** | Replaced with `kernels/transpose.cl::transpose_btc_to_ncl` on GPU |
+| 4 | ~~Before sample_prior — write transposed buffers~~ | ~~CPU → GPU~~ | **REMOVED** | Same; transpose stays on GPU |
+| 5 | After sample_prior — read z_prior | GPU → CPU | **Conditional** — only when `NNOPT_FLOW_GPU=0` (host flow). When GPU flow on: gone. |
+| 6 | Before vocoder — write z_latent | CPU → GPU | **Conditional** — same as #5 |
+| 7 | After vocoder — read waveform | GPU → CPU | **Essential, kept** | Need int16 PCM on host to write WAV |
 
-**The cheapest wins come from killing #2, #3, #4** (host transpose is unnecessary) and from moving flow_inverse back onto GPU (#5, #6 disappear).
+**Net**: 7 sync points → **3 essential + 2 conditional** depending on flow_inverse placement. With `NNOPT_FLOW_GPU=1 NNOPT_FLOW_WN_FUSED=1` the inference is 3-sync-point on the critical path.
 
 ---
 
@@ -244,19 +233,27 @@ While the GPU runs the vocoder, the CPU is idle. While the CPU runs `flow_invers
 1. **Streaming chunked vocoder.** The vocoder is a fully convolutional stack — `z_latent[:, :t1]` can produce `wav[:, :t1*256]` if you tolerate edge effects at chunk boundaries (overlap-and-add). That lets you start playing audio while later frames are still being synthesized. Latency to first audible sample drops massively even if total wall is the same.
 2. **Pipelined utterance batching.** In `--interactive` mode (`say.sh`), the next utterance's text_encoder can run on the GPU concurrently with the previous utterance's PCM being written to disk. Modest CPU/GPU overlap.
 
-### C. Reduce dispatch count (the real lever)
+### C. Reduce dispatch count — landed wins this session
 
-This is not "parallelism" but it has the same effect — letting the GPU stay busy longer per host call.
-
-| Lever | What it changes | Realistic savings |
+| Lever | Status | Measured impact |
 |---|---|---|
-| Fuse the 3 ResBlock branches into one wider HGemm | 9 → 3 conv dispatches per stage × 4 stages = 24 fewer | ≈ 1.8 s |
-| Move flow_inverse to GPU as one fused kernel per coupling layer | Removes 6.6 s of host work + 2 sync points | ≈ 6.6 s |
-| `cl_qcom_recordable_queues` (Adreno guide §9.1.3) — record the vocoder kernel sequence once, replay with arg updates | Eliminates per-call `clSetKernelArg` + driver dispatch-prep cost | Unknown — purpose-built for this workload, theoretically large |
-| Pre-warm at model load (move first-call JIT + weight-image packs off the per-utterance path) | Already gated via `NNOPT_WARMUP=1` | ≈ 1.25 s on the 2nd-and-later utterance |
-| Fold the channels-last → channels-first transpose into a GPU kernel | Removes 2 sync points | small (~50 ms) but unblocks streaming |
+| GPU transpose of means/logvars (`kernels/transpose.cl`) | **LANDED** | 4 sync points removed; perf neutral but unblocks pipelining |
+| Pre-warm at load time (`NNOPT_PREWARM=1` default) | **LANDED** | −1.25 s vocoder wall on 2nd+ utterance, kills first-call CLBlast JIT |
+| Fused WaveNet residual kernel (`kernels/flow_wn_fused.cl`) | **LANDED, opt-in** | `NNOPT_FLOW_GPU=1 NNOPT_FLOW_WN_FUSED=1`: 16 dispatches instead of 64. Brought GPU flow from 6.79 s → 3.77 s on long Eng (still slightly above host's 3.10 s, but vocoder also speeds up because z_latent stays on GPU). Net: long-Eng RTF 1.75 → 1.66. |
+| `clFlush` insertion | TRIED, NO HELP | Measured 0.7× (slower). Default off, kept env-gated. |
+| `cl_qcom_recordable_queues` integration | TRIED, NO HELP | A separate microbench `src/bench_recordable.cpp` proved replay is 0.7× — driver dispatch isn't the bottleneck. Infrastructure left in `opencl_context.{h,cpp}` for future use. |
+| Image2D conv path (`conv1d_image_tiled_h4`) | TRIED, REGRESSED | ~10× slower per kernel than CLBlast HGemm on these shapes. Available behind `NNOPT_VOC_RESBLOCK_IMAGE=1`, default off. |
 
-The biggest single win on the table is **moving `flow_inverse` back to GPU** (`NNOPT_FLOW_GPU=1` exists but was tagged 8% slower in May 2026). With the dispatch-count fixes above, the GPU path should now win comfortably.
+### C′. Levers still on the table to hit RTF ≤ 1.0
+
+| Lever | Effort | Expected RTF (long Eng, 7.81s audio) |
+|---|---|---|
+| **w_in storage reorder `[c,ci,k]` → `[c,k,ci]` + vload_half4 in fused WN kernel** | 2–3 hours | ~1.36 (flow 3.77 → 1.5 s) |
+| **Vocoder ResBlock fusion** (3-conv-stack → 1 kernel per branch, same pattern as fused WN) | 1 day | ~1.23 (vocoder 7.66 → 4.4 s) |
+| **A + B together** | 1+ day | **≤ 1.0 ✓ realtime** |
+| Text_encoder transformer-layer fusion | 2-3 days | ~1.55 (TE 1.27 → 0.3 s) |
+| int8 weights for vocoder convs (LFM2-style script + new fp16-accumulator kernels) | 2-3 days | ~1.50 (uncertain — depends if BW is the bind) |
+| Streaming chunked vocoder | 0.5 day | RTF unchanged at 1.66 but first audio in ~500 ms — "realtime to the listener" |
 
 ---
 
@@ -323,26 +320,37 @@ The blocking transfers themselves are small (totals <300 KB). The cost isn't ban
 7. `src/ops/flow_inverse.cpp` — host path (default) at lines 502–579; GPU path remains gated by `NNOPT_FLOW_GPU=1`
 8. `src/ops/vocoder.cpp` — `op_Vocoder` is the giant function at line 1377; the per-stage loop is at line 1401
 
-## Profiling toggles available today
+## Env vars / toggles available today
 
-| Env var | Effect |
-|---|---|
-| `NNOPT_PROFILE=1` | per-kernel CL event profile + GPU timeline + top-10 gap ranking with bracketing kernel labels |
-| `NNOPT_VOC_SUBSTAGE=1` | host-side `clFinish`-bounded timing around each vocoder substage (conv_pre / each upsample / conv_post) — adds clFinish so total wall inflates; per-stage ratios remain valid |
-| `NNOPT_WARMUP=1` | discard-output warmup forward before the timed one. Saves ~1.25 s on the second-and-later utterances |
-| `NNOPT_FLOW_GPU=1` | flow_inverse on GPU (slower today by ~8%; revisit) |
-| `NNOPT_VERBOSE=1` | dump token IDs |
-| `NNOPT_TICKS=1` | emit `TTS_CHAR_TICK` / `TTS_PCM_CHUNK` markers for a host-side karaoke renderer |
+| Env var | Default | Effect |
+|---|---|---|
+| `NNOPT_PROFILE` | off | per-kernel CL event profile + GPU timeline + top-10 gap ranking with bracketing kernel labels |
+| `NNOPT_PREWARM` | **ON** | one synthetic forward at load time bakes JIT + caches → first utterance ~1.25 s faster |
+| `NNOPT_WARMUP` | off | extra discard-output warmup right before the user's input. Use when measuring steady-state with the actual input shape |
+| `NNOPT_FLOW_GPU` | off | flow_inverse on GPU. Slower than host alone on short utts unless paired with: |
+| `NNOPT_FLOW_WN_FUSED` | off | use `kernels/flow_wn_fused.cl` for each WaveNet layer. 64 → 16 dispatches inside flow. Combine with `NNOPT_FLOW_GPU=1` for the best long-audio RTF. |
+| `NNOPT_VOC_SUBSTAGE` | off | host-side `clFinish`-bounded timing around each vocoder substage (inflates total wall; per-stage ratios valid) |
+| `NNOPT_VOC_RESBLOCK_IMAGE` | off | `conv1d_image_tiled_h4` path for vocoder convs. Empirically ~10× slower per kernel on these shapes — keep off. |
+| `NNOPT_VOC_FLUSH`, `NNOPT_VOC_FLUSH_FINE` | off | clFlush per-conv or per-dispatch. Measured no-help on Adreno 620; left for future-driver A/B. |
+| `NNOPT_FLOW_HOST` | off (n/a when `NNOPT_FLOW_GPU=1`) | force host flow path |
+| `NNOPT_VERBOSE` | off | dump token IDs |
+| `NNOPT_TICKS` | off | emit `TTS_CHAR_TICK` / `TTS_PCM_CHUNK` markers for a host-side karaoke renderer |
+
+**Recommended invocation for best long-audio RTF today:**
+```
+NNOPT_FLOW_GPU=1 NNOPT_FLOW_WN_FUSED=1 ./mms_tts_eng_inference_fp16 "<text>" 1 --lang eng
+```
+(prewarm is already on by default)
 
 ---
 
-## Where to attack next, in priority order
+## Where to attack next — RTF 1.66 → ≤ 1.0
 
-1. **Move `flow_inverse` to GPU** — eliminates 6.6 s of host work + 2 sync points. The GPU implementation already exists behind `NNOPT_FLOW_GPU=1`; needs a fresh perf benchmark.
-2. **Fold means/logvars transpose into a GPU kernel** — removes sync points #3 and #4. Small wall savings but unblocks any future streaming.
-3. **Pre-warm at load time** — bake the `NNOPT_WARMUP=1` warmup behind the "load weights" banner so even the first utterance is fast.
-4. **Batch the 3 ResBlock branches into a single wider HGemm** — 24 fewer dispatches per inference, ~1.8 s saved.
-5. **Try `cl_qcom_recordable_queues`** (Adreno guide §9.1.3) — purpose-built for the vocoder's repeated kernel sequence; high theoretical ceiling but is a substantial refactor.
-6. **Chunked streaming vocoder** — even without changing total wall, drops perceived latency dramatically. Requires careful handling of conv-edge effects at chunk boundaries.
+1. **`w_in` storage reorder + vectorize the fused WN kernel inner loop** — kernel goes 221 ms → ~80 ms/call → flow_inverse 3.77 s → ~1.5 s. RTF ~1.36. 2–3 hours.
+2. **ResBlock conv fusion in vocoder** (same pattern as the fused WN kernel, applied to the 3-conv-stack inside each upsample stage) — vocoder 7.66 s → ~4.4 s. RTF ~1.23. 1 day.
+3. **(1) + (2) combined** — RTF ≤ 1.0. Realtime achieved on long English. The clean path to the goal.
+4. **Streaming chunked vocoder** — RTF unchanged but first audio plays in ~500 ms while the rest synthesizes. Realtime *experience* even without changing the wall. 0.5 day.
+5. **Text_encoder transformer-layer fusion** — secondary lever for short-utt RTF. Multi-day.
+6. **int8 weight quantization of vocoder** — uncertain gain, multi-day; revisit only after #1 + #2 if still not at realtime.
 
-Items 1, 2, 3 are all <1 day of work each and worth ~9 s of wall on the gate prompt combined. Items 4, 5, 6 are the harder long-tail wins.
+Items 1 + 2 are the ranked direct path. Item 4 is the alternative if you want "feels realtime" without writing more kernels.
