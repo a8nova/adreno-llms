@@ -50,6 +50,15 @@ public:
     // created by get_buffer().
     ~Weights();
 
+    // Hint the kernel that the page range backing `[offset, offset+nbytes)` in
+    // the mmap can be discarded — its contents are already copied into a GPU
+    // cl_mem or a host std::vector and the source bytes are no longer needed.
+    // Best-effort: failure is non-fatal (the data stays paged in). Page-aligned
+    // INWARD so partial pages straddling adjacent tensors aren't evicted.
+    // Marked const because logically it doesn't change the observable state
+    // of Weights (madvise is just a hint; the bytes remain accessible).
+    void advise_dontneed(size_t offset, size_t nbytes) const;
+
 private:
     // Memory-mapped weight file. We use mmap(MAP_PRIVATE) instead of
     // reading the full file into a vector because:

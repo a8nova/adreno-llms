@@ -337,6 +337,22 @@ static bool _nnopt_verify_buffer_roundtrip(
     return ok;
 }
 
+void Weights::advise_dontneed(size_t offset, size_t nbytes) const {
+    if (mapped_ == nullptr || nbytes == 0) return;
+    const long ps = sysconf(_SC_PAGESIZE);
+    if (ps <= 0) return;
+    const size_t page_sz = (size_t)ps;
+    const uintptr_t start = (uintptr_t)mapped_ + offset;
+    const uintptr_t end   = start + nbytes;
+    // Round INWARD: skip partial pages so a tensor whose region overlaps an
+    // adjacent tensor's page doesn't accidentally evict the neighbour.
+    const uintptr_t aligned_start = (start + page_sz - 1) & ~(page_sz - 1);
+    const uintptr_t aligned_end   =  end                   & ~(page_sz - 1);
+    if (aligned_end > aligned_start) {
+        (void)madvise((void*)aligned_start, aligned_end - aligned_start, MADV_DONTNEED);
+    }
+}
+
 cl_mem Weights::get_buffer(const std::string& key, bool optional) {
     auto it = tensors_.find(key);
     if (it == tensors_.end()) {
@@ -388,6 +404,10 @@ cl_mem Weights::get_buffer(const std::string& key, bool optional) {
         _nnopt_roundtrip_verified_once = true;
     }
 
+    // Weight bytes are now resident in the GPU cl_mem (CL_MEM_COPY_HOST_PTR
+    // copied them at clCreateBuffer). Drop the mmap'd source pages so they
+    // don't double-count against host RSS. Same pattern as smolvlm's port.
+    advise_dontneed(meta.offset, meta.size_bytes);
     return meta.buffer;
 }
 
@@ -466,6 +486,8 @@ std::vector<float> Weights::get_host_vec(const std::string& key) const {
         const float* p = reinterpret_cast<const float*>(base);
         std::memcpy(out.data(), p, meta.num_elements * sizeof(float));
     }
+    // Bytes are now in `out` (host heap). Drop the source mmap pages.
+    advise_dontneed(meta.offset, meta.size_bytes);
     return out;
 }
 

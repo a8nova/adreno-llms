@@ -10,39 +10,55 @@
 
 // ── cl_qcom_recordable_queues extension types (Adreno OpenCL Guide §9.1.3).
 //   Not in stock cl_ext.h; declared inline so we can dlsym the entry points
-//   at runtime. Same declarations as LFM2-5-350m/src/opencl_context.h, which
-//   already validated this works on Adreno 619 v2 (SM6375, same driver
-//   vintage as our SD765G / Adreno 620).
+//   at runtime. Struct layouts match MNN's vendored cl_ext_qcom.h (the only
+//   public source of these layouts — Qualcomm's official header isn't in
+//   Khronos's repo).
+//
+//   The CRITICAL detail every prior attempt has gotten wrong: the first
+//   field of each per-replay-override struct is `cl_uint dispatch_index`,
+//   NOT a cl_kernel pointer. dispatch_index is the 0-based index into the
+//   recorded sequence (the Nth clEnqueueNDRangeKernel call you made during
+//   recording). A wrong first field returns CL_INVALID_OPERATION (-59).
 typedef void* cl_recording_qcom;
+
 struct cl_array_arg_qcom {
-    cl_kernel    kernel;
-    cl_uint      arg_indx;
+    cl_uint      dispatch_index;
+    cl_uint      arg_index;
     size_t       arg_size;
     const void*  arg_value;
 };
-struct cl_array_kernel_exec_info_qcom {
-    cl_kernel       kernel;
-    cl_uint         indx;
-    size_t          param_value_size;
-    const void*     param_value;
+struct cl_workgroup_qcom {
+    cl_uint       dispatch_index;
+    const size_t* workgroup_size;
 };
+struct cl_offset_qcom {
+    cl_uint dispatch_index;
+    size_t  offsets[3];
+};
+
 typedef cl_recording_qcom (CL_API_CALL *clNewRecordingQCOM_fn)(cl_command_queue, cl_int*);
 typedef cl_int (CL_API_CALL *clEndRecordingQCOM_fn)(cl_recording_qcom);
 typedef cl_int (CL_API_CALL *clReleaseRecordingQCOM_fn)(cl_recording_qcom);
 typedef cl_int (CL_API_CALL *clEnqueueRecordingQCOM_fn)(
     cl_command_queue queue,
     cl_recording_qcom recording,
-    size_t num_args,
-    const cl_array_arg_qcom* args,
-    size_t num_global_offsets,
-    const cl_array_kernel_exec_info_qcom* global_offsets,
-    size_t num_global_work_sizes,
-    const cl_array_kernel_exec_info_qcom* global_work_sizes,
-    size_t num_local_work_sizes,
-    const cl_array_kernel_exec_info_qcom* local_work_sizes,
+    size_t num_args,            const cl_array_arg_qcom*  args,
+    size_t num_global_offsets,  const cl_offset_qcom*     global_offsets,
+    size_t num_global_wg_sizes, const cl_workgroup_qcom*  global_work_sizes,
+    size_t num_local_wg_sizes,  const cl_workgroup_qcom*  local_work_sizes,
     cl_uint num_events_in_wait_list,
     const cl_event* event_wait_list,
     cl_event* event);
+
+// CL_QUEUE_RECORDABLE_QCOM. Per Adreno guide §9.1.3, this is `(1u << 30)`.
+// MUST be passed ALONE in cl_queue_properties — OR'ing with
+// CL_QUEUE_PROFILING_ENABLE returns CL_INVALID_VALUE (-30).
+//
+// CL_QUEUE_PROPERTIES = 0x1093 — the property key name in
+// clCreateCommandQueueWithProperties.
+constexpr cl_command_queue_properties NNOPT_CL_QUEUE_RECORDABLE_QCOM =
+    (cl_command_queue_properties)1 << 30;
+constexpr cl_uint NNOPT_CL_QUEUE_PROPERTIES = 0x1093;
 
 class OpenCLContext {
 public:

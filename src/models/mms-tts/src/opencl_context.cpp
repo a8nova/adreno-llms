@@ -107,6 +107,44 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
         fprintf(stderr, "  recordable_qs   %s\n", record_fns_loaded_ ? "yes" : "no");
     }
 
+    // Phase A smoke test: when NNOPT_RECORD=1, attempt full create/new/end/release
+    // cycle to verify the entire recordable-queue infrastructure works end-to-end.
+    // Prints the canonical "ENABLED" line from the porting guide on success so
+    // we have a hard go/no-go before doing the real refactor. No-op when unset.
+    if (record_fns_loaded_) {
+        const char* rec_env = std::getenv("NNOPT_RECORD");
+        if (rec_env && rec_env[0] == '1') {
+            char ext_buf[8192] = {0};
+            clGetDeviceInfo(device_, CL_DEVICE_EXTENSIONS, sizeof(ext_buf), ext_buf, nullptr);
+            const bool has_ext = (std::strstr(ext_buf, "cl_qcom_recordable_queues") != nullptr);
+            if (!has_ext) {
+                fprintf(stderr, "[opencl] NNOPT_RECORD=1 but cl_qcom_recordable_queues "
+                                "NOT in EXTENSIONS — recording disabled\n");
+            } else {
+                cl_command_queue rec_q = create_recordable_queue();
+                if (!rec_q) {
+                    fprintf(stderr, "[opencl] recordable queue creation FAILED\n");
+                } else {
+                    cl_recording_qcom rec = new_recording(rec_q);
+                    if (!rec) {
+                        fprintf(stderr, "[opencl] clNewRecordingQCOM returned null\n");
+                    } else {
+                        cl_int e_end = end_recording(rec);
+                        cl_int e_rel = release_recording(rec);
+                        if (e_end == CL_SUCCESS && e_rel == CL_SUCCESS) {
+                            fprintf(stderr, "[opencl] cl_qcom_recordable_queues ENABLED "
+                                            "(live_q + recordable_q created)\n");
+                        } else {
+                            fprintf(stderr, "[opencl] end=%d release=%d on empty recording\n",
+                                    (int)e_end, (int)e_rel);
+                        }
+                    }
+                    clReleaseCommandQueue(rec_q);
+                }
+            }
+        }
+    }
+
     // One-shot device banner so the demo shows exactly which OpenCL stack is
     // running. Mirrors the info nnopt's last_probe.json captures host-side, but
     // queried live from the actual device this binary connected to. Suppress
@@ -268,15 +306,37 @@ size_t OpenCLContext::local_mem_size() const {
 }
 
 // ── cl_qcom_recordable_queues helpers ────────────────────────────────────────
-// Lifted from lfm2-5-350m/src/opencl_context.cpp:259-297 — same A6xx driver
-// family. The recordable bit is (cl_command_queue_properties)1 << 30.
+// Per Adreno OpenCL guide §9.1.3 and the cross-port porting guide
+// (/Users/alazarshenkute/Downloads/adreno-recordable-queues-porting-guide.md):
+//   • Legacy clCreateCommandQueue with RECORDABLE_BIT returns -30 on Adreno.
+//     Must use the OpenCL 2.0 clCreateCommandQueueWithProperties API.
+//   • That API isn't in our CL 1.2 headers — dlsym it from RTLD_DEFAULT.
+//   • RECORDABLE_BIT must be passed ALONE; OR'ing CL_QUEUE_PROFILING_ENABLE
+//     returns -30.
 cl_command_queue OpenCLContext::create_recordable_queue() {
     if (!record_fns_loaded_) return nullptr;
-    constexpr cl_command_queue_properties RECORD_BIT = (cl_command_queue_properties)1 << 30;
+
+    typedef cl_command_queue (CL_API_CALL *fn_create_q_t)(
+        cl_context, cl_device_id, const cl_ulong*, cl_int*);
+    static fn_create_q_t fn_create_q = (fn_create_q_t)
+        dlsym(RTLD_DEFAULT, "clCreateCommandQueueWithProperties");
+    if (!fn_create_q) {
+        fprintf(stderr, "RecordQ: dlsym(clCreateCommandQueueWithProperties) returned null\n");
+        return nullptr;
+    }
+
+    // {CL_QUEUE_PROPERTIES, RECORDABLE_BIT, 0} — terminator is a single 0.
+    // PROFILING is intentionally absent (incompatible with RECORDABLE on Adreno).
+    const cl_ulong props[] = {
+        (cl_ulong)NNOPT_CL_QUEUE_PROPERTIES,
+        (cl_ulong)NNOPT_CL_QUEUE_RECORDABLE_QCOM,
+        0
+    };
     cl_int err = CL_SUCCESS;
-    cl_command_queue q = clCreateCommandQueue(context_, device_, RECORD_BIT, &err);
+    cl_command_queue q = fn_create_q(context_, device_, props, &err);
     if (err != CL_SUCCESS || !q) {
-        fprintf(stderr, "RecordQ: clCreateCommandQueue(RECORD_BIT) failed err=%d\n", (int)err);
+        fprintf(stderr, "RecordQ: clCreateCommandQueueWithProperties(RECORDABLE) failed err=%d\n",
+                (int)err);
         return nullptr;
     }
     return q;
