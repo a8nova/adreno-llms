@@ -309,3 +309,125 @@ extern "C" cl_mem op_LlamaMLP_with_residual(OpenCLContext& cl_ctx,
                      intermediate_size, gate_w, up_w, down_w);
 #endif
 }
+
+// R6.5: fused rmsnorm_post + residual_add + MLP. Decode-only (rows==1, fp16).
+// Falls back to the conventional path (caller runs rmsnorm separately) when
+// not eligible. The fused kernel folds the rmsnorm_post dispatch into gate_up.
+extern "C" cl_mem op_LlamaMLP_with_residual_and_rmsnorm(OpenCLContext& cl_ctx,
+                                                        Weights& weights,
+                                                        cl_command_queue queue,
+                                                        cl_mem attn_out_raw,
+                                                        cl_mem hidden_states_residual,
+                                                        int rows,
+                                                        int hidden_size,
+                                                        int intermediate_size,
+                                                        const char* post_norm_w,
+                                                        float rms_eps,
+                                                        const char* gate_w,
+                                                        const char* up_w,
+                                                        const char* down_w) {
+  if (!ensure_initialized(cl_ctx)) return nullptr;
+  if (!queue || !attn_out_raw || !hidden_states_residual) {
+    NNOPT_ERROR("op_LlamaMLP_with_residual_and_rmsnorm: null args");
+    return nullptr;
+  }
+
+#ifdef NNOPT_USE_FP16
+  if (rows != 1) {
+    // Prefill: not in the fused path. Caller should run rmsnorm + MLP separately.
+    NNOPT_ERROR("op_LlamaMLP_with_residual_and_rmsnorm called with rows>1; not supported");
+    return nullptr;
+  }
+
+  cl_mem gamma_post = weights.get_buffer(std::string(post_norm_w));
+  cl_mem W_gate = weights.get_buffer(std::string(gate_w));
+  cl_mem W_up   = weights.get_buffer(std::string(up_w));
+  cl_mem W_down = weights.get_buffer(std::string(down_w));
+  if (!gamma_post || !W_gate || !W_up || !W_down) {
+    NNOPT_ERROR("op_LlamaMLP_with_residual_and_rmsnorm: missing weight");
+    return nullptr;
+  }
+
+  cl_context ctx_h = cl_ctx.context();
+  cl_int err = CL_SUCCESS;
+
+  // Side buffer for the residual sum (attn_out + hidden_states) that the
+  // downstream fused down+residual consumes. Allocated per call (cheap on
+  // Adreno; persistence was tried & flat in #18a).
+  cl_mem sum_buf = clCreateBuffer(ctx_h, CL_MEM_READ_WRITE,
+                                  (size_t)hidden_size * sizeof(nnopt_storage_t),
+                                  nullptr, &err);
+  if (!sum_buf) {
+    NNOPT_ERROR("op_LlamaMLP_with_residual_and_rmsnorm: alloc sum_buf failed");
+    return nullptr;
+  }
+
+  cl_mem gate = clCreateBuffer(ctx_h, CL_MEM_READ_WRITE,
+                               (size_t)intermediate_size * sizeof(nnopt_storage_t),
+                               nullptr, &err);
+  if (!gate) {
+    NNOPT_ERROR("op_LlamaMLP_with_residual_and_rmsnorm: alloc gate failed");
+    clReleaseMemObject(sum_buf);
+    return nullptr;
+  }
+
+  cl_mem W_gate_img = get_or_create_weight_image(ctx_h, queue, W_gate,
+                                                 intermediate_size, hidden_size);
+  cl_mem W_up_img   = get_or_create_weight_image(ctx_h, queue, W_up,
+                                                 intermediate_size, hidden_size);
+
+  NNOPT_PROFILE_BEGIN(queue, "26a_mlp_gate_up");
+  bool gate_up_ok = false;
+  if (W_gate_img && W_up_img) {
+    gate_up_ok = gemv_m1_rmsnorm_residual_image_swiglu_fp16_dispatch(
+        queue, intermediate_size, hidden_size, rms_eps,
+        attn_out_raw, hidden_states_residual, gamma_post,
+        W_gate_img, W_up_img, gate, sum_buf);
+  }
+  NNOPT_PROFILE_END(queue, "26a_mlp_gate_up");
+  if (!gate_up_ok) {
+    NNOPT_ERROR("op_LlamaMLP_with_residual_and_rmsnorm: fused rmsnorm+swiglu failed");
+    clReleaseMemObject(gate);
+    clReleaseMemObject(sum_buf);
+    return nullptr;
+  }
+
+  cl_mem out = clCreateBuffer(ctx_h, CL_MEM_READ_WRITE,
+                              (size_t)hidden_size * sizeof(nnopt_storage_t),
+                              nullptr, &err);
+  if (!out) {
+    NNOPT_ERROR("op_LlamaMLP_with_residual_and_rmsnorm: alloc out failed");
+    clReleaseMemObject(gate);
+    clReleaseMemObject(sum_buf);
+    return nullptr;
+  }
+
+  cl_mem W_down_img = get_or_create_weight_image(ctx_h, queue, W_down,
+                                                 hidden_size, intermediate_size);
+  NNOPT_PROFILE_BEGIN(queue, "26c_mlp_down");
+  bool ok = false;
+  if (W_down_img) {
+    ok = gemv_m1_image_residual_fp16_dispatch(queue, hidden_size, intermediate_size,
+                                              gate, W_down_img, sum_buf, out);
+  }
+  if (!ok) {
+    ok = gemv_m1_residual_fp16_dispatch(queue, hidden_size, intermediate_size,
+                                        gate, W_down, sum_buf, out);
+  }
+  NNOPT_PROFILE_END(queue, "26c_mlp_down");
+  clReleaseMemObject(gate);
+  clReleaseMemObject(sum_buf);
+  if (!ok) {
+    NNOPT_ERROR("op_LlamaMLP_with_residual_and_rmsnorm: down+residual failed");
+    clReleaseMemObject(out);
+    return nullptr;
+  }
+  return out;
+#else
+  (void)attn_out_raw; (void)hidden_states_residual; (void)post_norm_w; (void)rms_eps;
+  (void)rows; (void)hidden_size; (void)intermediate_size;
+  (void)gate_w; (void)up_w; (void)down_w;
+  NNOPT_ERROR("op_LlamaMLP_with_residual_and_rmsnorm: fp32 build — not implemented");
+  return nullptr;
+#endif
+}

@@ -56,6 +56,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <chrono>
 
 // Read prompt input ids from a binary file (int32 little-endian) when the
 // caller passes \`--token-ids /path/to/test_input_ids.bin\`. This path is
@@ -86,6 +87,7 @@ int main(int argc, char** argv) {
     std::string token_ids_path;
 
     std::string image_path;  // --image <file.jpg|.png> for VLM inference
+    bool interactive_mode = false;  // --interactive: REPL with /image, /reset, /quit + multi-turn KV reuse
 
     SamplerConfig sampler_config;
     sampler_config.temperature = 0.0f;          // greedy by default — matches PyTorch reference
@@ -103,6 +105,8 @@ int main(int argc, char** argv) {
             } else if (a == "--image" && i + 1 < argc) {
                 image_path = argv[++i];
 
+            } else if (a == "--interactive") {
+                interactive_mode = true;
             } else if (a == "--temperature" && i + 1 < argc) {
                 sampler_config.temperature = std::stof(argv[++i]);
             } else if (a == "--top-k" && i + 1 < argc) {
@@ -124,12 +128,18 @@ int main(int argc, char** argv) {
 
     BenchmarkTimer& bench = BenchmarkTimer::instance();
     bench.mark_inference_start();
+    const auto t_start = std::chrono::steady_clock::now();
+    auto elapsed_ms = [&](const std::chrono::steady_clock::time_point& t) {
+        return std::chrono::duration<double, std::milli>(t - t_start).count();
+    };
 
     OpenCLContext cl_ctx;
     if (!cl_ctx.initialize()) {
         NNOPT_ERROR("OpenCL init failed");
         return 1;
     }
+    const auto t_cl_init = std::chrono::steady_clock::now();
+    std::fprintf(stderr, "  startup         opencl_init   %.0f ms\n", elapsed_ms(t_cl_init));
 
     // Tokenizer first — its eos id feeds into sampler config below.
     Tokenizer tok;
@@ -155,6 +165,10 @@ int main(int argc, char** argv) {
         NNOPT_ERROR_FMT("weights load failed: %s", nnopt_weights_bin);
         return 1;
     }
+    const auto t_weights = std::chrono::steady_clock::now();
+    std::fprintf(stderr, "  startup         weights_load  %.0f ms (cumulative %.0f ms)\n",
+                 std::chrono::duration<double, std::milli>(t_weights - t_cl_init).count(),
+                 elapsed_ms(t_weights));
 
     Sampler sampler(sampler_config);
 
@@ -162,6 +176,143 @@ int main(int argc, char** argv) {
     if (!model.initialize()) {
         NNOPT_ERROR("Model::initialize() failed — see prior NNOPT_ERROR for the layer that failed");
         return 1;
+    }
+
+    // ── Interactive REPL ──
+    // `--interactive` opens a stdin-driven loop with three commands:
+    //   /image <path>   load image, run vision pipeline, reset conversation
+    //   /reset          drop image + KV state (logically — next prefill at start_pos=0 overwrites)
+    //   /quit (or EOF or blank line)  exit
+    // Plain text lines are tokenized as a follow-up user turn that reuses the
+    // existing KV cache (KV_CACHE_MAX_LEN=2048 in llama_sdpa_attention.cpp).
+    // Token-budget guard exits the turn early if total_pos approaches the cap.
+    if (interactive_mode) {
+        if (!tokenizer_ok) {
+            NNOPT_ERROR("--interactive needs weights/tokenizer_vocab.bin");
+            return 1;
+        }
+
+        // Prewarm: compile every decode kernel + warm L1 BEFORE the first turn
+        // so first-prefill latency reflects steady-state, not cold compile.
+        // Single <|im_start|> token at start_pos=0 — overwritten by turn 1.
+        (void)model.forward(std::vector<int32_t>{1}, 0);
+        model.reset_conversation();
+
+        constexpr int32_t END_OF_UTTERANCE = 49279;
+        constexpr int     MAX_DECODE_PER_TURN = 128;
+        constexpr int     KV_CACHE_LIMIT = 2048;   // matches llama_sdpa_attention.cpp:43
+        constexpr int     KV_HEADROOM = 256;
+
+        int  total_pos = 0;
+        bool image_loaded = false;
+        int  turn = 0;
+
+        std::fprintf(stderr,
+                     "ready. commands:\n"
+                     "  /image <path>   load an image (resets conversation)\n"
+                     "  /reset          start a fresh conversation\n"
+                     "  /quit           exit (or Ctrl-D / blank line)\n");
+        std::fflush(stderr);
+
+        std::string line;
+        while (true) {
+            std::fprintf(stderr, "\n> "); std::fflush(stderr);
+            if (!std::getline(std::cin, line)) break;
+            if (line.empty()) break;
+
+            // /image <path>
+            if (line.rfind("/image ", 0) == 0 || line.rfind("/image\t", 0) == 0) {
+                std::string path = line.substr(7);
+                while (!path.empty() &&
+                       (path.front() == ' ' || path.front() == '\t')) path.erase(path.begin());
+                while (!path.empty() &&
+                       (path.back() == ' ' || path.back() == '\t' || path.back() == '\r')) path.pop_back();
+                if (path.empty()) {
+                    std::fprintf(stderr, "usage: /image <path>\n"); continue;
+                }
+                ImageBufferU8 img;
+                if (!load_image_rgb_u8(path, img)) {
+                    std::fprintf(stderr, "failed to load %s: %s\n",
+                                 path.c_str(), img.error.c_str());
+                    continue;
+                }
+                model.reset_conversation();
+                total_pos = 0;
+                image_loaded = false;
+                if (!model.set_image(img.data, img.W, img.H)) {
+                    std::fprintf(stderr, "set_image failed for %s\n", path.c_str());
+                    continue;
+                }
+                image_loaded = true;
+                std::fprintf(stderr, "▶ loaded %s (%dx%d)\n", path.c_str(), img.W, img.H);
+                std::fflush(stderr);
+                continue;
+            }
+
+            if (line == "/reset") {
+                model.reset_conversation();
+                total_pos = 0;
+                image_loaded = false;
+                std::fprintf(stderr, "▶ reset\n");
+                continue;
+            }
+            if (line == "/quit" || line == "/exit") break;
+
+            if (total_pos > KV_CACHE_LIMIT - KV_HEADROOM) {
+                std::fprintf(stderr,
+                             "context full (pos=%d, max=%d). /reset to continue.\n",
+                             total_pos, KV_CACHE_LIMIT);
+                continue;
+            }
+
+            std::vector<int32_t> ids =
+                (total_pos == 0)
+                ? tok.build_vlm_prompt(image_loaded, line)
+                : tok.build_vlm_followup_user_turn(line);
+
+            if (ids.empty()) {
+                std::fprintf(stderr, "tokenize produced no ids — try different text\n");
+                continue;
+            }
+
+            auto t_prefill_0 = std::chrono::steady_clock::now();
+            std::vector<float> logits = model.forward(ids, total_pos);
+            auto t_prefill_1 = std::chrono::steady_clock::now();
+
+            std::vector<int32_t> generated;
+            generated.reserve(MAX_DECODE_PER_TURN);
+
+            auto t_decode_0 = std::chrono::steady_clock::now();
+            for (int step = 0; step < MAX_DECODE_PER_TURN; ++step) {
+                int next = sampler.sample(logits, generated);
+                bool stop_eos = (sampler_config.eos_token_id >= 0 &&
+                                 next == sampler_config.eos_token_id);
+                bool stop_eou = (next == END_OF_UTTERANCE);
+                if (stop_eos || stop_eou) break;
+                generated.push_back(next);
+                std::cout << tok.decode(std::vector<int32_t>{next}) << std::flush;
+                int start_pos = total_pos + (int)ids.size() + step;
+                logits = model.forward(std::vector<int32_t>{next}, start_pos);
+            }
+            auto t_decode_1 = std::chrono::steady_clock::now();
+            std::cout << std::endl;
+
+            total_pos += (int)ids.size() + (int)generated.size();
+            turn++;
+
+            double prefill_s = std::chrono::duration<double>(t_prefill_1 - t_prefill_0).count();
+            double decode_s  = std::chrono::duration<double>(t_decode_1  - t_decode_0).count();
+            double prefill_tps = prefill_s > 0 ? (double)ids.size()        / prefill_s : 0.0;
+            double decode_tps  = decode_s  > 0 ? (double)generated.size()  / decode_s  : 0.0;
+            std::fprintf(stderr,
+                         "✓ turn %d  prefill %zu tok %.2fs (%.2f tok/s)  "
+                         "decode %zu tok %.2fs (%.2f tok/s)  ctx=%d\n",
+                         turn, ids.size(), prefill_s, prefill_tps,
+                         generated.size(), decode_s, decode_tps, total_pos);
+            std::fflush(stderr);
+        }
+        std::fprintf(stderr, "\nbye.\n");
+        return 0;
     }
 
     // VLM input pipeline: when --image is provided, decode RGB8 bytes via
@@ -183,16 +334,18 @@ int main(int argc, char** argv) {
                             image_path.c_str(), img.error.c_str());
             return 1;
         }
-                std::cerr << "[main] loaded image " << image_path
-                  << " (" << img.W << "x" << img.H << ", "
-                  << img.data.size() << " bytes RGB)" << std::endl;
+        std::cerr << "  image           " << image_path
+                  << " (" << img.W << "x" << img.H << ")" << std::endl;
 
+        const auto t_before_set_image = std::chrono::steady_clock::now();
         if (!model.set_image(img.data, img.W, img.H)) {
             NNOPT_ERROR("Model::set_image failed");
             return 1;
         }
-
-
+        const auto t_after_set_image = std::chrono::steady_clock::now();
+        std::fprintf(stderr, "  startup         vision_pipe   %.0f ms (cumulative %.0f ms)\n",
+                     std::chrono::duration<double, std::milli>(t_after_set_image - t_before_set_image).count(),
+                     elapsed_ms(t_after_set_image));
     }
 
 
@@ -221,6 +374,16 @@ int main(int argc, char** argv) {
         prompt_ids.assign(encoded.begin(), encoded.end());
     }
     const size_t prompt_len = prompt_ids.size();
+    // NNOPT_DUMP_PROMPT_IDS=1 prints the on-device tokenization for parity
+    // checks against HF's processor (catches GPT-2 byte-level / chat-template
+    // bugs that would otherwise present as model hallucinations).
+    if (std::getenv("NNOPT_DUMP_PROMPT_IDS")) {
+        std::fprintf(stderr, "PROMPT_IDS (%zu): [", prompt_len);
+        for (size_t i = 0; i < prompt_len; ++i) {
+            std::fprintf(stderr, "%d%s", prompt_ids[i], (i+1<prompt_len)?", ":"");
+        }
+        std::fprintf(stderr, "]\n");
+    }
     std::vector<float> wav_samples;
     std::vector<float> raw_out;
 

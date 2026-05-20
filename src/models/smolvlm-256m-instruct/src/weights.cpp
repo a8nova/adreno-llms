@@ -2,6 +2,7 @@
 #include "debug_utils.h"
 #include <fstream>
 #include <iostream>
+#include <cstdio>    // std::fprintf for the load banner
 #include <cstdlib>   // std::getenv (weight roundtrip mode)
 #include <cstring>
 #include <sstream>
@@ -206,8 +207,12 @@ bool Weights::load(const std::string& bin_path, const std::string& meta_path, cl
         std::ifstream bin_file(bin_path, std::ios::binary);
         bin_file.read(reinterpret_cast<char*>(mapped_), mapped_size_);
     } else {
-        // Tensor reads are sparse and order-independent — tell the kernel.
-        madvise(mapped_, mapped_size_, MADV_RANDOM);
+        // First inference touches every tensor (vision + LLM = ~330MB at fp16),
+        // so async-prefetch the whole mmap from flash in the background while
+        // OpenCL/kernel-cache init runs. Overlaps a 1-2s flash read with
+        // ~1s of OpenCL setup → first set_image starts with pages already
+        // resident. Falls back to demand paging if WILLNEED isn't honored.
+        madvise(mapped_, mapped_size_, MADV_WILLNEED);
     }
     NNOPT_CHECKPOINT("weights: mmap complete (resident set will grow on demand)");
 
@@ -245,7 +250,8 @@ bool Weights::load(const std::string& bin_path, const std::string& meta_path, cl
         tensors_[name] = meta;
     }
 
-    std::cerr << "Loaded " << mapped_size_ << " bytes, " << tensors_.size() << " tensors" << std::endl;
+    std::fprintf(stderr, "  weights         %.0f MB, %zu tensors\n",
+                 (double)mapped_size_ / (1024.0 * 1024.0), tensors_.size());
     NNOPT_CHECKPOINT_FMT("weights: parsed metadata for %zu tensors (no GPU buffers yet)",
                          tensors_.size());
 

@@ -493,10 +493,35 @@ std::vector<float> model_forward_graph(OpenCLContext& cl_ctx,
         }
 
         NNOPT_PROFILE_BEGIN(queue, "40_lm_head");
+#ifdef NNOPT_USE_FP16
+        // R6.2: decode lm_head through image2d_array (49280 rows exceeds
+        // CL_DEVICE_IMAGE2D_MAX_HEIGHT=16384; 4 slices). At long-prompt seq_k
+        // attn_out & gate_up dominated; at short-prompt this single GEMV is
+        // ~13% of the per-token wallclock and the only big weight still
+        // routed through CLBlast Hgemm (which is dispatch-bound at M=1).
+        bool lm_head_done = false;
+        if (seq_len == 1) {
+            auto wia = get_or_create_weight_image_array(cl_ctx.context(), queue,
+                                                       W, vocab, hidden);
+            if (wia.image) {
+                if (gemv_m1_image_array_fp16_dispatch(queue, vocab, hidden, wia.slice_h,
+                                                     normed_final, wia.image, logits_all)) {
+                    lm_head_done = true;
+                }
+            }
+        }
+        if (!lm_head_done) {
+            if (!pytorch_linear(queue, /*M=*/seq_len, /*N=*/vocab, /*K=*/hidden, normed_final, W, logits_all)) {
+                NNOPT_ERROR("model_forward_graph: pytorch_linear lm_head failed");
+                return fail();
+            }
+        }
+#else
         if (!pytorch_linear(queue, /*M=*/seq_len, /*N=*/vocab, /*K=*/hidden, normed_final, W, logits_all)) {
             NNOPT_ERROR("model_forward_graph: pytorch_linear lm_head failed");
             return fail();
         }
+#endif
         NNOPT_PROFILE_END(queue, "40_lm_head");
         NNOPT_LAYER_CHECK("lm_head", queue, logits_all, (size_t)seq_len * (size_t)vocab);
     }

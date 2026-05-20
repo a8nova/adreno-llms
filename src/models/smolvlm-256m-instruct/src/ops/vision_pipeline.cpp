@@ -13,6 +13,9 @@
 #include <vector>
 #include <cstdint>
 #include <string>
+#include <cstdlib>
+#include <fstream>
+#include <cmath>
 
 namespace {
 
@@ -238,6 +241,43 @@ bool vision_pipeline_forward(
     }
   }
 
+  // ── BISECT: optionally swap in HF reference tensors ──
+  // NNOPT_BISECT_PIXEL_VALUES=1 → load fixtures/sample_pixel_values_chw.bin
+  //                               (3*512*512 fp32) into resized_f32, skipping
+  //                               resize + normalize. Tests preprocessing.
+  // NNOPT_BISECT_VISION_HIDDEN=1 → after computing vision_hidden, OVERWRITE
+  //                                with fixtures/sample_vision_hidden.bin
+  //                                (1024*768 fp32). Tests vision encoder.
+  const char* bisect_pv = std::getenv("NNOPT_BISECT_PIXEL_VALUES");
+  if (bisect_pv && bisect_pv[0] == '1') {
+    const char* path = "fixtures/sample_pixel_values_chw.bin";
+    std::ifstream f(path, std::ios::binary);
+    if (f) {
+      const size_t n = (size_t)C * (size_t)outH * (size_t)outW;
+      std::vector<float> host(n);
+      f.read(reinterpret_cast<char*>(host.data()), n * sizeof(float));
+      f.close();
+#ifdef NNOPT_USE_FP16
+      std::vector<nnopt_storage_t> half_buf(n);
+      for (size_t i = 0; i < n; ++i) half_buf[i] = (nnopt_storage_t)nnopt_f32_to_f16(host[i]);
+      cl_int werr = clEnqueueWriteBuffer(queue, resized_f32, CL_TRUE, 0,
+                                         n * sizeof(nnopt_storage_t),
+                                         half_buf.data(), 0, nullptr, nullptr);
+#else
+      cl_int werr = clEnqueueWriteBuffer(queue, resized_f32, CL_TRUE, 0,
+                                         n * sizeof(float),
+                                         host.data(), 0, nullptr, nullptr);
+#endif
+      if (werr != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("BISECT pixel_values write failed (%d)", (int)werr);
+      } else {
+        std::fprintf(stderr, "[BISECT] loaded HF pixel_values from %s — skipping resize+normalize\n", path);
+      }
+    } else {
+      std::fprintf(stderr, "[BISECT] NNOPT_BISECT_PIXEL_VALUES=1 but %s missing\n", path);
+    }
+  }
+
   // ── Vision tower (already ported) ──
   // Input must be pixel_values [B,C,H,W].
   vision_hidden = op_Idefics3VisionTransformer(cl_ctx,
@@ -257,6 +297,71 @@ bool vision_pipeline_forward(
     NNOPT_ERROR("vision_pipeline_forward: op_Idefics3VisionTransformer failed");
     cleanup();
     return false;
+  }
+
+  // NNOPT_DUMP_VISION_HIDDEN=<path> writes the on-device vision encoder output
+  // (1024 × 768 fp32) so we can diff against HF for layer-by-layer bisect.
+  const char* dump_vh = std::getenv("NNOPT_DUMP_VISION_HIDDEN");
+  if (dump_vh && dump_vh[0]) {
+    const size_t T_vh = (size_t)(outH / patch) * (size_t)(outW / patch);
+    const size_t D_vh = (size_t)MODEL_CONFIG::VISION_CONFIG_HIDDEN_SIZE;
+    const size_t n = T_vh * D_vh;
+    std::vector<float> host(n, 0.0f);
+#ifdef NNOPT_USE_FP16
+    std::vector<nnopt_storage_t> half_buf(n);
+    cl_int rerr = clEnqueueReadBuffer(queue, vision_hidden, CL_TRUE, 0,
+                                      n * sizeof(nnopt_storage_t),
+                                      half_buf.data(), 0, nullptr, nullptr);
+    if (rerr == CL_SUCCESS) {
+      for (size_t i = 0; i < n; ++i) host[i] = nnopt_f16_to_f32((uint16_t)half_buf[i]);
+    }
+#else
+    cl_int rerr = clEnqueueReadBuffer(queue, vision_hidden, CL_TRUE, 0,
+                                      n * sizeof(float),
+                                      host.data(), 0, nullptr, nullptr);
+#endif
+    if (rerr == CL_SUCCESS) {
+      std::ofstream f(dump_vh, std::ios::binary);
+      f.write(reinterpret_cast<const char*>(host.data()), n * sizeof(float));
+      f.close();
+      // Print a few stats so we can sanity-check at a glance.
+      float minv = host[0], maxv = host[0], sumv = 0.0f;
+      for (float v : host) { if (v < minv) minv = v; if (v > maxv) maxv = v; sumv += v; }
+      std::fprintf(stderr, "[DUMP] vision_hidden → %s  (n=%zu min=%.4f max=%.4f mean=%.4f)\n",
+                   dump_vh, n, minv, maxv, sumv / (float)n);
+    }
+  }
+
+  const char* bisect_vh = std::getenv("NNOPT_BISECT_VISION_HIDDEN");
+  if (bisect_vh && bisect_vh[0] == '1') {
+    const char* path = "fixtures/sample_vision_hidden.bin";
+    std::ifstream f(path, std::ios::binary);
+    if (f) {
+      const size_t T_vh = (size_t)(outH / patch) * (size_t)(outW / patch);
+      const size_t D_vh = (size_t)MODEL_CONFIG::VISION_CONFIG_HIDDEN_SIZE;
+      const size_t n = T_vh * D_vh;
+      std::vector<float> host(n);
+      f.read(reinterpret_cast<char*>(host.data()), n * sizeof(float));
+      f.close();
+#ifdef NNOPT_USE_FP16
+      std::vector<nnopt_storage_t> half_buf(n);
+      for (size_t i = 0; i < n; ++i) half_buf[i] = (nnopt_storage_t)nnopt_f32_to_f16(host[i]);
+      cl_int werr = clEnqueueWriteBuffer(queue, vision_hidden, CL_TRUE, 0,
+                                         n * sizeof(nnopt_storage_t),
+                                         half_buf.data(), 0, nullptr, nullptr);
+#else
+      cl_int werr = clEnqueueWriteBuffer(queue, vision_hidden, CL_TRUE, 0,
+                                         n * sizeof(float),
+                                         host.data(), 0, nullptr, nullptr);
+#endif
+      if (werr != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("BISECT vision_hidden write failed (%d)", (int)werr);
+      } else {
+        std::fprintf(stderr, "[BISECT] loaded HF vision_hidden from %s — overwriting on-device encoder output\n", path);
+      }
+    } else {
+      std::fprintf(stderr, "[BISECT] NNOPT_BISECT_VISION_HIDDEN=1 but %s missing\n", path);
+    }
   }
 
   // ── Pixel shuffle (scale_factor=4) ──

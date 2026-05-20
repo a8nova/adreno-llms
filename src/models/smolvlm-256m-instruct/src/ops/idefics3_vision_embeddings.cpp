@@ -66,12 +66,47 @@ extern "C" cl_mem op_Idefics3VisionEmbeddings(OpenCLContext& cl_ctx,
     return nullptr;
   }
 
-  // patch_embedding_out is [batch, channels, height, width].
-  // Flatten(2) + transpose(1,2) results in [batch, height*width, channels].
+  // CRITICAL FIX (vision-quality regression diagnosed 2026-05-20):
+  //
+  // op_Conv2d (im2col + GEMM) returns its output as [M=B*Hout*Wout, Cout] in
+  // row-major — i.e. [B, Hout*Wout, Cout] = NHWC-flat, NOT PyTorch's NCHW
+  // [B, Cout, Hout, Wout]. The previous code here ran a
+  // `nchw_flatten2_transpose12` kernel on the buffer INTERPRETING it as NCHW;
+  // because strides assumed (b, c, y, x) order but the data was actually
+  // (b, y*W+x, c), every element was scrambled. The wrong embeddings then
+  // passed through 12 SigLIP layers, washing out image-specific features —
+  // on-device cosine-sim between different images was 0.74 while HF was 0.18,
+  // i.e., the encoder produced near-identical features regardless of input.
+  // The text decoder grounded on this collapsed signal and emitted a
+  // consistent "screenshot of a webpage" / "book scene" / "person at a desk"
+  // hallucination for any image.
+  //
+  // The fix: skip the transpose entirely — conv2d already produces [B,H*W,C]
+  // which is exactly what HF's `patch_embeds.flatten(2).transpose(1,2)`
+  // yields. Just element-add the position embeddings.
   const int seq = height * width;
   const size_t elems = (size_t)batch * (size_t)seq * (size_t)channels;
 
-  // We materialize the transposed/flattened output into a new buffer.
+  cl_mem out = element_add(queue, state().utils_program,
+                           patch_embedding_out, position_embed_out, elems);
+  if (!out) {
+    NNOPT_ERROR("op_Idefics3VisionEmbeddings: element_add failed");
+    return nullptr;
+  }
+  return out;
+}
+
+// ── Below: previous (buggy) transpose path retained as a #if-0 reference ───
+//
+// This was the prior implementation. It built and dispatched an embedded
+// `nchw_flatten2_transpose12` kernel before the element_add. The kernel
+// itself is correct math (it does transpose NCHW→[B,H*W,C]), but the input
+// shape was wrong: op_Conv2d returns [B,H*W,C] flat, not [B,C,H,W]. Running
+// the transpose on the wrong-shaped buffer scrambles every element.
+//
+// Kept only as documentation; the active implementation above is `return out`.
+#if 0
+{
   cl_int err = CL_SUCCESS;
   cl_mem flat = clCreateBuffer(cl_ctx.context(), CL_MEM_READ_WRITE,
                                elems * sizeof(nnopt_storage_t), nullptr, &err);
@@ -88,9 +123,6 @@ extern "C" cl_mem op_Idefics3VisionEmbeddings(OpenCLContext& cl_ctx,
     return nullptr;
   };
 
-  // Use utils.cl kernel "transpose_nchw_to_nhwc_flat" if present; otherwise do a small custom kernel.
-  // We don't have a guarantee it's present, so compile a local kernel on-demand from an embedded string.
-  // PROGRAM-INIT-OK: cached static program.
   static cl_program prog = nullptr;
   static cl_kernel k = nullptr;
   static bool init = false;
@@ -167,3 +199,4 @@ __kernel void nchw_flatten2_transpose12(
   clReleaseMemObject(flat);
   return out;
 }
+#endif  // #if 0 — buggy transpose reference

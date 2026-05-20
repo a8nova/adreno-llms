@@ -15,6 +15,7 @@
 #include "debug_utils.h"
 #include "utils.h"
 #include "forward_dispatch.h"
+#include "profile.h"
 
 #include <CL/cl.h>
 #include <cstddef>
@@ -59,19 +60,21 @@ extern "C" cl_mem op_Idefics3EncoderLayer(OpenCLContext& cl_ctx,
 
   const int rows = B * T;
 
-  // norm1
+  NNOPT_PROFILE_BEGIN(queue, "vis_norm1");
   cl_mem x_norm1 = op_LayerNorm(cl_ctx, weights, queue, hidden_states, rows, C, ln_eps, ln1_w, ln1_b);
+  NNOPT_PROFILE_END(queue, "vis_norm1");
   if (!x_norm1) {
     NNOPT_ERROR("op_Idefics3EncoderLayer: layer_norm1 failed");
     return nullptr;
   }
 
-  // attn
+  NNOPT_PROFILE_BEGIN(queue, "vis_attn");
   cl_mem attn_out = op_Idefics3VisionAttention(cl_ctx, weights, queue,
                                                x_norm1,
                                                attention_mask_opt,
                                                B, T, C, num_heads,
                                                q_w, q_b, k_w, k_b, v_w, v_b, o_w, o_b);
+  NNOPT_PROFILE_END(queue, "vis_attn");
   clReleaseMemObject(x_norm1);
   if (!attn_out) {
     NNOPT_ERROR("op_Idefics3EncoderLayer: self_attn failed");
@@ -116,28 +119,32 @@ extern "C" cl_mem op_Idefics3EncoderLayer(OpenCLContext& cl_ctx,
     return nullptr;
   }
 
+  NNOPT_PROFILE_BEGIN(queue, "vis_res1");
   cl_mem x_res1 = element_add(queue, utils_prog, hidden_states, attn_out, n_add);
+  NNOPT_PROFILE_END(queue, "vis_res1");
   clReleaseMemObject(attn_out);
   if (!x_res1) {
     NNOPT_ERROR("op_Idefics3EncoderLayer: residual add1 failed");
     return nullptr;
   }
 
-  // norm2
+  NNOPT_PROFILE_BEGIN(queue, "vis_norm2");
   cl_mem x_norm2 = op_LayerNorm(cl_ctx, weights, queue, x_res1, rows, C, ln_eps, ln2_w, ln2_b);
+  NNOPT_PROFILE_END(queue, "vis_norm2");
   if (!x_norm2) {
     NNOPT_ERROR("op_Idefics3EncoderLayer: layer_norm2 failed");
     clReleaseMemObject(x_res1);
     return nullptr;
   }
 
-  // mlp
+  NNOPT_PROFILE_BEGIN(queue, "vis_mlp");
   cl_mem mlp_out = op_Idefics3VisionMLP(cl_ctx, weights, queue,
                                         x_norm2,
                                         rows,
                                         C,
                                         intermediate_size,
                                         fc1_w, fc1_b, fc2_w, fc2_b);
+  NNOPT_PROFILE_END(queue, "vis_mlp");
   clReleaseMemObject(x_norm2);
   if (!mlp_out) {
     NNOPT_ERROR("op_Idefics3EncoderLayer: mlp failed");

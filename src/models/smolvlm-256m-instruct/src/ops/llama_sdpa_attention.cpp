@@ -137,8 +137,10 @@ struct TextAttnState {
   cl_kernel k_out = nullptr;
   cl_kernel k_out_tiled = nullptr;
   cl_kernel k_out_decode = nullptr;
+  cl_kernel k_out_decode_image = nullptr; // gqa_attn_out_decode_image — decode V via texture cache
   cl_kernel k_out_image = nullptr;   // gqa_attn_out_image — V via texture cache
   cl_kernel k_scores_image = nullptr; // gqa_attn_scores_image — K via texture cache
+  cl_kernel k_kv_write_decode = nullptr; // R6.3: fused 1-dispatch K/V write to buf+img
 };
 
 TextAttnState& st() {
@@ -187,6 +189,11 @@ bool ensure_initialized(OpenCLContext& cl_ctx) {
     NNOPT_ERROR_FMT("op_LlamaSdpaAttention: clCreateKernel(gqa_attn_out_decode) failed (%d)", (int)err);
     return false;
   }
+  s.k_out_decode_image = clCreateKernel(s.program, "gqa_attn_out_decode_image", &err);
+  if (err != CL_SUCCESS || !s.k_out_decode_image) {
+    fprintf(stderr, "[attn] clCreateKernel(gqa_attn_out_decode_image) failed (%d) — image-backed decode attn_out disabled\n", (int)err);
+    s.k_out_decode_image = nullptr;
+  }
   s.k_out_image = clCreateKernel(s.program, "gqa_attn_out_image", &err);
   if (err != CL_SUCCESS || !s.k_out_image) {
     fprintf(stderr, "[attn] clCreateKernel(gqa_attn_out_image) failed (%d) — image-backed prefill attn_out disabled\n", (int)err);
@@ -196,6 +203,11 @@ bool ensure_initialized(OpenCLContext& cl_ctx) {
   if (err != CL_SUCCESS || !s.k_scores_image) {
     fprintf(stderr, "[attn] clCreateKernel(gqa_attn_scores_image) failed (%d) — image-backed scores disabled\n", (int)err);
     s.k_scores_image = nullptr;
+  }
+  s.k_kv_write_decode = clCreateKernel(s.program, "kv_cache_write_decode_fused", &err);
+  if (err != CL_SUCCESS || !s.k_kv_write_decode) {
+    fprintf(stderr, "[attn] clCreateKernel(kv_cache_write_decode_fused) failed (%d) — falling back to 4-dispatch path\n", (int)err);
+    s.k_kv_write_decode = nullptr;
   }
 
   s.initialized = true;
@@ -371,7 +383,9 @@ extern "C" cl_mem op_LlamaSdpaAttention(OpenCLContext& cl_ctx,
                                          const char* q_w,
                                          const char* k_w,
                                          const char* v_w,
-                                         const char* o_w) {
+                                         const char* o_w,
+                                         const char* fused_in_norm_w,
+                                         float rms_eps) {
   if (!ensure_initialized(cl_ctx)) return nullptr;
   if (!queue || !hidden_states) {
     NNOPT_ERROR("op_LlamaSdpaAttention: null queue/hidden_states");
@@ -451,12 +465,22 @@ extern "C" cl_mem op_LlamaSdpaAttention(OpenCLContext& cl_ctx,
 #ifdef NNOPT_USE_FP16
     // Decode fast path: try image-backed fused QKV first (opt #34), fall back
     // to buffer-backed fused QKV (opt #6), then to 3 separate GEMVs.
+    // R6.4: when caller passes fused_in_norm_w, prefer the rmsnorm+QKV fused
+    // image GEMV — folds the per-layer rmsnorm dispatch into this kernel.
     bool qkv_done = false;
     if (seq_q == 1) {
       cl_mem Wq_img = get_or_create_weight_image(ctx, queue, Wq, q_dim,  hidden_size);
       cl_mem Wk_img = get_or_create_weight_image(ctx, queue, Wk, kv_dim, hidden_size);
       cl_mem Wv_img = get_or_create_weight_image(ctx, queue, Wv, kv_dim, hidden_size);
-      if (Wq_img && Wk_img && Wv_img) {
+      if (Wq_img && Wk_img && Wv_img && fused_in_norm_w) {
+        cl_mem gamma_in = weights.get_buffer(std::string(fused_in_norm_w));
+        if (gamma_in) {
+          qkv_done = gemv_m1_rmsnorm_qkv_image_fp16_dispatch(
+              queue, q_dim, kv_dim, hidden_size, rms_eps,
+              hidden_states, gamma_in, Wq_img, Wk_img, Wv_img, Q, K, V);
+        }
+      }
+      if (!qkv_done && Wq_img && Wk_img && Wv_img) {
         qkv_done = gemv_m1_qkv_image_fp16_dispatch(queue, q_dim, kv_dim, hidden_size,
                                                    hidden_states, Wq_img, Wk_img, Wv_img,
                                                    Q, K, V);
@@ -536,47 +560,76 @@ extern "C" cl_mem op_LlamaSdpaAttention(OpenCLContext& cl_ctx,
   if (!kv_writes_into_cache) {
     NNOPT_PROFILE_BEGIN(queue, "23c_kv_cache_write");
     {
-      const size_t bytes_per_tok = (size_t)kv_dim * sizeof(nnopt_storage_t);
-      const size_t dst_off = (size_t)start_pos * bytes_per_tok;
-      const size_t copy_bytes = (size_t)seq_q * bytes_per_tok;
-      err = clEnqueueCopyBuffer(queue, K, cache_K, 0, dst_off, copy_bytes, 0, nullptr, nullptr);
-      if (err != CL_SUCCESS) {
-        NNOPT_ERROR_FMT("op_LlamaSdpaAttention: KV cache K write failed layer=%d (%d)", layer_idx, (int)err);
-        clReleaseMemObject(Q); clReleaseMemObject(K); clReleaseMemObject(V);
-        return nullptr;
-      }
-      err = clEnqueueCopyBuffer(queue, V, cache_V, 0, dst_off, copy_bytes, 0, nullptr, nullptr);
-      if (err != CL_SUCCESS) {
-        NNOPT_PROFILE_END(queue, "23c_kv_cache_write");
-        NNOPT_ERROR_FMT("op_LlamaSdpaAttention: KV cache V write failed layer=%d (%d)", layer_idx, (int)err);
-        clReleaseMemObject(Q); clReleaseMemObject(K); clReleaseMemObject(V);
-        return nullptr;
-      }
-
-      // Mirror the K + V writes into their image2D views (if allocated). One
-      // extra clEnqueueCopyBufferToImage each. The L1 texture cache then
-      // services attn_out / attn_scores reads, which dominate prefill.
       LayerKVCache& kc = kv_caches()[(size_t)layer_idx];
-      if (kc.K_image) {
-        const size_t origin[3] = {0, (size_t)start_pos, 0};
-        const size_t region[3] = {(size_t)(kv_dim / 4), (size_t)seq_q, 1};
-        cl_int e_ki = clEnqueueCopyBufferToImage(queue, cache_K, kc.K_image,
-                                                  /*src_offset=*/dst_off,
-                                                  origin, region, 0, nullptr, nullptr);
-        if (e_ki != CL_SUCCESS) {
-          fprintf(stderr, "[kv_image] CopyBufferToImage(K) failed layer=%d (err=%d)\n",
-                  layer_idx, (int)e_ki);
+
+      // R6.3: decode fast path — 1 fused kernel writes K + V to both buffer
+      // and image at once. At decode seq_q=1 and the row is only kv_dim/4
+      // pixels (48 for SmolVLM); the previous 4-dispatch chain was ~600 µs
+      // of pure dispatch overhead for ~1.5 KB of data.
+      bool used_fused = false;
+#ifdef NNOPT_USE_FP16
+      if (seq_q == 1 && kc.K_image && kc.V_image && st().k_kv_write_decode) {
+        cl_kernel kw = st().k_kv_write_decode;
+        if (set_arg_checked(kw, 0, sizeof(cl_mem), &K, "k_row") &&
+            set_arg_checked(kw, 1, sizeof(cl_mem), &V, "v_row") &&
+            set_arg_checked(kw, 2, sizeof(cl_mem), &cache_K, "cache_K") &&
+            set_arg_checked(kw, 3, sizeof(cl_mem), &cache_V, "cache_V") &&
+            set_arg_checked(kw, 4, sizeof(cl_mem), &kc.K_image, "K_image") &&
+            set_arg_checked(kw, 5, sizeof(cl_mem), &kc.V_image, "V_image") &&
+            set_arg_checked(kw, 6, sizeof(int), &kv_dim, "kv_dim") &&
+            set_arg_checked(kw, 7, sizeof(int), &start_pos, "start_pos")) {
+          const size_t gws[1] = {(size_t)(kv_dim / 4)};
+          cl_int ke = clEnqueueNDRangeKernel(queue, kw, 1, nullptr, gws, nullptr, 0, nullptr, nullptr);
+          if (ke == CL_SUCCESS) {
+            used_fused = true;
+          } else {
+            fprintf(stderr, "[kv_image] kv_cache_write_decode_fused failed (err=%d) — falling back\n", (int)ke);
+          }
         }
       }
-      if (kc.V_image) {
-        const size_t origin[3] = {0, (size_t)start_pos, 0};
-        const size_t region[3] = {(size_t)(kv_dim / 4), (size_t)seq_q, 1};
-        cl_int e_vi = clEnqueueCopyBufferToImage(queue, cache_V, kc.V_image,
-                                                  /*src_offset=*/dst_off,
-                                                  origin, region, 0, nullptr, nullptr);
-        if (e_vi != CL_SUCCESS) {
-          fprintf(stderr, "[kv_image] CopyBufferToImage(V) failed layer=%d (err=%d)\n",
-                  layer_idx, (int)e_vi);
+#endif
+
+      if (!used_fused) {
+        // Prefill (seq_q > 1) or fp32 build or kernel unavailable: original
+        // 2 buffer copies + 0-2 image mirrors path. The bulk-copy is fine here
+        // — at seq_q ≥ ~8 the data dominates the dispatch overhead.
+        const size_t bytes_per_tok = (size_t)kv_dim * sizeof(nnopt_storage_t);
+        const size_t dst_off = (size_t)start_pos * bytes_per_tok;
+        const size_t copy_bytes = (size_t)seq_q * bytes_per_tok;
+        err = clEnqueueCopyBuffer(queue, K, cache_K, 0, dst_off, copy_bytes, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) {
+          NNOPT_ERROR_FMT("op_LlamaSdpaAttention: KV cache K write failed layer=%d (%d)", layer_idx, (int)err);
+          clReleaseMemObject(Q); clReleaseMemObject(K); clReleaseMemObject(V);
+          return nullptr;
+        }
+        err = clEnqueueCopyBuffer(queue, V, cache_V, 0, dst_off, copy_bytes, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) {
+          NNOPT_PROFILE_END(queue, "23c_kv_cache_write");
+          NNOPT_ERROR_FMT("op_LlamaSdpaAttention: KV cache V write failed layer=%d (%d)", layer_idx, (int)err);
+          clReleaseMemObject(Q); clReleaseMemObject(K); clReleaseMemObject(V);
+          return nullptr;
+        }
+        if (kc.K_image) {
+          const size_t origin[3] = {0, (size_t)start_pos, 0};
+          const size_t region[3] = {(size_t)(kv_dim / 4), (size_t)seq_q, 1};
+          cl_int e_ki = clEnqueueCopyBufferToImage(queue, cache_K, kc.K_image,
+                                                    /*src_offset=*/dst_off,
+                                                    origin, region, 0, nullptr, nullptr);
+          if (e_ki != CL_SUCCESS) {
+            fprintf(stderr, "[kv_image] CopyBufferToImage(K) failed layer=%d (err=%d)\n",
+                    layer_idx, (int)e_ki);
+          }
+        }
+        if (kc.V_image) {
+          const size_t origin[3] = {0, (size_t)start_pos, 0};
+          const size_t region[3] = {(size_t)(kv_dim / 4), (size_t)seq_q, 1};
+          cl_int e_vi = clEnqueueCopyBufferToImage(queue, cache_V, kc.V_image,
+                                                    /*src_offset=*/dst_off,
+                                                    origin, region, 0, nullptr, nullptr);
+          if (e_vi != CL_SUCCESS) {
+            fprintf(stderr, "[kv_image] CopyBufferToImage(V) failed layer=%d (err=%d)\n",
+                    layer_idx, (int)e_vi);
+          }
         }
       }
     }
@@ -707,9 +760,19 @@ extern "C" cl_mem op_LlamaSdpaAttention(OpenCLContext& cl_ctx,
   NNOPT_PROFILE_BEGIN(queue, "23f_attn_out");
   if (seq_q == 1) {
     // Decode fast path: workgroup-per-(qh, d4), 64-lane reduce over seq_k.
-    cl_kernel ko = st().k_out_decode;
+    // R6.1: when the V_image mirror is populated (always, post-#35a), read V
+    // via L1 texture cache through `read_imageh` — same trick as prefill's
+    // gqa_attn_out_image. At short-prompt seq_k, attn_out is ~470 µs/layer
+    // and L2-buffer reads are the main remaining cost.
+    LayerKVCache& kc_o = kv_caches()[(size_t)layer_idx];
+    const bool use_image = (kc_o.V_image != nullptr) && (st().k_out_decode_image != nullptr);
+    cl_kernel ko = use_image ? st().k_out_decode_image : st().k_out_decode;
     if (!set_arg_checked(ko, 0, sizeof(cl_mem), &scores, "scores")) return nullptr;
-    if (!set_arg_checked(ko, 1, sizeof(cl_mem), &cache_V, "v_cache")) return nullptr;
+    if (use_image) {
+      if (!set_arg_checked(ko, 1, sizeof(cl_mem), &kc_o.V_image, "v_cache_img")) return nullptr;
+    } else {
+      if (!set_arg_checked(ko, 1, sizeof(cl_mem), &cache_V, "v_cache")) return nullptr;
+    }
     if (!set_arg_checked(ko, 2, sizeof(cl_mem), &ctx_q, "out")) return nullptr;
     if (!set_arg_checked(ko, 3, sizeof(int), &seq_k, "seq_k")) return nullptr;
     if (!set_arg_checked(ko, 4, sizeof(int), &num_q_heads, "num_q_heads")) return nullptr;
@@ -720,7 +783,8 @@ extern "C" cl_mem op_LlamaSdpaAttention(OpenCLContext& cl_ctx,
     err = clEnqueueNDRangeKernel(queue, ko, 2, nullptr, gws, lws, 0, nullptr, nullptr);
     if (err != CL_SUCCESS) {
       NNOPT_PROFILE_END(queue, "23f_attn_out");
-      NNOPT_ERROR_FMT("op_LlamaSdpaAttention: gqa_attn_out_decode failed (%d)", (int)err);
+      NNOPT_ERROR_FMT("op_LlamaSdpaAttention: gqa_attn_out_decode%s failed (%d)",
+                      use_image ? "_image" : "", (int)err);
       clReleaseMemObject(ctx_q);
       if (!scores_is_persistent) clReleaseMemObject(scores);
       clReleaseMemObject(Q); clReleaseMemObject(K); clReleaseMemObject(V);

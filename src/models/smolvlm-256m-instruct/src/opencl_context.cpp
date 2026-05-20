@@ -78,43 +78,55 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
     // backpressure. Counter-intuitive but reproducible — leave it on.
     queue_ = clCreateCommandQueue(context_, device_, CL_QUEUE_PROFILING_ENABLE, &err);
 
-    // ── Phase 0a: one-time device probe (opt #0a in benchmark.md Round 3 plan).
-    // Print device name/version/extensions so we know which Qualcomm-specific
-    // extensions are available on this Adreno (e.g. cl_qcom_recordable_queues,
-    // cl_qcom_dot_product8, cl_qcom_ml_ops). Tag lines with "DEVICE_PROBE" so
-    // benchmark logs can grep them.
-    auto get_info_str = [this](cl_device_info param) -> std::string {
-        size_t sz = 0;
-        clGetDeviceInfo(device_, param, 0, nullptr, &sz);
-        if (sz == 0) return "";
-        std::vector<char> buf(sz + 1, 0);
-        clGetDeviceInfo(device_, param, sz, buf.data(), nullptr);
-        return std::string(buf.data());
-    };
-    auto get_info_uint = [this](cl_device_info param) -> cl_uint {
-        cl_uint v = 0;
-        clGetDeviceInfo(device_, param, sizeof(v), &v, nullptr);
-        return v;
-    };
-    auto get_info_size = [this](cl_device_info param) -> size_t {
-        size_t v = 0;
-        clGetDeviceInfo(device_, param, sizeof(v), &v, nullptr);
-        return v;
-    };
-    fprintf(stderr, "DEVICE_PROBE name: %s\n", get_info_str(CL_DEVICE_NAME).c_str());
-    fprintf(stderr, "DEVICE_PROBE vendor: %s\n", get_info_str(CL_DEVICE_VENDOR).c_str());
-    fprintf(stderr, "DEVICE_PROBE version: %s\n", get_info_str(CL_DEVICE_VERSION).c_str());
-    fprintf(stderr, "DEVICE_PROBE driver_version: %s\n", get_info_str(CL_DRIVER_VERSION).c_str());
-    fprintf(stderr, "DEVICE_PROBE max_compute_units: %u\n", get_info_uint(CL_DEVICE_MAX_COMPUTE_UNITS));
-    fprintf(stderr, "DEVICE_PROBE max_work_group_size: %zu\n", get_info_size(CL_DEVICE_MAX_WORK_GROUP_SIZE));
-    fprintf(stderr, "DEVICE_PROBE preferred_vec_width_half: %u\n", get_info_uint(CL_DEVICE_PREFERRED_VECTOR_WIDTH_HALF));
-    fprintf(stderr, "DEVICE_PROBE local_mem_size: %zu bytes\n", (size_t)[&](){cl_ulong v=0; clGetDeviceInfo(device_, CL_DEVICE_LOCAL_MEM_SIZE, sizeof(v), &v, nullptr); return v;}());
-    fprintf(stderr, "DEVICE_PROBE global_mem_size: %zu bytes\n", (size_t)[&](){cl_ulong v=0; clGetDeviceInfo(device_, CL_DEVICE_GLOBAL_MEM_SIZE, sizeof(v), &v, nullptr); return v;}());
-    fprintf(stderr, "DEVICE_PROBE global_mem_cache_size: %zu bytes\n", (size_t)[&](){cl_ulong v=0; clGetDeviceInfo(device_, CL_DEVICE_GLOBAL_MEM_CACHE_SIZE, sizeof(v), &v, nullptr); return v;}());
-    fprintf(stderr, "DEVICE_PROBE global_mem_cacheline_size: %u bytes\n", get_info_uint(CL_DEVICE_GLOBAL_MEM_CACHELINE_SIZE));
-    // Extensions list can be long; emit on a single line, prefixed.
-    fprintf(stderr, "DEVICE_PROBE extensions: %s\n", get_info_str(CL_DEVICE_EXTENSIONS).c_str());
-    fflush(stderr);
+    // ── One-time device banner (matches mms-tts format). Always shown — it's
+    // small + useful. Debug builds additionally dump the full extensions list.
+    {
+        char platform_name[128] = {0};
+        char device_name[128]   = {0};
+        char device_version[128]= {0};
+        char driver_version[256]= {0};
+        char ext_buf[8192]      = {0};
+        cl_uint cu = 0;
+        size_t max_wg = 0;
+        cl_ulong gmem = 0, lmem = 0;
+        cl_uint clock_mhz = 0;
+        cl_platform_id platform = nullptr;
+        clGetDeviceInfo(device_, CL_DEVICE_PLATFORM, sizeof(platform), &platform, nullptr);
+        if (platform) clGetPlatformInfo(platform, CL_PLATFORM_NAME, sizeof(platform_name), platform_name, nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_NAME,                 sizeof(device_name),    device_name,    nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_VERSION,              sizeof(device_version), device_version, nullptr);
+        clGetDeviceInfo(device_, CL_DRIVER_VERSION,              sizeof(driver_version), driver_version, nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_MAX_COMPUTE_UNITS,    sizeof(cu),       &cu,       nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_MAX_WORK_GROUP_SIZE,  sizeof(max_wg),   &max_wg,   nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_GLOBAL_MEM_SIZE,      sizeof(gmem),     &gmem,     nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_LOCAL_MEM_SIZE,       sizeof(lmem),     &lmem,     nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_MAX_CLOCK_FREQUENCY,  sizeof(clock_mhz),&clock_mhz,nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_EXTENSIONS, sizeof(ext_buf) - 1, ext_buf, nullptr);
+        const bool has_fp16    = std::strstr(ext_buf, "cl_khr_fp16")          != nullptr;
+        const bool has_perfhnt = std::strstr(ext_buf, "cl_qcom_perf_hint")    != nullptr;
+        const bool has_record  = std::strstr(ext_buf, "cl_qcom_recordable_queues") != nullptr;
+        const bool has_dotp8   = std::strstr(ext_buf, "cl_qcom_dot_product8") != nullptr;
+        fprintf(stderr, "── OpenCL device ────────────────────────────────────────────\n");
+        fprintf(stderr, "  platform        %s\n", platform_name);
+        fprintf(stderr, "  device          %s\n", device_name);
+        fprintf(stderr, "  version         %s\n", device_version);
+        fprintf(stderr, "  driver          %s\n", driver_version);
+        fprintf(stderr, "  compute_units   %u\n", (unsigned)cu);
+        fprintf(stderr, "  max_clock_MHz   %u\n", (unsigned)clock_mhz);
+        fprintf(stderr, "  max_workgroup   %zu\n", max_wg);
+        fprintf(stderr, "  global_mem      %.0f MB\n", (double)gmem / (1024.0 * 1024.0));
+        fprintf(stderr, "  local_mem       %.0f KB\n", (double)lmem / 1024.0);
+        fprintf(stderr, "  cl_khr_fp16            %s\n", has_fp16    ? "yes" : "no");
+        fprintf(stderr, "  qcom_perf_hint         %s\n", has_perfhnt ? "yes" : "no");
+        fprintf(stderr, "  qcom_recordable_queues %s\n", has_record  ? "yes" : "no");
+        fprintf(stderr, "  qcom_dot_product8      %s\n", has_dotp8   ? "yes" : "no");
+        fprintf(stderr, "─────────────────────────────────────────────────────────────\n");
+#ifdef NNOPT_DEBUG
+        // Debug-only: full extensions dump for diagnostics.
+        fprintf(stderr, "  extensions      %s\n", ext_buf);
+#endif
+        fflush(stderr);
+    }
 
     return err == CL_SUCCESS;
 }

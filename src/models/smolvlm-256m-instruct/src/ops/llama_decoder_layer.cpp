@@ -102,18 +102,32 @@ extern "C" cl_mem op_LlamaDecoderLayer(OpenCLContext& cl_ctx,
   // RMSNorm + Attention; both allocate fresh output buffers and do not
   // mutate their inputs).
 
-  // input_layernorm
-  NNOPT_PROFILE_BEGIN(queue, "22_rmsnorm_in");
-  cl_mem norm1 = op_LlamaRMSNorm(cl_ctx, weights, queue, hidden_states, rows, hidden_size, rms_eps, in_norm_w);
-  NNOPT_PROFILE_END(queue, "22_rmsnorm_in");
-  if (!norm1) return nullptr;
+  // R6.4: on decode (rows==1, fp16) skip the standalone rmsnorm dispatch and
+  // let the QKV image GEMV compute inv_rms inline. ~575 µs/layer saved.
+#ifdef NNOPT_USE_FP16
+  const bool use_fused_in_norm = (rows == 1);
+#else
+  const bool use_fused_in_norm = false;
+#endif
 
-  // self_attn
+  cl_mem norm1 = nullptr;
+  if (!use_fused_in_norm) {
+    NNOPT_PROFILE_BEGIN(queue, "22_rmsnorm_in");
+    norm1 = op_LlamaRMSNorm(cl_ctx, weights, queue, hidden_states, rows, hidden_size, rms_eps, in_norm_w);
+    NNOPT_PROFILE_END(queue, "22_rmsnorm_in");
+    if (!norm1) return nullptr;
+  }
+
+  // self_attn — on decode we pass the RAW hidden_states + in_norm_w so the
+  // QKV kernel applies rmsnorm inline; on prefill we pass the pre-computed
+  // norm1 (fused path is gated to seq_q==1 anyway).
   NNOPT_PROFILE_BEGIN(queue, "23_self_attn");
+  cl_mem attn_input = use_fused_in_norm ? hidden_states : norm1;
+  const char* fused_in_norm_arg = use_fused_in_norm ? in_norm_w : nullptr;
   cl_mem attn_out = op_LlamaSdpaAttention(cl_ctx,
                                          weights,
                                          queue,
-                                         norm1,
+                                         attn_input,
                                          rows,
                                          hidden_size,
                                          num_q_heads,
@@ -123,27 +137,40 @@ extern "C" cl_mem op_LlamaDecoderLayer(OpenCLContext& cl_ctx,
                                          q_w,
                                          k_w,
                                          v_w,
-                                         o_w);
+                                         o_w,
+                                         fused_in_norm_arg,
+                                         rms_eps);
   NNOPT_PROFILE_END(queue, "23_self_attn");
-  clReleaseMemObject(norm1);
+  if (norm1) clReleaseMemObject(norm1);
   if (!attn_out) return nullptr;
 
-  // Fused: attn_out += hidden_states  AND  norm2 = rmsnorm(attn_out + hidden_states).
-  // attn_out now holds (residual1 + attn_out), which we reuse as residual2.
-  NNOPT_PROFILE_BEGIN(queue, "25_rmsnorm_post");
-  cl_mem norm2 = op_LlamaRMSNormWithResidual(cl_ctx, weights, queue,
-                                             attn_out, hidden_states,
-                                             rows, hidden_size, rms_eps, post_norm_w);
-  NNOPT_PROFILE_END(queue, "25_rmsnorm_post");
-  if (!norm2) {
-    clReleaseMemObject(attn_out);
-    return nullptr;
+  // R6.5 (reverted): the rmsnorm_post + residual_add + gate_up fusion saves
+  // 1 dispatch per layer (~655 µs of rmsnorm_post) but regressed gate_up from
+  // 1145 → 2651 µs because 1536 WGs each re-read (attn_out + hidden_states +
+  // gamma) for the inline sum + scale computation — net +25 ms/token wall.
+  // The fused kernel (`gemv_m1_rmsnorm_residual_image_swiglu_fp16`) and the
+  // `op_LlamaMLP_with_residual_and_rmsnorm` entry point are kept for future
+  // attempts (e.g. broadcasting scale via global mem instead of redundant
+  // compute). For now, force false.
+  const bool use_fused_post_norm = false;
+
+  cl_mem norm2 = nullptr;
+  if (!use_fused_post_norm) {
+    NNOPT_PROFILE_BEGIN(queue, "25_rmsnorm_post");
+    norm2 = op_LlamaRMSNormWithResidual(cl_ctx, weights, queue,
+                                        attn_out, hidden_states,
+                                        rows, hidden_size, rms_eps, post_norm_w);
+    NNOPT_PROFILE_END(queue, "25_rmsnorm_post");
+    if (!norm2) {
+      clReleaseMemObject(attn_out);
+      return nullptr;
+    }
   }
 
   // mlp — on decode (rows==1, fp16), fuse the post-MLP residual add into the
   // down_proj GEMV write so we skip the separate add_residual dispatch.
-  // residual2 (= attn_out, which already holds residual1 + attn) is passed
-  // directly into the fused kernel.
+  // R6.5 path: rmsnorm_post is also folded inside, attn_out is kept raw and
+  // hidden_states is passed as the residual source.
   NNOPT_PROFILE_BEGIN(queue, "26_mlp");
 #ifdef NNOPT_USE_FP16
   const bool use_fused_residual = (rows == 1);
@@ -151,7 +178,13 @@ extern "C" cl_mem op_LlamaDecoderLayer(OpenCLContext& cl_ctx,
   const bool use_fused_residual = false;
 #endif
   cl_mem mlp_out = nullptr;
-  if (use_fused_residual) {
+  if (use_fused_post_norm) {
+    mlp_out = op_LlamaMLP_with_residual_and_rmsnorm(cl_ctx, weights, queue,
+                                                    attn_out, hidden_states,
+                                                    rows, hidden_size, intermediate_size,
+                                                    post_norm_w, rms_eps,
+                                                    gate_w, up_w, down_w);
+  } else if (use_fused_residual) {
     mlp_out = op_LlamaMLP_with_residual(cl_ctx, weights, queue, norm2, attn_out,
                                         rows, hidden_size, intermediate_size,
                                         gate_w, up_w, down_w);
@@ -160,7 +193,7 @@ extern "C" cl_mem op_LlamaDecoderLayer(OpenCLContext& cl_ctx,
                           intermediate_size, gate_w, up_w, down_w);
   }
   NNOPT_PROFILE_END(queue, "26_mlp");
-  clReleaseMemObject(norm2);
+  if (norm2) clReleaseMemObject(norm2);
   if (!mlp_out) {
     clReleaseMemObject(attn_out);
     return nullptr;

@@ -164,6 +164,17 @@ bool Model::initialize() {
   return true;
 }
 
+void Model::reset_conversation() {
+  g_image_features_f32.clear();
+  g_image_features_f32.shrink_to_fit();
+  g_image_N = 0;
+  g_image_D = 0;
+  g_has_image = false;
+  image_features_.clear();
+  image_features_N_ = 0;
+  has_image_ = false;
+}
+
 std::vector<float> Model::forward(const std::vector<int32_t>& input_ids, int start_pos) {
   NNOPT_CHECKPOINT("Model::forward() — graph mode (delegating to model_forward_graph)");
   return model_forward_graph(cl_ctx_, weights_, input_ids, start_pos);

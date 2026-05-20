@@ -11,6 +11,7 @@
 #include "tokenizer.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -78,6 +79,65 @@ static const std::unordered_map<uint32_t, uint8_t>& bytelevel_unicode_to_byte() 
         return m;
     }();
     return kMap;
+}
+
+// Inverse map: byte → unicode codepoint (HF bytes_to_unicode). Used on ENCODE
+// so that strings like "this image" become "thisĠimage" before BPE/vocab match
+// against tokens stored as "Ġimage" (the GPT-2 / RoBERTa / Llama-BPE convention).
+static const std::array<uint32_t, 256>& bytelevel_byte_to_codepoint() {
+    static const std::array<uint32_t, 256> kMap = []() {
+        std::array<uint32_t, 256> m{};
+        std::vector<int> bs;
+        for (int b = 33; b <= 126; b++) bs.push_back(b);
+        for (int b = 161; b <= 172; b++) bs.push_back(b);
+        for (int b = 174; b <= 255; b++) bs.push_back(b);
+        std::vector<int> cs = bs;
+        int n = 0;
+        for (int b = 0; b < 256; b++) {
+            if (std::find(bs.begin(), bs.end(), b) == bs.end()) {
+                bs.push_back(b);
+                cs.push_back(256 + n);
+                n++;
+            }
+        }
+        for (size_t i = 0; i < bs.size(); i++) {
+            m[(size_t)bs[i]] = (uint32_t)cs[i];
+        }
+        return m;
+    }();
+    return kMap;
+}
+
+// Encode a single unicode codepoint to UTF-8 and append to out.
+static void append_codepoint_utf8(std::string& out, uint32_t cp) {
+    if (cp < 0x80) {
+        out.push_back((char)cp);
+    } else if (cp < 0x800) {
+        out.push_back((char)(0xC0 | (cp >> 6)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+        out.push_back((char)(0xE0 | (cp >> 12)));
+        out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    } else {
+        out.push_back((char)(0xF0 | (cp >> 18)));
+        out.push_back((char)(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    }
+}
+
+// Apply HuggingFace ByteLevel ENCODE: replace each raw byte with its mapped
+// printable codepoint (Ġ for space, Ċ for newline, etc.) so the vocab lookup
+// matches tokens stored in their printable form.
+static std::string bytelevel_encode_bytes(const std::string& text) {
+    const auto& m = bytelevel_byte_to_codepoint();
+    std::string out;
+    out.reserve(text.size() * 2);
+    for (unsigned char b : text) {
+        append_codepoint_utf8(out, m[b]);
+    }
+    return out;
 }
 
 // Decode a UTF-8 string into a sequence of Unicode codepoints.
@@ -309,15 +369,33 @@ static std::string sentencepiece_preprocess(const std::string& text) {
     return out;
 }
 
+// Detect HF ByteLevel encoding (GPT-2/Llama-BPE/SmolVLM family). Vocab tokens
+// are stored with bytes → printable codepoint mapping (Ġ for space, Ċ for \n).
+// Without applying the same map on ENCODE, " image" (stored as "Ġimage") is
+// never matched and the space silently drops — wrong-shaped prompt → model
+// hallucinates because it sees "thisimage" instead of "this image".
+static bool bytelevel_active_inner() {
+    for (const auto& step : kDecoderChain) {
+        if (step.type == "ByteLevel") return true;
+    }
+    return false;
+}
+
 std::vector<int32_t> Tokenizer::encode(const std::string& text) const {
     std::vector<int32_t> out;
     out.reserve(text.size());
     // Apply SentencePiece-family preprocessing when the decoder chain
-    // expects "▁" markers — without this, prompt encode → decode loses
-    // every space because the vocab stores "▁word", not "word".
-    const std::string staged = sentencepiece_metaspace_active()
-        ? sentencepiece_preprocess(text)
-        : text;
+    // expects metaspace markers; OR HF-ByteLevel mapping when vocab is
+    // stored with byte→codepoint encoding (Ġ, Ċ, …). Critical for GPT-2 /
+    // SmolVLM family — without this, ENCODE silently drops every space.
+    std::string staged;
+    if (sentencepiece_metaspace_active()) {
+        staged = sentencepiece_preprocess(text);
+    } else if (bytelevel_active_inner()) {
+        staged = bytelevel_encode_bytes(text);
+    } else {
+        staged = text;
+    }
     size_t i = 0;
     while (i < staged.size()) {
         // Greedy longest match against vocab.
@@ -382,8 +460,36 @@ std::vector<int32_t> Tokenizer::build_vlm_prompt(bool image_present,
     }
     append_encoded(user_text);
     out.push_back(END_OF_UTTERANCE);
+    // HF chat template emits just a newline (token 198 = "Ċ") before
+    // "Assistant:", NOT <|im_start|>. Earlier we pushed IM_START here which
+    // gave the model a wrong-shaped prompt → hallucinated webpage replies.
+    append_encoded("\n");
+    append_encoded("Assistant:");
+
+    return out;
+}
+
+// Follow-up user turn for an in-progress conversation. KV cache from the prior
+// assistant turn already ends with <end_of_utterance>; this helper picks up
+// from there. No image placeholders — they belong only in turn 1.
+std::vector<int32_t> Tokenizer::build_vlm_followup_user_turn(const std::string& user_text) const {
+    constexpr int32_t IM_START = 1;
+    constexpr int32_t END_OF_UTTERANCE = 49279;
+
+    std::vector<int32_t> out;
+    out.reserve(32 + user_text.size());
+
+    auto append_encoded = [&](const std::string& s) {
+        auto enc = this->encode(s);
+        out.insert(out.end(), enc.begin(), enc.end());
+    };
+
     append_encoded("\n");
     out.push_back(IM_START);
+    append_encoded("User: ");
+    append_encoded(user_text);
+    out.push_back(END_OF_UTTERANCE);
+    append_encoded("\n");
     append_encoded("Assistant:");
 
     return out;

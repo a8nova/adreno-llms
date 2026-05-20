@@ -28,6 +28,12 @@ public:
     // features inside the model.
     bool set_image(const std::vector<uint8_t>& rgb_u8, int width, int height);
 
+    // Clear cached image features + the file-scope mirrors that backbone.cpp's
+    // splice reads. KV cache buffers don't need wiping — the next prefill at
+    // start_pos=0 overwrites whatever range it touches. Caller owns start_pos
+    // accounting (REPL resets its running counter alongside this).
+    void reset_conversation();
+
     // Backbone forward. Returns logits[VOCAB_SIZE] for the LAST token of
     // input_ids (matches PyTorch convention). start_pos is the absolute
     // KV-cache offset; 0 for prefill.

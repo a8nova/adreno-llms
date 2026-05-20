@@ -11,7 +11,7 @@
 // RoPE is applied in a separate kernel before these kernels run.
 //
 // Bias-add note (invariant BIAS-ADD): q_proj/k_proj/v_proj/o_proj biases (when present) are applied in the
-// linear/GEMM path (src/ops/linear_0.cpp + kernels/bias_add.cl), not inside these attention kernels.
+// linear/GEMM path (src/ops/linear.cpp + kernels/bias_add.cl), not inside these attention kernels.
 
 #ifdef USE_FP16
   #pragma OPENCL EXTENSION cl_khr_fp16 : enable
@@ -358,6 +358,104 @@ void gqa_attn_out_decode(
     a3 += p * (float)LOAD(v_cache, v_off + 3);
   }
   r0[lid] = a0; r1[lid] = a1; r2[lid] = a2; r3[lid] = a3;
+#endif
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int s = AO_WG >> 1; s > 0; s >>= 1) {
+    if (lid < s) {
+      r0[lid] += r0[lid + s];
+      r1[lid] += r1[lid + s];
+      r2[lid] += r2[lid + s];
+      r3[lid] += r3[lid + s];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (lid == 0) {
+    const int out_idx = qh * head_dim + d4 * 4;
+    STORE(out, out_idx + 0, (storage_t)r0[0]);
+    STORE(out, out_idx + 1, (storage_t)r1[0]);
+    STORE(out, out_idx + 2, (storage_t)r2[0]);
+    STORE(out, out_idx + 3, (storage_t)r3[0]);
+  }
+}
+
+// R6.3: fused decode-time kv_cache_write. Replaces a 4-dispatch chain
+// (2× clEnqueueCopyBuffer for K/V buffer + 2× clEnqueueCopyBufferToImage for
+// K/V image mirrors) with a single kernel that reads the new K/V rows and
+// writes to all four destinations at once. At decode, each row is only
+// kv_dim fp16 = 384 B, so the 4 dispatches were paying ~600 µs of dispatch
+// overhead for 1.5 KB of work — pure overhead floor.
+//
+// Global work: kv_dim / 4 work-items (one per CL_RGBA pixel of the image rows).
+// fp16 only. Images must be CL_MEM_READ_WRITE (they are — see ensure_kv_cache).
+#ifdef USE_FP16
+__kernel void kv_cache_write_decode_fused(
+    __global const half* k_row,
+    __global const half* v_row,
+    __global half* cache_K,
+    __global half* cache_V,
+    __write_only image2d_t K_image,
+    __write_only image2d_t V_image,
+    const int kv_dim,
+    const int start_pos) {
+  const int gid = (int)get_global_id(0);
+  const int K4 = kv_dim >> 2;
+  if (gid >= K4) return;
+
+  half4 k4 = vload4(gid, k_row);
+  half4 v4 = vload4(gid, v_row);
+
+  const int dst_off = start_pos * kv_dim;  // half offset
+  vstore4(k4, gid, cache_K + dst_off);
+  vstore4(v4, gid, cache_V + dst_off);
+
+  write_imageh(K_image, (int2)(gid, start_pos), k4);
+  write_imageh(V_image, (int2)(gid, start_pos), v4);
+}
+#endif
+
+// Image-backed decode `attn_out`. Same WG layout as gqa_attn_out_decode
+// (one WG per (qh, d4), 64-lane parallel reduce over seq_k) but reads V via
+// the L1 texture cache through read_imageh instead of buffer + L2. The V cache
+// image is already maintained by op_LlamaSdpaAttention (mirrored after every
+// kv_cache_write); decode just needs to consume it. fp16 path only — fp32
+// decode falls back to the buffer kernel.
+//
+// Global work: (num_q_heads, head_dim/4 * AO_WG), local: (1, AO_WG)
+__kernel
+__attribute__((reqd_work_group_size(1, AO_WG, 1)))
+void gqa_attn_out_decode_image(
+    __global const storage_t* scores,
+    __read_only image2d_t v_cache_img,
+    __global storage_t* out,
+    const int seq_k,
+    const int num_q_heads,
+    const int num_kv_heads,
+    const int head_dim) {
+  const int qh = (int)get_group_id(0);
+  const int d4 = (int)get_group_id(1);
+  const int lid = (int)get_local_id(1);
+  const int D4 = head_dim >> 2;
+  if (qh >= num_q_heads || d4 >= D4) return;
+
+  const int nrep = num_q_heads / num_kv_heads;
+  const int kvh = qh / nrep;
+  const int score_base = qh * seq_k;
+  const int v_x = kvh * D4 + d4;
+
+  const sampler_t smp = CLK_NORMALIZED_COORDS_FALSE | CLK_FILTER_NEAREST | CLK_ADDRESS_NONE;
+
+  __local float r0[AO_WG], r1[AO_WG], r2[AO_WG], r3[AO_WG];
+#ifdef USE_FP16
+  float4 acc = (float4)(0.0f, 0.0f, 0.0f, 0.0f);
+  for (int tk = lid; tk < seq_k; tk += AO_WG) {
+    float p = (float)LOAD(scores, score_base + tk);
+    float4 vv = convert_float4(read_imageh(v_cache_img, smp, (int2)(v_x, tk)));
+    acc += p * vv;
+  }
+  r0[lid] = acc.s0; r1[lid] = acc.s1; r2[lid] = acc.s2; r3[lid] = acc.s3;
+#else
+  // fp32 path: fall through (host should not dispatch this kernel in fp32 mode).
+  r0[lid] = 0.0f; r1[lid] = 0.0f; r2[lid] = 0.0f; r3[lid] = 0.0f;
 #endif
   barrier(CLK_LOCAL_MEM_FENCE);
   for (int s = AO_WG >> 1; s > 0; s >>= 1) {

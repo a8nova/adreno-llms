@@ -206,6 +206,11 @@ extern "C" cl_mem op_PytorchGELUTanh(OpenCLContext& cl_ctx,
                                      cl_mem input,
                                      int n_elements);
 
+// R6.4: optional `fused_in_norm_w` lets the attention op skip the separate
+// rmsnorm dispatch upstream and fold the rmsnorm into the QKV image GEMV. When
+// non-null AND rows==1 AND fp16 build, `hidden_states` is treated as the RAW
+// (pre-norm) input; the kernel computes inv_rms inside each WG and applies
+// `* inv_rms * gamma` before the matmul. nullptr → caller already normalized.
 extern "C" cl_mem op_LlamaSdpaAttention(OpenCLContext& cl_ctx,
                                         Weights& weights,
                                         cl_command_queue queue,
@@ -219,7 +224,9 @@ extern "C" cl_mem op_LlamaSdpaAttention(OpenCLContext& cl_ctx,
                                         const char* q_w,
                                         const char* k_w,
                                         const char* v_w,
-                                        const char* o_w);
+                                        const char* o_w,
+                                        const char* fused_in_norm_w,
+                                        float rms_eps);
 
 extern "C" cl_mem op_LlamaMLP(OpenCLContext& cl_ctx,
                               Weights& weights,
@@ -248,6 +255,26 @@ extern "C" cl_mem op_LlamaMLP_with_residual(OpenCLContext& cl_ctx,
                                             const char* gate_w,
                                             const char* up_w,
                                             const char* down_w);
+
+// R6.5: MLP entry point that folds rmsnorm_post (residual_add + norm) into the
+// gate_up swiglu GEMV. Caller passes (attn_out_raw, hidden_states_residual,
+// post_norm_w, rms_eps); the op internally allocates a sum_buf, runs the fused
+// rmsnorm+residual+swiglu, then the existing fused down+residual using sum_buf
+// as residual. Decode-only (rows==1, fp16) — prefill/fp32 falls back to the
+// caller's pre-norm + op_LlamaMLP_with_residual path.
+extern "C" cl_mem op_LlamaMLP_with_residual_and_rmsnorm(OpenCLContext& cl_ctx,
+                                                        Weights& weights,
+                                                        cl_command_queue queue,
+                                                        cl_mem attn_out_raw,
+                                                        cl_mem hidden_states_residual,
+                                                        int rows,
+                                                        int hidden_size,
+                                                        int intermediate_size,
+                                                        const char* post_norm_w,
+                                                        float rms_eps,
+                                                        const char* gate_w,
+                                                        const char* up_w,
+                                                        const char* down_w);
 
 extern "C" cl_mem op_Idefics3VisionTransformer(OpenCLContext& cl_ctx,
                                                Weights& weights,

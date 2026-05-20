@@ -27,6 +27,12 @@ public:
     std::vector<int32_t> build_vlm_prompt(bool image_present,
                                          const std::string& user_text) const;
 
+    // Chat-template tokens for a follow-up user turn that continues an existing
+    // conversation. Leading "\n" separates from the prior turn's <end_of_utterance>.
+    // No image-placeholder block — image features only live in the very first turn's
+    // KV slots; later turns are pure text.
+    std::vector<int32_t> build_vlm_followup_user_turn(const std::string& user_text) const;
+
     int32_t bos_token_id() const { return bos_id_; }
     int32_t eos_token_id() const { return eos_id_; }
     int32_t pad_token_id() const { return pad_id_; }

@@ -13,6 +13,10 @@
 #include "utils.h"
 
 #include <CL/cl.h>
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
+#include <vector>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -168,7 +172,33 @@ __kernel void iota_int32(__global int* out, int n) {
   const float ln_eps = (float)MODEL_CONFIG::LAYER_NORM_EPS;
   const int interm = MODEL_CONFIG::VISION_CONFIG_INTERMEDIATE_SIZE;
 
+  const bool layer_timing = std::getenv("NNOPT_VISION_TIMING") != nullptr;
+  const char* dump_dir = std::getenv("NNOPT_DUMP_VISION_LAYERS");
+  auto dump_layer = [&](int layer_idx, cl_mem buf) {
+    if (!dump_dir || !dump_dir[0]) return;
+    const size_t n = (size_t)B * (size_t)((H / patch_size) * (W / patch_size)) * (size_t)vis_C;
+    std::vector<float> host(n, 0.0f);
+#ifdef NNOPT_USE_FP16
+    std::vector<nnopt_storage_t> half_buf(n);
+    if (clEnqueueReadBuffer(queue, buf, CL_TRUE, 0, n * sizeof(nnopt_storage_t),
+                            half_buf.data(), 0, nullptr, nullptr) == CL_SUCCESS) {
+      for (size_t k = 0; k < n; ++k) host[k] = nnopt_f16_to_f32((uint16_t)half_buf[k]);
+    }
+#else
+    clEnqueueReadBuffer(queue, buf, CL_TRUE, 0, n * sizeof(float),
+                        host.data(), 0, nullptr, nullptr);
+#endif
+    char path[512];
+    std::snprintf(path, sizeof(path), "%s/layer_%02d.bin", dump_dir, layer_idx);
+    std::ofstream f(path, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(host.data()), n * sizeof(float));
+    f.close();
+  };
+  // Dump embeddings (input to first encoder layer) as layer -1.
+  dump_layer(-1, hidden);
+  double total_layers_ms = 0.0;
   for (int i = 0; i < MODEL_CONFIG::VISION_CONFIG_NUM_HIDDEN_LAYERS; ++i) {
+    auto t_layer_0 = std::chrono::steady_clock::now();
     char ln1_w[160], ln1_b[160], ln2_w[160], ln2_b[160];
     char q_w[160], q_b[160], k_w[160], k_b[160], v_w[160], v_b[160], o_w[160], o_b[160];
     char fc1_w[160], fc1_b[160], fc2_w[160], fc2_b[160];
@@ -224,6 +254,15 @@ __kernel void iota_int32(__global int* out, int n) {
     if (!hidden) {
       NNOPT_ERROR_FMT("op_Idefics3VisionTransformer: encoder layer %d failed", i);
       return nullptr;
+    }
+    dump_layer(i, hidden);
+    if (layer_timing) {
+      clFinish(queue);
+      auto t_layer_1 = std::chrono::steady_clock::now();
+      double ms = std::chrono::duration<double, std::milli>(t_layer_1 - t_layer_0).count();
+      total_layers_ms += ms;
+      std::fprintf(stderr, "  vision_layer    %2d  %7.1f ms  (cumulative %.1f ms)\n",
+                   i, ms, total_layers_ms);
     }
   }
 

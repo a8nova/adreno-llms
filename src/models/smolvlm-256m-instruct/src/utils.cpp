@@ -722,6 +722,203 @@ void gemv_m1_qkv_image_fp16(
   }
   if (lid == 0) y_out[local_row] = (half)partial[0];
 }
+
+// R6.4: fused rmsnorm + QKV image-GEMV. Folds the per-layer rmsnorm dispatch
+// (~575 µs floor at decode) into the QKV kernel by having each WG redundantly
+// compute the rmsnorm scale from x, then GEMV with normalized x. Subgroup
+// reduce for the rmsnorm ss-pass (cl_khr_subgroups + full subgroup ok in
+// rmsnorm pattern); __local tree-reduce for the GEMV tail (matches the rest
+// of the image-GEMV family, where subgroup reduce regressed in #25a).
+#pragma OPENCL EXTENSION cl_khr_subgroups : enable
+#pragma OPENCL EXTENSION cl_qcom_reqd_sub_group_size : enable
+
+__kernel
+__attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
+__attribute__((qcom_reqd_sub_group_size("full")))
+void gemv_m1_rmsnorm_qkv_image_fp16(
+    __global const half* x,
+    __global const half* gamma,
+    __read_only image2d_t W_q,
+    __read_only image2d_t W_k,
+    __read_only image2d_t W_v,
+    __global half* Y_q,
+    __global half* Y_k,
+    __global half* Y_v,
+    const float eps,
+    const int N_q,
+    const int N_kv,
+    const int K) {
+  const int row = (int)get_group_id(0);
+  const int lid = (int)get_local_id(0);
+  const int total = N_q + 2 * N_kv;
+  if (row >= total) return;
+
+  const int K4 = K >> 2;
+
+  // Pass 1: compute rmsnorm inv_rms = rsqrt(mean(x²) + eps).
+  float ss = 0.0f;
+  for (int k4 = lid; k4 < K4; k4 += WG_SIZE) {
+    float4 xv = convert_float4(vload4(k4, x));
+    ss += dot(xv, xv);
+  }
+  const float total_ss = sub_group_reduce_add(ss);
+  const float inv_rms = rsqrt(total_ss / (float)K + eps);
+
+  // Pass 2: GEMV with normalized x = x * inv_rms * gamma.
+  const sampler_t smp = CLK_NORMALIZED_COORDS_FALSE | CLK_FILTER_NEAREST | CLK_ADDRESS_NONE;
+  int local_row;
+  int which;
+  __global half* y_out;
+  if (row < N_q) { which = 0; local_row = row; y_out = Y_q; }
+  else if (row < N_q + N_kv) { which = 1; local_row = row - N_q; y_out = Y_k; }
+  else { which = 2; local_row = row - N_q - N_kv; y_out = Y_v; }
+
+  float acc = 0.0f;
+  for (int k4 = lid; k4 < K4; k4 += WG_SIZE) {
+    float4 xv = convert_float4(vload4(k4, x));
+    float4 gv = convert_float4(vload4(k4, gamma));
+    float4 xn = xv * inv_rms * gv;
+    half4  wh;
+    if (which == 0)      wh = read_imageh(W_q, smp, (int2)(k4, local_row));
+    else if (which == 1) wh = read_imageh(W_k, smp, (int2)(k4, local_row));
+    else                 wh = read_imageh(W_v, smp, (int2)(k4, local_row));
+    float4 wv = convert_float4(wh);
+    acc += dot(xn, wv);
+  }
+
+  __local float partial[WG_SIZE];
+  partial[lid] = acc;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
+    if (lid < s) partial[lid] += partial[lid + s];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (lid == 0) y_out[local_row] = (half)partial[0];
+}
+
+// R6.5: fused rmsnorm + residual-add + gate_up (swiglu) image GEMV. Replaces
+// the standalone `rms_norm_residual_forward` dispatch by folding it into the
+// MLP gate_up step. Per WG:
+//   1. Each lane reads its stripe of (attn_out, hidden_states) and adds them
+//      into a local `sum`.
+//   2. Subgroup-reduce sum-of-squares → inv_rms = rsqrt(mean(sum²) + eps).
+//   3. WG 0 idempotently writes `sum` back to sum_buf (the residual stream
+//      consumed by the downstream fused down+residual kernel). Single WG
+//      writes avoid inter-WG races; other WGs only read.
+//   4. GEMV with normalized x = sum * inv_rms * gamma against W_gate / W_up,
+//      then swiglu = silu(gate) * up.
+// SmolVLM hidden=576 → MAX_K_HALFS=576 fp16 = 1.2 KB per WG of __local. Plenty
+// of room within Adreno 620's 32 KB local mem.
+#define FUSED_LOCAL_MAX_K 576
+
+__kernel
+__attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
+__attribute__((qcom_reqd_sub_group_size("full")))
+void gemv_m1_rmsnorm_residual_image_swiglu_fp16(
+    __global const half* attn_out,
+    __global const half* hidden_states,
+    __global const half* gamma,
+    __read_only image2d_t W_gate,
+    __read_only image2d_t W_up,
+    __global half* y,
+    __global half* sum_buf,
+    const float eps,
+    const int N,
+    const int K) {
+  const int row = (int)get_group_id(0);
+  const int lid = (int)get_local_id(0);
+  if (row >= N) return;
+
+  const int K4 = K >> 2;
+  __local half local_sum[FUSED_LOCAL_MAX_K];
+
+  // Pass 1: each lane stripes (attn_out + hidden_states) into local_sum and
+  // accumulates lane-local sum-of-squares.
+  float ss = 0.0f;
+  for (int k4 = lid; k4 < K4; k4 += WG_SIZE) {
+    float4 av = convert_float4(vload4(k4, attn_out));
+    float4 hv = convert_float4(vload4(k4, hidden_states));
+    float4 sv = av + hv;
+    vstore4(convert_half4(sv), k4, local_sum);
+    ss += dot(sv, sv);
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);  // local_sum fully populated before pass 2.
+
+  const float total_ss = sub_group_reduce_add(ss);
+  const float inv_rms = rsqrt(total_ss / (float)K + eps);
+
+  // WG 0 publishes sum to sum_buf for the downstream mlp_down + residual.
+  if (row == 0) {
+    for (int k4 = lid; k4 < K4; k4 += WG_SIZE) {
+      vstore4(vload4(k4, local_sum), k4, sum_buf);
+    }
+  }
+
+  // Pass 2: read sum from local_sum, normalize, GEMV against W_gate / W_up.
+  const sampler_t smp = CLK_NORMALIZED_COORDS_FALSE | CLK_FILTER_NEAREST | CLK_ADDRESS_NONE;
+  float ag = 0.0f, au = 0.0f;
+  for (int k4 = lid; k4 < K4; k4 += WG_SIZE) {
+    float4 sv = convert_float4(vload4(k4, local_sum));
+    float4 gv = convert_float4(vload4(k4, gamma));
+    float4 xn = sv * inv_rms * gv;
+    float4 wg = convert_float4(read_imageh(W_gate, smp, (int2)(k4, row)));
+    float4 wu = convert_float4(read_imageh(W_up,   smp, (int2)(k4, row)));
+    ag += dot(xn, wg);
+    au += dot(xn, wu);
+  }
+
+  __local float pg[WG_SIZE];
+  __local float pu[WG_SIZE];
+  pg[lid] = ag; pu[lid] = au;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
+    if (lid < s) { pg[lid] += pg[lid + s]; pu[lid] += pu[lid + s]; }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (lid == 0) {
+    float silu_g = pg[0] / (1.0f + native_exp(-pg[0]));
+    y[row] = (half)(silu_g * pu[0]);
+  }
+}
+
+// R6.2: image2d_array-backed GEMV for weights whose row count exceeds
+// CL_DEVICE_IMAGE2D_MAX_HEIGHT (lm_head: 49280 rows, max_h on Adreno 620=16384).
+// Layout: array of slices, each [K/4 pixels × slice_h rows × RGBA-half]. Row r
+// maps to (slice = r / slice_h, row_in_slice = r - slice * slice_h).
+__kernel
+__attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
+void gemv_m1_image_array_fp16(
+    __global const half* x,
+    __read_only image2d_array_t W,
+    __global half* y,
+    const int N,
+    const int K,
+    const int slice_h) {
+  const int row = (int)get_group_id(0);
+  const int lid = (int)get_local_id(0);
+  if (row >= N) return;
+
+  const sampler_t smp = CLK_NORMALIZED_COORDS_FALSE | CLK_FILTER_NEAREST | CLK_ADDRESS_NONE;
+  const int slice = row / slice_h;
+  const int row_in_slice = row - slice * slice_h;
+  const int K4 = K >> 2;
+  float acc = 0.0f;
+  for (int k4 = lid; k4 < K4; k4 += WG_SIZE) {
+    float4 xv = convert_float4(vload4(k4, x));
+    half4  wh = read_imageh(W, smp, (int4)(k4, row_in_slice, slice, 0));
+    float4 wv = convert_float4(wh);
+    acc += dot(xv, wv);
+  }
+
+  __local float partial[WG_SIZE];
+  partial[lid] = acc;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int s = WG_SIZE >> 1; s > 0; s >>= 1) {
+    if (lid < s) partial[lid] += partial[lid + s];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (lid == 0) y[row] = (half)partial[0];
+}
 )CLC";
 
 namespace {
@@ -733,6 +930,9 @@ struct GemvImageState {
     cl_kernel kernel_residual = nullptr;   // gemv_m1_image_residual_fp16
     cl_kernel kernel_swiglu = nullptr;     // gemv_m1_image_swiglu_fp16
     cl_kernel kernel_qkv = nullptr;        // gemv_m1_qkv_image_fp16
+    cl_kernel kernel_array = nullptr;      // gemv_m1_image_array_fp16
+    cl_kernel kernel_rmsnorm_qkv = nullptr;// gemv_m1_rmsnorm_qkv_image_fp16
+    cl_kernel kernel_rmsnorm_swiglu = nullptr; // gemv_m1_rmsnorm_residual_image_swiglu_fp16
 };
 static GemvImageState& gemv_image_state() { static GemvImageState s; return s; }
 
@@ -755,6 +955,22 @@ static bool gemv_image_ensure_init(cl_command_queue queue) {
     if (err != CL_SUCCESS || !s.kernel_swiglu) return false;
     s.kernel_qkv = clCreateKernel(s.program, "gemv_m1_qkv_image_fp16", &err);
     if (err != CL_SUCCESS || !s.kernel_qkv) return false;
+    s.kernel_array = clCreateKernel(s.program, "gemv_m1_image_array_fp16", &err);
+    if (err != CL_SUCCESS || !s.kernel_array) {
+        fprintf(stderr, "[utils] clCreateKernel(gemv_m1_image_array_fp16) failed (%d) — image2d_array path disabled\n", (int)err);
+        s.kernel_array = nullptr;
+        // Non-fatal: callers fall back to pytorch_linear.
+    }
+    s.kernel_rmsnorm_qkv = clCreateKernel(s.program, "gemv_m1_rmsnorm_qkv_image_fp16", &err);
+    if (err != CL_SUCCESS || !s.kernel_rmsnorm_qkv) {
+        fprintf(stderr, "[utils] clCreateKernel(gemv_m1_rmsnorm_qkv_image_fp16) failed (%d) — fused rmsnorm+qkv path disabled\n", (int)err);
+        s.kernel_rmsnorm_qkv = nullptr;
+    }
+    s.kernel_rmsnorm_swiglu = clCreateKernel(s.program, "gemv_m1_rmsnorm_residual_image_swiglu_fp16", &err);
+    if (err != CL_SUCCESS || !s.kernel_rmsnorm_swiglu) {
+        fprintf(stderr, "[utils] clCreateKernel(gemv_m1_rmsnorm_residual_image_swiglu_fp16) failed (%d) — fused rmsnorm+residual+swiglu path disabled\n", (int)err);
+        s.kernel_rmsnorm_swiglu = nullptr;
+    }
     s.ok = true;
     return true;
 }
@@ -825,7 +1041,114 @@ cl_mem get_or_create_weight_image(cl_context ctx, cl_command_queue queue,
     return img;
 }
 
+// R6.2: image2d_array variant for weights whose row count exceeds
+// CL_DEVICE_IMAGE2D_MAX_HEIGHT (lm_head is the only one: 49280 > 16384). Struct
+// is declared in utils.h; cache lives here.
+static std::unordered_map<cl_mem, WeightImageArray>& weight_image_array_cache() {
+    static std::unordered_map<cl_mem, WeightImageArray> c;
+    return c;
+}
+
+WeightImageArray get_or_create_weight_image_array(cl_context ctx,
+                                                  cl_command_queue queue,
+                                                  cl_mem weight_buf, int N, int K) {
+    WeightImageArray result;
+    if (!weight_buf || N <= 0 || K <= 0) return result;
+    auto& cache = weight_image_array_cache();
+    auto it = cache.find(weight_buf);
+    if (it != cache.end()) return it->second;
+
+    if ((K & 3) != 0) {
+        cache[weight_buf] = result;
+        return result;
+    }
+
+    cl_device_id dev = nullptr;
+    if (clGetCommandQueueInfo(queue, CL_QUEUE_DEVICE, sizeof(dev), &dev, nullptr) != CL_SUCCESS) {
+        return result;
+    }
+    size_t max_h = 0;
+    clGetDeviceInfo(dev, CL_DEVICE_IMAGE2D_MAX_HEIGHT, sizeof(max_h), &max_h, nullptr);
+    if (max_h == 0) max_h = 16384;
+    size_t max_array_size = 0;
+    clGetDeviceInfo(dev, CL_DEVICE_IMAGE_MAX_ARRAY_SIZE, sizeof(max_array_size), &max_array_size, nullptr);
+
+    const int slice_h = (int)max_h;
+    const int n_slices = (N + slice_h - 1) / slice_h;
+    if (max_array_size > 0 && (size_t)n_slices > max_array_size) {
+        fprintf(stderr, "[weight_image_array] N=%d needs %d slices, exceeds CL_DEVICE_IMAGE_MAX_ARRAY_SIZE=%zu\n",
+                N, n_slices, max_array_size);
+        cache[weight_buf] = result;
+        return result;
+    }
+
+    cl_image_format fmt = {CL_RGBA, CL_HALF_FLOAT};
+    cl_image_desc desc{};
+    desc.image_type = CL_MEM_OBJECT_IMAGE2D_ARRAY;
+    desc.image_width = (size_t)(K / 4);
+    desc.image_height = (size_t)slice_h;
+    desc.image_array_size = (size_t)n_slices;
+
+    cl_int err = CL_SUCCESS;
+    cl_mem img = clCreateImage(ctx, CL_MEM_READ_ONLY, &fmt, &desc, nullptr, &err);
+    if (err != CL_SUCCESS || !img) {
+        fprintf(stderr, "[weight_image_array] clCreateImage(IMAGE2D_ARRAY) failed (err=%d) N=%d K=%d slice_h=%d n_slices=%d\n",
+                (int)err, N, K, slice_h, n_slices);
+        cache[weight_buf] = result;
+        return result;
+    }
+
+    // Buffer is [N, K] row-major fp16. Copy each slice's rows into the
+    // corresponding slice of the image_array. Slice s has rows [s*slice_h,
+    // min((s+1)*slice_h, N)), copied to image_array (z=s).
+    const size_t row_bytes = (size_t)K * sizeof(uint16_t);  // fp16
+    for (int s = 0; s < n_slices; ++s) {
+        const int slice_first_row = s * slice_h;
+        const int slice_last_row  = std::min((s + 1) * slice_h, N);
+        const int rows_in_slice   = slice_last_row - slice_first_row;
+        const size_t src_offset = (size_t)slice_first_row * row_bytes;
+        size_t origin[3] = {0, 0, (size_t)s};
+        size_t region[3] = {(size_t)(K / 4), (size_t)rows_in_slice, 1};
+        err = clEnqueueCopyBufferToImage(queue, weight_buf, img, src_offset,
+                                         origin, region, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) {
+            fprintf(stderr, "[weight_image_array] copy slice %d failed (err=%d)\n", s, (int)err);
+            clReleaseMemObject(img);
+            cache[weight_buf] = result;
+            return result;
+        }
+    }
+
+    result.image = img;
+    result.slice_h = slice_h;
+    result.n_slices = n_slices;
+    cache[weight_buf] = result;
+    return result;
+}
+
 #ifdef NNOPT_USE_FP16
+bool gemv_m1_image_array_fp16_dispatch(cl_command_queue queue,
+                                       int N, int K, int slice_h,
+                                       cl_mem x, cl_mem W_image_array, cl_mem out) {
+    if (!gemv_image_ensure_init(queue)) return false;
+    cl_kernel k = gemv_image_state().kernel_array;
+    if (!k) return false;
+    if (!set_arg_checked(k, 0, sizeof(cl_mem), &x, "x")) return false;
+    if (!set_arg_checked(k, 1, sizeof(cl_mem), &W_image_array, "W")) return false;
+    if (!set_arg_checked(k, 2, sizeof(cl_mem), &out, "y")) return false;
+    if (!set_arg_checked(k, 3, sizeof(int), &N, "N")) return false;
+    if (!set_arg_checked(k, 4, sizeof(int), &K, "K")) return false;
+    if (!set_arg_checked(k, 5, sizeof(int), &slice_h, "slice_h")) return false;
+    const size_t lws[1] = {64};
+    const size_t gws[1] = {(size_t)N * lws[0]};
+    cl_int err = clEnqueueNDRangeKernel(queue, k, 1, nullptr, gws, lws, 0, nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("gemv_m1_image_array_fp16 dispatch failed: %d", (int)err);
+        return false;
+    }
+    return true;
+}
+
 bool gemv_m1_image_fp16_dispatch(cl_command_queue queue,
                                  int N, int K,
                                  cl_mem x, cl_mem W_image, cl_mem out) {
@@ -863,6 +1186,75 @@ bool gemv_m1_image_residual_fp16_dispatch(cl_command_queue queue,
     cl_int err = clEnqueueNDRangeKernel(queue, k, 1, nullptr, gws, lws, 0, nullptr, nullptr);
     if (err != CL_SUCCESS) {
         NNOPT_ERROR_FMT("gemv_m1_image_residual_fp16 dispatch failed: %d", (int)err);
+        return false;
+    }
+    return true;
+}
+
+// R6.5: fused rmsnorm + residual-add + swiglu (gate_up) image GEMV. Reads raw
+// (attn_out, hidden_states), computes sum + scale + normalized x, then GEMV
+// against W_gate / W_up. WG 0 writes sum to sum_buf for the downstream
+// fused down+residual path. Returns false if kernel unavailable or dispatch
+// fails — caller must run the separate rmsnorm_post dispatch + buffer-based
+// gate_up.
+bool gemv_m1_rmsnorm_residual_image_swiglu_fp16_dispatch(
+    cl_command_queue queue,
+    int N, int K, float eps,
+    cl_mem attn_out, cl_mem hidden_states, cl_mem gamma,
+    cl_mem W_gate_image, cl_mem W_up_image,
+    cl_mem y, cl_mem sum_buf) {
+    if (!gemv_image_ensure_init(queue)) return false;
+    cl_kernel k = gemv_image_state().kernel_rmsnorm_swiglu;
+    if (!k) return false;
+    if (!set_arg_checked(k, 0, sizeof(cl_mem), &attn_out, "attn_out")) return false;
+    if (!set_arg_checked(k, 1, sizeof(cl_mem), &hidden_states, "hidden_states")) return false;
+    if (!set_arg_checked(k, 2, sizeof(cl_mem), &gamma, "gamma")) return false;
+    if (!set_arg_checked(k, 3, sizeof(cl_mem), &W_gate_image, "W_gate")) return false;
+    if (!set_arg_checked(k, 4, sizeof(cl_mem), &W_up_image, "W_up")) return false;
+    if (!set_arg_checked(k, 5, sizeof(cl_mem), &y, "y")) return false;
+    if (!set_arg_checked(k, 6, sizeof(cl_mem), &sum_buf, "sum_buf")) return false;
+    if (!set_arg_checked(k, 7, sizeof(float), &eps, "eps")) return false;
+    if (!set_arg_checked(k, 8, sizeof(int), &N, "N")) return false;
+    if (!set_arg_checked(k, 9, sizeof(int), &K, "K")) return false;
+    const size_t lws[1] = {64};
+    const size_t gws[1] = {(size_t)N * lws[0]};
+    cl_int err = clEnqueueNDRangeKernel(queue, k, 1, nullptr, gws, lws, 0, nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("gemv_m1_rmsnorm_residual_image_swiglu_fp16 dispatch failed: %d", (int)err);
+        return false;
+    }
+    return true;
+}
+
+// R6.4: fused rmsnorm + QKV image GEMV. Returns false if kernel not built or
+// any set_arg / enqueue failure — caller falls back to the non-fused path
+// (separate rmsnorm dispatch + gemv_m1_qkv_image_fp16_dispatch).
+bool gemv_m1_rmsnorm_qkv_image_fp16_dispatch(cl_command_queue queue,
+                                             int N_q, int N_kv, int K, float eps,
+                                             cl_mem x, cl_mem gamma,
+                                             cl_mem W_q_image, cl_mem W_k_image, cl_mem W_v_image,
+                                             cl_mem Y_q, cl_mem Y_k, cl_mem Y_v) {
+    if (!gemv_image_ensure_init(queue)) return false;
+    cl_kernel k = gemv_image_state().kernel_rmsnorm_qkv;
+    if (!k) return false;
+    if (!set_arg_checked(k, 0, sizeof(cl_mem), &x, "x")) return false;
+    if (!set_arg_checked(k, 1, sizeof(cl_mem), &gamma, "gamma")) return false;
+    if (!set_arg_checked(k, 2, sizeof(cl_mem), &W_q_image, "W_q")) return false;
+    if (!set_arg_checked(k, 3, sizeof(cl_mem), &W_k_image, "W_k")) return false;
+    if (!set_arg_checked(k, 4, sizeof(cl_mem), &W_v_image, "W_v")) return false;
+    if (!set_arg_checked(k, 5, sizeof(cl_mem), &Y_q, "Y_q")) return false;
+    if (!set_arg_checked(k, 6, sizeof(cl_mem), &Y_k, "Y_k")) return false;
+    if (!set_arg_checked(k, 7, sizeof(cl_mem), &Y_v, "Y_v")) return false;
+    if (!set_arg_checked(k, 8, sizeof(float), &eps, "eps")) return false;
+    if (!set_arg_checked(k, 9, sizeof(int), &N_q, "N_q")) return false;
+    if (!set_arg_checked(k, 10, sizeof(int), &N_kv, "N_kv")) return false;
+    if (!set_arg_checked(k, 11, sizeof(int), &K, "K")) return false;
+    const int total = N_q + 2 * N_kv;
+    const size_t lws[1] = {64};
+    const size_t gws[1] = {(size_t)total * lws[0]};
+    cl_int err = clEnqueueNDRangeKernel(queue, k, 1, nullptr, gws, lws, 0, nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("gemv_m1_rmsnorm_qkv_image_fp16 dispatch failed: %d", (int)err);
         return false;
     }
     return true;

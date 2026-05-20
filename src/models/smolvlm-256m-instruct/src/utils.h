@@ -196,11 +196,29 @@ bool gemv_m1_residual_fp16_dispatch(cl_command_queue queue,
 cl_mem get_or_create_weight_image(cl_context ctx, cl_command_queue queue,
                                   cl_mem weight_buf, int N, int K);
 
+// R6.2: image2d_array variant for weights with N > CL_DEVICE_IMAGE2D_MAX_HEIGHT
+// (lm_head: 49280 rows). slice_h = max_image_height; n_slices = ceil(N/slice_h).
+// Returns {nullptr, 0, 0} on failure (K%4!=0, OOM, no array_size support).
+struct WeightImageArray {
+    cl_mem image = nullptr;
+    int slice_h = 0;
+    int n_slices = 0;
+};
+WeightImageArray get_or_create_weight_image_array(cl_context ctx,
+                                                  cl_command_queue queue,
+                                                  cl_mem weight_buf, int N, int K);
+
 // Image-backed GEMV (M=1, fp16). Reads W via read_imageh through the L1
 // texture cache. Returns false if the build isn't fp16 or kernel init fails.
 bool gemv_m1_image_fp16_dispatch(cl_command_queue queue,
                                  int N, int K,
                                  cl_mem x, cl_mem W_image, cl_mem out);
+
+// R6.2: image2d_array-backed GEMV (M=1, fp16). Same WG layout as
+// gemv_m1_image_fp16_dispatch; per-row slice arithmetic in kernel.
+bool gemv_m1_image_array_fp16_dispatch(cl_command_queue queue,
+                                       int N, int K, int slice_h,
+                                       cl_mem x, cl_mem W_image_array, cl_mem out);
 
 // Image-backed fused GEMV + element-wise residual add (down_proj decode path).
 bool gemv_m1_image_residual_fp16_dispatch(cl_command_queue queue,
@@ -214,6 +232,24 @@ bool gemv_m1_image_swiglu_fp16_dispatch(cl_command_queue queue,
                                         cl_mem x,
                                         cl_mem W_gate_image, cl_mem W_up_image,
                                         cl_mem out);
+
+// R6.4: fused rmsnorm + QKV image GEMV (M=1 decode). Skips the standalone
+// rmsnorm dispatch by computing inv_rms inside each WG. eps from model_config.
+bool gemv_m1_rmsnorm_qkv_image_fp16_dispatch(cl_command_queue queue,
+                                             int N_q, int N_kv, int K, float eps,
+                                             cl_mem x, cl_mem gamma,
+                                             cl_mem W_q_image, cl_mem W_k_image, cl_mem W_v_image,
+                                             cl_mem Y_q, cl_mem Y_k, cl_mem Y_v);
+
+// R6.5: fused rmsnorm + residual-add + swiglu image GEMV (M=1 decode). Reads
+// raw (attn_out, hidden_states); WG 0 writes their sum to sum_buf (residual2
+// for the downstream fused down+residual). Eliminates the rmsnorm_post dispatch.
+bool gemv_m1_rmsnorm_residual_image_swiglu_fp16_dispatch(
+    cl_command_queue queue,
+    int N, int K, float eps,
+    cl_mem attn_out, cl_mem hidden_states, cl_mem gamma,
+    cl_mem W_gate_image, cl_mem W_up_image,
+    cl_mem y, cl_mem sum_buf);
 
 // Image-backed fused QKV projection GEMV (M=1 decode path; three image weights).
 bool gemv_m1_qkv_image_fp16_dispatch(cl_command_queue queue,
