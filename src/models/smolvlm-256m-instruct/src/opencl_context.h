@@ -34,6 +34,16 @@ public:
     cl_command_queue queue() const { return queue_; }
     cl_device_id device() const { return device_; }
 
+    // Flush the command queue and sleep briefly so SurfaceFlinger can grab a
+    // vsync slot on the GPU. Useful between large kernel batches (e.g. between
+    // vision transformer layers) so foreground UI doesn't go white during
+    // bursty multi-second GPU compute. Gated by NNOPT_GPU_YIELD env var —
+    // benchmark builds leave it unset for max throughput.
+    //
+    // Cost: blocks the calling thread for `sleep_ms` (default 20 ms). Call
+    // sparingly — once per layer is plenty.
+    void yield_for_compositor(int sleep_ms = 20);
+
     // Device info
     std::string device_name() const;
     size_t max_work_group_size() const;

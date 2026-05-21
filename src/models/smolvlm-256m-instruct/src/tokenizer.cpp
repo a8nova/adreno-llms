@@ -1,12 +1,8 @@
-// Reference: .nnport/tokenizer.json:model.vocab
-// Reference: .nnport/tokenizer.json:decoder
-//
-// Starting-point tokenizer implementation emitted by PortTokenizer. Iterates
-// per the contract; agent extends as needed. The decoder_chain below is baked
-// from .nnport/tokenizer_contract.json::decoder_chain at scaffold-emit time
-// and covers ByteLevel, Metaspace, Replace, Strip, ByteFallback, and Fuse —
-// the most common HuggingFace decoder steps. Add cases below if the contract
-// emits a step type not handled here.
+// Tokenizer derived from the upstream HuggingFace tokenizer.json
+// (model.vocab and decoder sections). The decoder_chain below covers the
+// common HuggingFace decoder steps used by this model — ByteLevel,
+// Metaspace, Replace, Strip, ByteFallback, and Fuse. Add cases below if
+// future tokenizers require a step type not handled here.
 
 #include "tokenizer.h"
 
@@ -436,7 +432,10 @@ std::vector<int32_t> Tokenizer::build_vlm_prompt(bool image_present,
     constexpr int32_t FAKE_TOKEN_AROUND_IMAGE = 49189;
     constexpr int32_t GLOBAL_IMG = 49152;
     constexpr int32_t IMAGE_TOKEN = 49190;
-    constexpr int NUM_IMAGE_PLACEHOLDERS = 64;
+    // 64 at IMAGE_SIZE=512 (32x32 patch grid → pixel-shuffle scale 4 → 8x8=64).
+    // 36 at IMAGE_SIZE=384 (24x24 → 6x6=36). Must equal
+    // (IMAGE_SIZE/PATCH_SIZE/SCALE_FACTOR)^2 = (384/16/4)^2 = 36.
+    constexpr int NUM_IMAGE_PLACEHOLDERS = 36;
 
     std::vector<int32_t> out;
     out.reserve(128 + user_text.size());

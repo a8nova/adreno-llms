@@ -365,9 +365,11 @@ __kernel void bthd_to_bhtd(
         if (e != CL_SUCCESS) { clReleaseMemObject(dst); return nullptr; }
         return dst;
       };
+      NNOPT_PROFILE_BEGIN(queue, "vis_qkv_transpose");
       cl_mem Qt = run_tr(Q);
       cl_mem Kt = run_tr(K);
       cl_mem Vt = run_tr(V);
+      NNOPT_PROFILE_END(queue, "vis_qkv_transpose");
       if (!Qt || !Kt || !Vt) {
         NNOPT_ERROR("op_Idefics3VisionAttention: Q/K/V transpose failed");
         if (Qt) clReleaseMemObject(Qt);
@@ -439,10 +441,15 @@ __kernel void bthd_to_bhtd(
       return nullptr;
     }
 
-  // 1) scores — DIAGNOSTIC bisect: disable parallel scores
+  // 1) scores — Round 7 win: mha_scores_par (1 WG/row, 64-lane stride over tk)
+  // is ~54% faster than the naive 1-WI-per-output kernel. mha_scores_coalesced
+  // and mha_flash_attn both regressed on Adreno 620 (see BENCHMARK.md Round 8).
+  // Image2d K was tried — per-op profile −21% but wall-clock TTFT flat (the
+  // pipeline is CPU-dispatch-bound; adding more dispatches for image setup
+  // offsets the GPU win). Removed to keep the path simple.
   NNOPT_PROFILE_BEGIN(queue, "vis_scores");
   const bool use_coal_scores = false;
-  const bool use_par_scores = false;
+  const bool use_par_scores  = (state().k_scores_par != nullptr);
   cl_kernel ks = use_coal_scores ? state().k_scores_coal
                                  : (use_par_scores ? state().k_scores_par : state().k_scores);
   if (!set_arg_checked(ks, 0, sizeof(cl_mem), &Q, "Q")) return nullptr;
@@ -454,7 +461,6 @@ __kernel void bthd_to_bhtd(
   if (!set_arg_checked(ks, 6, sizeof(int), &head_dim, "D")) return nullptr;
   if (!set_arg_checked(ks, 7, sizeof(float), &scale, "scale")) return nullptr;
   if (use_coal_scores || use_par_scores) {
-    // gws (B*64, H, T), lws (64,1,1) → WG per (b,h,tq), 64-lane WG.
     const size_t lws[3] = {64, 1, 1};
     const size_t gws[3] = {(size_t)B * 64, (size_t)num_heads, (size_t)T};
     err = clEnqueueNDRangeKernel(queue, ks, 3, nullptr, gws, lws, 0, nullptr, nullptr);
@@ -493,7 +499,9 @@ __kernel void bthd_to_bhtd(
 
   // 3) softmax in-place — DIAGNOSTIC bisect: disable parallel softmax
   NNOPT_PROFILE_BEGIN(queue, "vis_softmax");
-  const bool use_par_sm = false;
+  // Round 7 win: mha_softmax_parallel uses sub_group_reduce_max/add to cut the
+  // 3 sequential T-wide passes to O(log64). Per-call 1.32 s → 20 ms.
+  const bool use_par_sm = (state().k_softmax_par != nullptr);
   cl_kernel ksm = use_par_sm ? state().k_softmax_par : state().k_softmax;
   if (!set_arg_checked(ksm, 0, sizeof(cl_mem), &scores, "scores")) return nullptr;
   if (!set_arg_checked(ksm, 1, sizeof(int), &B, "B")) return nullptr;
@@ -706,7 +714,7 @@ __kernel void bhwd_to_bthd(
   // Cleanup intermediates
   clReleaseMemObject(ctx);
   clReleaseMemObject(out_heads);
-  clReleaseMemObject(scores);
+  if (scores) clReleaseMemObject(scores);
   clReleaseMemObject(Q);
   clReleaseMemObject(K);
   clReleaseMemObject(V);

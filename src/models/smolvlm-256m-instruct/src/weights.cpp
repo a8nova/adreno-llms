@@ -147,6 +147,26 @@ static inline size_t _nnopt_bytes_per_element(const std::string& dtype) {
     return 4;  // float32 default
 }
 
+// Forward decl: defined below. Used by get_buffer()'s on-the-fly conversions.
+static inline float _wts_f16_to_f32(uint16_t bits);
+
+void Weights::advise_dontneed(size_t offset, size_t nbytes) {
+    if (mapped_ == nullptr || mapped_ == MAP_FAILED || nbytes == 0) return;
+    const long ps = sysconf(_SC_PAGESIZE);
+    if (ps <= 0) return;
+    const size_t page_sz = (size_t)ps;
+    const uintptr_t start = (uintptr_t)mapped_ + offset;
+    const uintptr_t end   = start + nbytes;
+    // Round INWARD: skip partial pages so a tensor whose region overlaps an
+    // adjacent tensor's page doesn't accidentally evict the neighbour.
+    const uintptr_t aligned_start = (start + page_sz - 1) & ~(page_sz - 1);
+    const uintptr_t aligned_end   =  end                   & ~(page_sz - 1);
+    if (aligned_end > aligned_start) {
+        // Best-effort hint; failure is non-fatal (we still hold the cl_mem).
+        (void)madvise((void*)aligned_start, aligned_end - aligned_start, MADV_DONTNEED);
+    }
+}
+
 Weights::~Weights() {
     if (mapped_ != nullptr && mapped_ != MAP_FAILED) {
         munmap(mapped_, mapped_size_);
@@ -363,6 +383,7 @@ cl_mem Weights::get_buffer(const std::string& key, bool optional) {
     }
 
     cl_int err;
+
     meta.buffer = tracked_clCreateBuffer(
         ctx_, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
         meta.size_bytes,
@@ -393,6 +414,11 @@ cl_mem Weights::get_buffer(const std::string& key, bool optional) {
         }
         _nnopt_roundtrip_verified_once = true;
     }
+
+    // Release the file-backed pages now that the GPU holds a copy. The cl_mem
+    // is the source of truth from here on; nothing reads `mapped_ + offset`
+    // again. Cuts peak CPU RSS by ~weight-file-size during upload.
+    advise_dontneed(meta.offset, meta.size_bytes);
 
     return meta.buffer;
 }

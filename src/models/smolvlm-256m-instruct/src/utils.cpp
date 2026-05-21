@@ -5,6 +5,7 @@
 #include <clblast.h>       // clblast::Gemm — used by pytorch_linear (dtype-templated dispatch).
 
 #include <fstream>
+#include <sstream>
 #include <cstring>
 #include <algorithm>
 #include <numeric>
@@ -2269,3 +2270,4 @@ bool pytorch_conv1d(cl_command_queue queue,
     NNOPT_DEBUG_SYNC(queue);
     return true;
 }
+

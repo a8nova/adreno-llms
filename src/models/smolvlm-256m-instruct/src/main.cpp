@@ -5,9 +5,10 @@
 // loop a generate step (or single forward for non-autoregressive), write
 // output. The interesting code lives in src/ops/*.cpp.
 //
-// API REFERENCE (DO NOT GUESS — these are the canonical signatures the
-// scaffold emits; matching them avoids the iteration tax of inventing
-// non-existent methods like load_from_disk / decode_one / sample_argmax):
+// API REFERENCE (DO NOT GUESS — these are the canonical signatures used
+// throughout this codebase; matching them avoids the iteration tax of
+// inventing non-existent methods like load_from_disk / decode_one /
+// sample_argmax):
 //
 //   class Weights {
 //     Weights();                                 // default ctor only — no OpenCLContext arg
@@ -78,8 +79,6 @@ static bool read_input_ids_bin(const std::string& path, std::vector<int32_t>& ou
 }
 
 int main(int argc, char** argv) {
-        // NNOPT_VERSION_BANNER does not exist in debug_utils.h for this scaffold.
-
     // Argument parsing: positional "prompt" + optional flags.
     //   ./binary "<prompt>" [max_new_tokens] [--token-ids <file>]
     std::string prompt = "The teacher worked at the ";
@@ -197,6 +196,25 @@ int main(int argc, char** argv) {
         // Single <|im_start|> token at start_pos=0 — overwritten by turn 1.
         (void)model.forward(std::vector<int32_t>{1}, 0);
         model.reset_conversation();
+
+        // Optional vision-tower prewarm. Gated by NNOPT_PREWARM_VISION=1 so
+        // CLI bench runs / one-shot --image invocations don't pay the cost.
+        // The see-and-say app sets this so app-launch eats the cold vision
+        // pass once (~10-12s) instead of paying it on the first user query
+        // and leaving the user staring at a spinner. Synthetic 512x512 gray
+        // RGB exercises the same compute path as a real camera capture
+        // (vision_pipeline resizes everything to 512x512 anyway).
+        if (std::getenv("NNOPT_PREWARM_VISION")) {
+            std::fprintf(stderr, "▶ prewarm: vision tower (synthetic 512x512)...\n");
+            std::fflush(stderr);
+            std::vector<uint8_t> dummy_rgb(3 * 512 * 512, 128);
+            if (!model.set_image(dummy_rgb, 512, 512)) {
+                NNOPT_ERROR("vision prewarm failed (continuing anyway)");
+            }
+            model.reset_conversation();
+            std::fprintf(stderr, "▶ prewarm: vision done\n");
+            std::fflush(stderr);
+        }
 
         constexpr int32_t END_OF_UTTERANCE = 49279;
         constexpr int     MAX_DECODE_PER_TURN = 128;

@@ -25,8 +25,8 @@
 // std::vector<float>), which decodes fp16→float transparently.
 using nnopt_compute_t = float;
 
-// Legacy alias retained so existing scaffold internals continue to compile
-// during the dtype-template rollout. Prefer nnopt_compute_t in new code.
+// Legacy alias retained for backward compatibility with older code paths.
+// Prefer nnopt_compute_t in new code.
 using compute_t = float;
 #define COMPUTE_DTYPE NNOPT_DTYPE_STR
 
@@ -102,7 +102,7 @@ bool element_add_inplace(cl_command_queue queue, cl_program utils_program,
 // NOTE: parameter is half_cols, NOT half. The bare identifier 'half' is
 // reserved by OpenCL's cl_khr_fp16 as the fp16 type token; using it as a
 // variable name fails on Adreno's clang front-end with an opaque parse
-// error. Same convention applies to every scaffold/agent kernel + wrapper.
+// error. Same convention applies to every kernel + wrapper in this codebase.
 bool split_last_dim_2(cl_command_queue queue, cl_program utils_program,
                       cl_mem src, cl_mem first, cl_mem second,
                       int rows, int half_cols);
@@ -281,10 +281,10 @@ bool gemv_m1_swiglu_tile2_fp16_dispatch(cl_command_queue queue,
 // — TransposeB=kNo and ldb=N (out_features), in contrast to pytorch_linear's
 // TransposeB=kYes and ldb=K.
 //
-// Layer-contract signal: when .nnport/layer_contracts/<Class>.json says
-// weight_key_parent_classes.<field> == "Conv1D", call this. When it says
-// "Linear", call pytorch_linear. Build mechanically refuses pytorch_linear()
-// on Conv1D-stored weights (cppStandards Rule 01a / Build gate).
+// Layer dispatch: when the upstream HuggingFace module stores its weights
+// under a Conv1D parent class, call this. When it's stored under Linear,
+// call pytorch_linear. Calling pytorch_linear() on Conv1D-stored weights
+// silently produces transposed garbage — be careful at the call sites.
 //
 // M = batch*seq rows in x / out
 // N = output feature dim (W.shape[1] under Conv1D layout)

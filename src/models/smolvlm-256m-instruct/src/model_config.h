@@ -1,14 +1,12 @@
-// Auto-generated from model_info/config.json at scaffold time.
+// Generated from the upstream HuggingFace config.json.
 //
 // You CAN edit this file directly when a value is wrong — it is NOT authority.
 // Preferred debugging path when a constant looks suspicious:
 //   1) Verify against PyTorch's runtime in reference/config_used.json
-//      (captured by GenerateReference). That file shows what the model
-//      actually consumed, including nested keys (rope_parameters.rope_theta etc).
-//   2) If wrong, EITHER edit this file (workspace-local fix) OR fix
-//      scaffoldTs.ts::generateModelConfigHeader (tool-side fix that re-emits
-//      correctly on next Scaffold for this AND every future port).
-//   3) Re-run Build and proceed.
+//      (the reference capture). That file shows what the model actually
+//      consumed, including nested keys (rope_parameters.rope_theta etc).
+//   2) If wrong, edit this file directly.
+//   3) Re-run the build and proceed.
 //
 // Every numeric dimension in layer code MUST come from here. Use:
 //   MODEL_CONFIG::HIDDEN_SIZE                  — scalar by name
@@ -93,7 +91,14 @@ constexpr bool  VISION_CONFIG_DO_SAMPLE                    = false;  // flattene
 constexpr bool  VISION_CONFIG_EARLY_STOPPING               = false;  // flattened from vision_config.early_stopping
 constexpr int   VISION_CONFIG_ENCODER_NO_REPEAT_NGRAM_SIZE = 0;  // flattened from vision_config.encoder_no_repeat_ngram_size
 constexpr int   VISION_CONFIG_HIDDEN_SIZE                  = 768;  // flattened from vision_config.hidden_size
-constexpr int   IMAGE_SIZE                                 = 512;  // flattened from vision_config.image_size
+// IMAGE_SIZE was 512 (32x32 patch grid → 1024 patches → 64 image tokens after
+// pixel-shuffle scale 4). Dropped to 384 (24x24 → 576 patches → 36 image
+// tokens) to cut vision-tower compute by ~44%. Requires the position
+// embedding to be bilinearly re-baked from the trained 32x32 grid to 24x24 —
+// done offline by scripts/rebake_pos_embed_384.py. The connector, splice,
+// and image_features path are all shape-driven dynamically; only this
+// constant + NUM_IMAGE_PLACEHOLDERS in tokenizer.cpp need updating in code.
+constexpr int   IMAGE_SIZE                                 = 384;  // flattened from vision_config.image_size
 constexpr float VISION_CONFIG_INITIALIZER_RANGE            = 0.02f;  // flattened from vision_config.initializer_range
 constexpr int   VISION_CONFIG_INTERMEDIATE_SIZE            = 3072;  // flattened from vision_config.intermediate_size
 constexpr bool  VISION_CONFIG_IS_DECODER                   = false;  // flattened from vision_config.is_decoder

@@ -676,3 +676,11 @@ void mha_flash_attn(
   }
 }
 #endif
+
+// ─── IMAGE2D K/V variants attempted (in git history) ─────────────────────
+// Tried mha_scores_par_image + mha_out_image reading K/V via image2d_t L1
+// texture cache. Per-op profile showed clear wins (vis_scores −21%,
+// vis_mha_out −37%) but wall-clock TTFT was flat: the vision pipeline is
+// CPU-dispatch-bound at ~360 dispatches/inference, so making GPU ops faster
+// doesn't move the wall while the CPU keeps queuing. Recordable queues
+// (cl_qcom_recordable_queues) would attack this directly — deferred.

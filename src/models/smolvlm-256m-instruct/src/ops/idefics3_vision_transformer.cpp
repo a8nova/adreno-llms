@@ -264,6 +264,13 @@ __kernel void iota_int32(__global int* out, int n) {
       std::fprintf(stderr, "  vision_layer    %2d  %7.1f ms  (cumulative %.1f ms)\n",
                    i, ms, total_layers_ms);
     }
+    // Yield the GPU between transformer layers so SurfaceFlinger can grab a
+    // vsync slot. Without this, the foreground UI goes white for the full
+    // ~10 s of vision_pipe because Adreno 620's single CU can't service both
+    // our OpenCL dispatches and the compositor at the same time. The yield
+    // is a no-op unless NNOPT_GPU_YIELD env var is set (see opencl_context.cpp).
+    // Cost: ~20 ms × 12 layers = ~240 ms added to vision_pipe (~2.4 %).
+    cl_ctx.yield_for_compositor();
   }
 
   // post layernorm

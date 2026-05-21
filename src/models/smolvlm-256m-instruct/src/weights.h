@@ -69,11 +69,19 @@ private:
         size_t offset;
         size_t size_bytes;
         size_t num_elements;
-        std::string dtype;       // "float32" / "float16" / "bfloat16" — from meta.json
+        std::string dtype;       // "float32" / "float16" / "bfloat16"
         std::vector<int> shape;
         cl_mem buffer = nullptr;
     };
 
     std::unordered_map<std::string, TensorMeta> tensors_;
     cl_context ctx_ = nullptr;
+
+    // Hint the kernel that we no longer need a region of the mmap'd weight
+    // file in RAM. Called immediately after a successful clCreateBuffer /
+    // clCreateImage that COPY_HOST_PTR'd from `mapped_ + offset`. Page-aligns
+    // INWARD so we never release a page that straddles into an adjacent
+    // tensor's range. Cuts peak CPU memory by ~weight-file-size because
+    // otherwise the source pages stay resident next to the cl_mem copies.
+    void advise_dontneed(size_t offset, size_t nbytes);
 };
