@@ -101,15 +101,16 @@ echo "Target ABI: arm64-v8a"
 echo "Target API Level: 21"
 
 # ============================================
-# Check OpenCL headers (downloaded by porting orchestrator)
-# CLBlast is built from source via CMake FetchContent
+# OpenCL headers + extracted device library are expected under $DEPS_DIR.
+# Override the location by exporting ADRENO_LLMS_DEPS_DIR in your shell.
+# CLBlast is built from source via CMake FetchContent.
 # ============================================
-DEPS_DIR="$HOME/.nnopt/deps"
+DEPS_DIR="${ADRENO_LLMS_DEPS_DIR:-$HOME/.cache/adreno-llms-deps}"
 OPENCL_INC="$DEPS_DIR/opencl/include"
 
 if [ ! -f "$OPENCL_INC/CL/cl.h" ]; then
     echo "ERROR: OpenCL headers not found at $OPENCL_INC"
-    echo "The porting orchestrator should have downloaded these."
+    echo "Set ADRENO_LLMS_DEPS_DIR to the directory containing opencl/include/CL/cl.h."
     exit 1
 fi
 

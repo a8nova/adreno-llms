@@ -52,12 +52,14 @@ if(ANDROID)
 endif()
 
 # CLBlast / OpenCL backend (backend="opencl")
-# OpenCL headers from ~/.nnopt/deps/ (downloaded by porting orchestrator)
-# These are Khronos headers with an OpenCL/ symlink for macOS compatibility
+# OpenCL headers location is passed in via -DOPENCL_INCLUDE_DIR by the
+# project's build.sh, which reads $ADRENO_LLMS_DEPS_DIR (default:
+# ~/.cache/adreno-llms-deps). These are Khronos headers with an OpenCL/
+# symlink for macOS compatibility.
 if(DEFINED OPENCL_INCLUDE_DIR)
     message(STATUS "Using OpenCL headers from: ${OPENCL_INCLUDE_DIR}")
 else()
-    message(FATAL_ERROR "OPENCL_INCLUDE_DIR not set. Ensure porting orchestrator has run.")
+    message(FATAL_ERROR "OPENCL_INCLUDE_DIR not set. Invoke build.sh or pass -DOPENCL_INCLUDE_DIR=<path>.")
 endif()
 
 # Pre-populate ALL OpenCL find_package result variables BEFORE FetchContent.
@@ -73,14 +75,18 @@ set(OPENCL_INCLUDE_DIRS "${OPENCL_INCLUDE_DIR}" CACHE PATH "OpenCL include dirs"
 # For Android: use extracted device library as stub for link-time, resolve at runtime
 # For host: use system OpenCL (framework on macOS, library on Linux)
 if(DEFINED OPENCL_LIBRARIES)
-    # Library provided via CMake args (extracted from device by deps_manager.py)
-    # This is used as a stub for Android cross-compilation
+    # Library passed in via CMake args (typically a libOpenCL.so stub
+    # previously extracted from the target Android device's /vendor partition).
+    # Used as a link-time stub; the real symbols resolve at runtime against the
+    # device's actual libOpenCL.so.
     message(STATUS "Using provided OpenCL library: ${OPENCL_LIBRARIES}")
     set(OpenCL_LIBRARY "${OPENCL_LIBRARIES}" CACHE STRING "OpenCL library" FORCE)
     set(OpenCL_LIBRARIES "${OPENCL_LIBRARIES}" CACHE STRING "OpenCL libraries" FORCE)
 elseif(ANDROID)
-    # For Android, OpenCL must be extracted from device (handled by porting orchestrator)
-    message(FATAL_ERROR "OPENCL_LIBRARIES not provided. Run porting orchestrator to extract libOpenCL.so from device.")
+    # Android builds require a libOpenCL.so stub for linking — extract it once
+    # from the target device (adb pull /vendor/lib64/libOpenCL.so) and stage it
+    # under $ADRENO_LLMS_DEPS_DIR/opencl/lib/android-arm64-v8a/.
+    message(FATAL_ERROR "OPENCL_LIBRARIES not provided. Stage a libOpenCL.so stub under $ADRENO_LLMS_DEPS_DIR/opencl/lib/android-arm64-v8a/ and re-run build.sh.")
 else()
     # Native build - use system OpenCL
     if(APPLE)
@@ -107,25 +113,32 @@ endif()
 # Include our Khronos headers for all project code (BEFORE ensures priority over system paths)
 include_directories(BEFORE ${OPENCL_INCLUDE_DIR})
 
-# CLBlast — prefer pre-built from ~/.nnopt/deps/clblast/, fall back to FetchContent.
+# CLBlast — prefer a pre-built copy under $ADRENO_LLMS_DEPS_DIR/clblast/
+# (override with -DCLBLAST_DIR=<path>); fall back to FetchContent otherwise.
 # Under fp16, SKIP the pre-built artifact: it's typically built without HALF=ON
 # (Hgemm symbol absent), and a silent Sgemm fallback would defeat the whole
 # point of the fp16 build. Always FetchContent + rebuild with HALF=ON for fp16.
-set(NNOPT_CLBLAST_DIR "$ENV{HOME}/.nnopt/deps/clblast")
-set(_NNOPT_USE_PREBUILT_CLBLAST FALSE)
-if(NOT NNOPT_DTYPE STREQUAL "fp16"
-   AND EXISTS "${NNOPT_CLBLAST_DIR}/lib/libclblast.a"
-   AND EXISTS "${NNOPT_CLBLAST_DIR}/include/clblast.h")
-    set(_NNOPT_USE_PREBUILT_CLBLAST TRUE)
+if(NOT DEFINED CLBLAST_DIR)
+    if(DEFINED ENV{ADRENO_LLMS_DEPS_DIR})
+        set(CLBLAST_DIR "$ENV{ADRENO_LLMS_DEPS_DIR}/clblast")
+    else()
+        set(CLBLAST_DIR "$ENV{HOME}/.cache/adreno-llms-deps/clblast")
+    endif()
 endif()
-if(_NNOPT_USE_PREBUILT_CLBLAST)
-    message(STATUS "Using pre-built CLBlast from ${NNOPT_CLBLAST_DIR}")
+set(_USE_PREBUILT_CLBLAST FALSE)
+if(NOT NNOPT_DTYPE STREQUAL "fp16"
+   AND EXISTS "${CLBLAST_DIR}/lib/libclblast.a"
+   AND EXISTS "${CLBLAST_DIR}/include/clblast.h")
+    set(_USE_PREBUILT_CLBLAST TRUE)
+endif()
+if(_USE_PREBUILT_CLBLAST)
+    message(STATUS "Using pre-built CLBlast from ${CLBLAST_DIR}")
     add_library(clblast STATIC IMPORTED GLOBAL)
     set_target_properties(clblast PROPERTIES
-        IMPORTED_LOCATION "${NNOPT_CLBLAST_DIR}/lib/libclblast.a"
-        INTERFACE_INCLUDE_DIRECTORIES "${NNOPT_CLBLAST_DIR}/include"
+        IMPORTED_LOCATION "${CLBLAST_DIR}/lib/libclblast.a"
+        INTERFACE_INCLUDE_DIRECTORIES "${CLBLAST_DIR}/include"
     )
-    include_directories("${NNOPT_CLBLAST_DIR}/include")
+    include_directories("${CLBLAST_DIR}/include")
 else()
     if(NNOPT_DTYPE STREQUAL "fp16")
         message(STATUS "fp16 build — fetching CLBlast from source with HALF=ON")
@@ -180,12 +193,12 @@ endif()
 # Auto-vendored on first build via FetchContent; populates
 # src/third_party/{stb_image,stb_image_write}.h into the build tree and
 # adds the directory to the include path. Headers are only #included by
-# load_image.h / write_image.h (scaffolded for VLM ports only); text-only
+# load_image.h / write_image.h (present for VLM ports only); text-only
 # ports compile cleanly without ever pulling these symbols.
 #
-# The matching src/third_party/stb_image_impl.cpp (scaffolded alongside
-# the headers) defines STB_IMAGE_IMPLEMENTATION + STB_IMAGE_WRITE_IMPLEMENTATION
-# in exactly one TU so the headers can be #included header-style elsewhere.
+# The matching src/third_party/stb_image_impl.cpp (alongside the headers)
+# defines STB_IMAGE_IMPLEMENTATION + STB_IMAGE_WRITE_IMPLEMENTATION in
+# exactly one TU so the headers can be #included header-style elsewhere.
 # ──────────────────────────────────────────────────────────────────────
 if(EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/stb_image_impl.cpp")
     include(FetchContent)
@@ -205,10 +218,9 @@ endif()
 set(LAYER_SOURCES
 )
 
-# Graph-mode op sources — agent appends one src/ops/<class>_<id>.cpp per
-# ported node via PortNode. Glob picks them up automatically without the
-# scaffolder needing to know about them at scaffold time. Empty in old-mode
-# scaffolds (src/ops/ won't exist) — the glob silently no-ops.
+# Graph-mode op sources — one src/ops/<class>_<id>.cpp per ported node.
+# Globbed so the build picks up new ops automatically. Older text-only ports
+# may not have src/ops/ at all — the glob silently no-ops in that case.
 file(GLOB GRAPH_OP_SOURCES "${CMAKE_SOURCE_DIR}/src/ops/*.cpp")
 
 # Submodel sources — VLM/ASR/TTS ports use src/submodels/<role>/*.cpp
@@ -223,14 +235,13 @@ file(GLOB_RECURSE SUBMODEL_SOURCES "${CMAKE_SOURCE_DIR}/src/submodels/*.cpp")
 # emit code in exactly one translation unit.
 file(GLOB THIRD_PARTY_SOURCES "${CMAKE_SOURCE_DIR}/src/third_party/*.cpp")
 
-# Top-level src/*.cpp — globbed (not enumerated) so any helper the scaffold
-# emits at src/ level gets compiled automatically without an explicit add.
-# This covers main.cpp, model.cpp, sampler.cpp, opencl_context.cpp,
-# weights.cpp, tokenizer.cpp, utils.cpp, plus any architecture-conditional
-# helper the scaffold writes (e.g. rotary_tables.cpp for RoPE-based models,
-# selective_scan_tables.cpp for SSM-based models). The glob is non-recursive
-# so src/ops/, src/submodels/, src/third_party/ remain handled by their
-# dedicated globs above.
+# Top-level src/*.cpp — globbed (not enumerated) so any helper at src/ level
+# gets compiled automatically without an explicit add. This covers main.cpp,
+# model.cpp, sampler.cpp, opencl_context.cpp, weights.cpp, tokenizer.cpp,
+# utils.cpp, plus any architecture-conditional helper (e.g. rotary_tables.cpp
+# for RoPE-based models, selective_scan_tables.cpp for SSM-based models).
+# The glob is non-recursive so src/ops/, src/submodels/, src/third_party/
+# remain handled by their dedicated globs above.
 file(GLOB CORE_SOURCES "${CMAKE_SOURCE_DIR}/src/*.cpp")
 
 # Source files
@@ -264,15 +275,15 @@ if(ANDROID)
     target_link_options(SmolVLM_256M_Instruct_inference PRIVATE
         "-Wl,--allow-shlib-undefined"
         "-Wl,--unresolved-symbols=ignore-all"
-        # CRITICAL: device-extracted libOpenCL.so stubs (cached in
-        # ~/.nnopt/deps/opencl/lib/) carry DT_NEEDED entries pointing at
-        # vendor GL libs (e.g. libGLES_mali.so on Mali, libCB.so on
-        # Adreno-X). The linker by default copies those DT_NEEDEDs into
-        # OUR executable, so a binary built from a Mali-extracted stub
-        # then refuses to launch on Adreno (libGLES_mali.so missing) and
-        # vice-versa. --no-copy-dt-needed-entries blocks the propagation
-        # — we still resolve OpenCL symbols against the stub at link
-        # time, but the DT_NEEDED on it doesn't cascade.
+        # CRITICAL: device-extracted libOpenCL.so stubs (typically staged
+        # under $ADRENO_LLMS_DEPS_DIR/opencl/lib/) carry DT_NEEDED entries
+        # pointing at vendor GL libs (e.g. libGLES_mali.so on Mali, libCB.so
+        # on Adreno-X). The linker by default copies those DT_NEEDEDs into
+        # OUR executable, so a binary built from a Mali-extracted stub then
+        # refuses to launch on Adreno (libGLES_mali.so missing) and vice
+        # versa. --no-copy-dt-needed-entries blocks the propagation — we
+        # still resolve OpenCL symbols against the stub at link time, but
+        # the DT_NEEDED on it doesn't cascade.
         "-Wl,--no-copy-dt-needed-entries"
         "-Wl,-rpath,/vendor/lib64:/vendor/lib:/system/lib64:/system/lib"
     )

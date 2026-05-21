@@ -8,7 +8,10 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstdint>
-#include <sys/stat.h>   // mkdir — kernel-binary cache directory
+#include <chrono>       // std::this_thread::sleep_for — yield_for_compositor
+#include <thread>       // std::this_thread::sleep_for — yield_for_compositor
+#include <sys/stat.h>   // mkdir / stat — kernel-binary cache directory
+#include <unistd.h>     // fsync — durably flush the cache write to disk before process exit
 
 // Qualcomm extension tokens (cl_qcom_perf_hint + cl_qcom_priority_hint).
 // Defined inline because vanilla OpenCL headers don't ship the Adreno ext tokens.
@@ -58,9 +61,27 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
     // Opt #13: request HIGH perf hint + HIGH priority hint on context (Adreno
     // guide §9.1.1, §9.1.2). HIGH perf is documented as the default but
     // setting explicitly keeps boost clocks engaged during bursty decode.
+    //
+    // The PRIORITY hint controls how the Adreno driver schedules our compute
+    // against the system's GPU work — most importantly SurfaceFlinger, which
+    // composites every frame on the same GPU. HIGH wins us a few percent of
+    // throughput for benchmark runs but starves the compositor, producing
+    // visible UI stutter and (on some Adreno paths) white-frame drops in
+    // foreground apps. The NNOPT_QCOM_PRIORITY env var lets demo/foreground
+    // builds opt into LOW so the UI thread always gets its frames in.
+    //   unset / HIGH   → CL_PRIORITY_HINT_HIGH_QCOM   (benchmark default)
+    //   NORMAL         → CL_PRIORITY_HINT_NORMAL_QCOM (driver default scheduling)
+    //   LOW            → CL_PRIORITY_HINT_LOW_QCOM    (yield to compositor)
+    cl_uint priority_hint = CL_PRIORITY_HINT_HIGH_QCOM;
+    if (const char* pe = std::getenv("NNOPT_QCOM_PRIORITY")) {
+        std::string s(pe);
+        if (s == "LOW" || s == "low")         priority_hint = CL_PRIORITY_HINT_LOW_QCOM;
+        else if (s == "NORMAL" || s == "normal") priority_hint = CL_PRIORITY_HINT_NORMAL_QCOM;
+        fprintf(stderr, "[opencl_context] NNOPT_QCOM_PRIORITY=%s → priority_hint=0x%x\n", pe, priority_hint);
+    }
     cl_context_properties ctx_props[] = {
         CL_CONTEXT_PERF_HINT_QCOM,     CL_PERF_HINT_HIGH_QCOM,
-        CL_CONTEXT_PRIORITY_HINT_QCOM, CL_PRIORITY_HINT_HIGH_QCOM,
+        CL_CONTEXT_PRIORITY_HINT_QCOM, (cl_context_properties)priority_hint,
         0
     };
     context_ = clCreateContext(ctx_props, 1, &device_, nullptr, nullptr, &err);
@@ -158,6 +179,33 @@ static std::string nnopt_cache_path_for(uint64_t key) {
     return std::string(buf);
 }
 
+// stat()-check then mkdir(). Returns true iff the directory exists and is
+// writable after the call. Older code did `mkdir(... , 0755)` and ignored
+// the return — silently producing a never-saved cache when the parent
+// path didn't exist or was non-writable (e.g. on a freshly-installed APK
+// where filesDir/smolvlm/kernel_cache hasn't been created yet).
+static bool nnopt_ensure_cache_dir() {
+    struct stat st{};
+    if (stat("kernel_cache", &st) == 0) {
+        return S_ISDIR(st.st_mode);
+    }
+    if (mkdir("kernel_cache", 0755) == 0) {
+        return true;
+    }
+    // EEXIST is benign (race with another caller).
+    if (stat("kernel_cache", &st) == 0 && S_ISDIR(st.st_mode)) return true;
+    return false;
+}
+
+static inline bool nnopt_kcache_log() {
+    static int s = -1;
+    if (s < 0) {
+        const char* e = std::getenv("NNOPT_KCACHE_LOG");
+        s = (e && e[0] == '1') ? 1 : 0;
+    }
+    return s == 1;
+}
+
 cl_program nnopt_build_program_cached(cl_context ctx, cl_device_id dev,
                                       const std::string& source,
                                       const std::string& options) {
@@ -177,15 +225,32 @@ cl_program nnopt_build_program_cached(cl_context ctx, cl_device_id dev,
     cl_program program = nullptr;
 
     // ── Cache HIT path ────────────────────────────────────────────────────
+    // Logs HIT / MISS / corrupt-file / build-failure outcomes when
+    // NNOPT_KCACHE_LOG=1. Previously this path was silent on miss, so a
+    // never-saved cache file was invisible — first-launch and every launch
+    // looked identical (paid full JIT cost). Diagnostic logging gated to
+    // avoid spamming production stderr.
     {
         std::ifstream f(cache_path, std::ios::binary | std::ios::ate);
-        if (f) {
+        if (!f) {
+            if (nnopt_kcache_log()) {
+                fprintf(stderr, "[kernel_cache] MISS no-file %s\n", cache_path.c_str());
+            }
+        } else {
             const std::streamsize sz_signed = f.tellg();
             f.seekg(0, std::ios::beg);
-            if (sz_signed > 0) {
+            if (sz_signed <= 0) {
+                if (nnopt_kcache_log()) {
+                    fprintf(stderr, "[kernel_cache] MISS empty-file %s\n", cache_path.c_str());
+                }
+            } else {
                 const size_t sz = (size_t)sz_signed;
                 std::vector<unsigned char> bin(sz);
-                if (f.read(reinterpret_cast<char*>(bin.data()), sz)) {
+                if (!f.read(reinterpret_cast<char*>(bin.data()), sz)) {
+                    if (nnopt_kcache_log()) {
+                        fprintf(stderr, "[kernel_cache] MISS read-fail %s\n", cache_path.c_str());
+                    }
+                } else {
                     cl_int binary_status = CL_SUCCESS;
                     const unsigned char* bp = bin.data();
                     program = clCreateProgramWithBinary(ctx, 1, &dev, &sz, &bp,
@@ -194,16 +259,24 @@ cl_program nnopt_build_program_cached(cl_context ctx, cl_device_id dev,
                         err = clBuildProgram(program, 1, &dev, options.c_str(),
                                              nullptr, nullptr);
                         if (err == CL_SUCCESS) {
+                            if (nnopt_kcache_log()) {
+                                fprintf(stderr, "[kernel_cache] HIT %s (%zu B)\n",
+                                        cache_path.c_str(), sz);
+                            }
                             return program;
                         }
-                        fprintf(stderr, "[kernel_cache] HIT but build-from-binary failed "
-                                        "(err=%d); rebuilding from source: %s\n",
+                        fprintf(stderr, "[kernel_cache] HIT-but-rebuild-failed "
+                                        "(err=%d); falling back to source: %s\n",
                                 (int)err, cache_path.c_str());
                         clReleaseProgram(program);
                         program = nullptr;
-                    } else if (program) {
-                        clReleaseProgram(program);
-                        program = nullptr;
+                    } else {
+                        if (nnopt_kcache_log()) {
+                            fprintf(stderr, "[kernel_cache] MISS createProgramWithBinary "
+                                            "err=%d binary_status=%d %s\n",
+                                    (int)err, (int)binary_status, cache_path.c_str());
+                        }
+                        if (program) { clReleaseProgram(program); program = nullptr; }
                     }
                 }
             }
@@ -235,7 +308,12 @@ cl_program nnopt_build_program_cached(cl_context ctx, cl_device_id dev,
         return nullptr;
     }
 
-    // Persist the device binary for next launch.
+    // Persist the device binary for next launch. The previous version of
+    // this block let `std::ofstream` go out of scope without explicit close,
+    // no good() check, no fsync — on Android, if the app process exited
+    // before the OS flushed the page cache, the file ended up
+    // created-but-empty and every subsequent launch silently fell back to
+    // JIT. Hence the careful write+close+fsync sequence below.
     size_t bin_sz = 0;
     if (clGetProgramInfo(program, CL_PROGRAM_BINARY_SIZES, sizeof(bin_sz),
                          &bin_sz, nullptr) == CL_SUCCESS && bin_sz > 0) {
@@ -243,11 +321,56 @@ cl_program nnopt_build_program_cached(cl_context ctx, cl_device_id dev,
         unsigned char* binp = bin.data();
         if (clGetProgramInfo(program, CL_PROGRAM_BINARIES, sizeof(binp),
                              &binp, nullptr) == CL_SUCCESS) {
-            // Best-effort mkdir + write; failures are non-fatal (next run
-            // just falls back to source again).
-            mkdir("kernel_cache", 0755);
-            std::ofstream out(cache_path, std::ios::binary | std::ios::trunc);
-            if (out) out.write(reinterpret_cast<const char*>(bin.data()), bin.size());
+            if (!nnopt_ensure_cache_dir()) {
+                if (nnopt_kcache_log()) {
+                    fprintf(stderr, "[kernel_cache] SAVE skipped — cache dir unavailable\n");
+                }
+            } else {
+                // Use C-level FILE* so we can fsync() before close to durably
+                // commit the bytes — std::ofstream offers no portable way to
+                // get the underlying fd. Failures of any step are logged but
+                // non-fatal (next run just re-JITs).
+                FILE* fp = std::fopen(cache_path.c_str(), "wb");
+                bool ok = false;
+                if (fp) {
+                    const size_t wrote = std::fwrite(bin.data(), 1, bin.size(), fp);
+                    if (wrote == bin.size()) {
+                        // Flush libc buffer to the kernel.
+                        if (std::fflush(fp) == 0) {
+                            // Push kernel buffer to durable storage so an
+                            // app exit (intentional or crash) before the
+                            // periodic writeback won't leave us with an
+                            // empty file.
+                            const int fd = fileno(fp);
+                            if (fd >= 0 && fsync(fd) == 0) {
+                                ok = true;
+                            } else if (nnopt_kcache_log()) {
+                                fprintf(stderr, "[kernel_cache] fsync failed: %s\n",
+                                        cache_path.c_str());
+                            }
+                        } else if (nnopt_kcache_log()) {
+                            fprintf(stderr, "[kernel_cache] fflush failed: %s\n",
+                                    cache_path.c_str());
+                        }
+                    } else if (nnopt_kcache_log()) {
+                        fprintf(stderr, "[kernel_cache] short-write %zu/%zu: %s\n",
+                                wrote, bin.size(), cache_path.c_str());
+                    }
+                    std::fclose(fp);
+                } else if (nnopt_kcache_log()) {
+                    fprintf(stderr, "[kernel_cache] fopen-for-write failed: %s\n",
+                            cache_path.c_str());
+                }
+                if (ok && nnopt_kcache_log()) {
+                    fprintf(stderr, "[kernel_cache] SAVE %s (%zu B)\n",
+                            cache_path.c_str(), bin.size());
+                }
+                if (!ok) {
+                    // Leave nothing behind that the next run would mistake
+                    // for a valid cache file.
+                    std::remove(cache_path.c_str());
+                }
+            }
         }
     }
 
@@ -256,8 +379,8 @@ cl_program nnopt_build_program_cached(cl_context ctx, cl_device_id dev,
 
 cl_program OpenCLContext::build_program(const std::string& source, const std::string& options) {
     // Forward host-side dtype to the kernel preamble. Without this, every
-    // scaffold-emitted and agent-written kernel falls through to the fp32
-    // path of `#ifdef USE_FP16` and reads garbage from cl_half buffers.
+    // kernel falls through to the fp32 path of `#ifdef USE_FP16` and reads
+    // garbage from cl_half buffers.
     std::string effective_options = options;
 #ifdef NNOPT_USE_FP16
     if (effective_options.find("USE_FP16") == std::string::npos) {
@@ -310,4 +433,22 @@ size_t OpenCLContext::local_mem_size() const {
     cl_ulong size;
     clGetDeviceInfo(device_, CL_DEVICE_LOCAL_MEM_SIZE, sizeof(size), &size, nullptr);
     return (size_t)size;
+}
+
+void OpenCLContext::yield_for_compositor(int sleep_ms) {
+    // Cheap: env var lookup is a string compare against process env on first
+    // call; the JVM-style "always check" is fine here since this fires at most
+    // ~12 times per vision_pipe call (once per transformer layer).
+    static const bool enabled = ([](){
+        const char* e = std::getenv("NNOPT_GPU_YIELD");
+        return e != nullptr && e[0] != '0' && e[0] != '\0';
+    })();
+    if (!enabled || !queue_) return;
+    // Drain the queue so the GPU actually goes idle (clFlush is non-blocking
+    // and the driver might keep batching dispatches). clFinish blocks until
+    // every prior enqueued command has completed on the device.
+    clFinish(queue_);
+    if (sleep_ms > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+    }
 }

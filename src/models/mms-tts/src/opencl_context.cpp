@@ -5,8 +5,13 @@
 #include <sstream>
 #include <iostream>
 #include <cstdlib>
+#include <cstdio>      // FILE* + fopen/fwrite/fflush/fclose for fsync'd cache writes
 #include <cstring>
+#include <cstdint>     // uint64_t — FNV-1a hash key
 #include <dlfcn.h>
+#include <sys/stat.h>  // stat / mkdir for kernel_cache directory
+#include <unistd.h>    // fsync — durably commit cache writes before process exit
+#include <vector>
 
 OpenCLContext::OpenCLContext() {}
 
@@ -198,20 +203,210 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
     return true;
 }
 
-cl_program OpenCLContext::build_program(const std::string& source, const std::string& options) {
-    cl_int err;
+// ──────────────────────────────────────────────
+// On-disk OpenCL program-binary cache (lifted verbatim from
+// smolvlm-256m-instruct/src/opencl_context.cpp:155–378). First call with a
+// given (source + options + device + driver) compiles from source AND writes
+// the device binary to `<cwd>/kernel_cache/<hash>.bin`. Subsequent launches
+// reload via clCreateProgramWithBinary, skipping the ~50–200 ms × N kernel-
+// build cost that otherwise hits every launch.
+//
+// Cache key: 16-hex-digit FNV-1a hash of "source|options|device_name|driver".
+// Write path: fopen + fwrite + fflush + fsync + fclose, with std::remove
+// on any failure so the next launch doesn't load a corrupt half-file.
+// Read path: validates file size > 0 before passing to
+// clCreateProgramWithBinary; falls through to source compile on any miss.
+// Diagnostics: NNOPT_KCACHE_LOG=1 → one stderr line per HIT/MISS/SAVE.
+// ──────────────────────────────────────────────
+
+static uint64_t nnopt_fnv1a64(const std::string& s) {
+    uint64_t h = 14695981039346656037ULL;
+    for (unsigned char c : s) { h ^= c; h *= 1099511628211ULL; }
+    return h;
+}
+
+static std::string nnopt_cache_path_for(uint64_t key) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "kernel_cache/%016llx.bin", (unsigned long long)key);
+    return std::string(buf);
+}
+
+static bool nnopt_ensure_cache_dir() {
+    struct stat st{};
+    if (stat("kernel_cache", &st) == 0) {
+        return S_ISDIR(st.st_mode);
+    }
+    if (mkdir("kernel_cache", 0755) == 0) {
+        return true;
+    }
+    if (stat("kernel_cache", &st) == 0 && S_ISDIR(st.st_mode)) return true;
+    return false;
+}
+
+static inline bool nnopt_kcache_log() {
+    static int s = -1;
+    if (s < 0) {
+        const char* e = std::getenv("NNOPT_KCACHE_LOG");
+        s = (e && e[0] == '1') ? 1 : 0;
+    }
+    return s == 1;
+}
+
+static cl_program nnopt_build_program_cached(cl_context ctx, cl_device_id dev,
+                                             const std::string& source,
+                                             const std::string& options) {
+    static std::string s_dev_name, s_drv_ver;
+    if (s_dev_name.empty()) {
+        char b[256] = {0};
+        clGetDeviceInfo(dev, CL_DEVICE_NAME, sizeof(b), b, nullptr); s_dev_name = b;
+        std::memset(b, 0, sizeof(b));
+        clGetDeviceInfo(dev, CL_DRIVER_VERSION, sizeof(b), b, nullptr); s_drv_ver = b;
+    }
+    const std::string key_str = source + "|" + options + "|" + s_dev_name + "|" + s_drv_ver;
+    const uint64_t key = nnopt_fnv1a64(key_str);
+    const std::string cache_path = nnopt_cache_path_for(key);
+
+    cl_int err = CL_SUCCESS;
+    cl_program program = nullptr;
+
+    // ── Cache HIT path ────────────────────────────────────────────────────
+    {
+        std::ifstream f(cache_path, std::ios::binary | std::ios::ate);
+        if (!f) {
+            if (nnopt_kcache_log()) {
+                fprintf(stderr, "[kernel_cache] MISS no-file %s\n", cache_path.c_str());
+            }
+        } else {
+            const std::streamsize sz_signed = f.tellg();
+            f.seekg(0, std::ios::beg);
+            if (sz_signed <= 0) {
+                if (nnopt_kcache_log()) {
+                    fprintf(stderr, "[kernel_cache] MISS empty-file %s\n", cache_path.c_str());
+                }
+            } else {
+                const size_t sz = (size_t)sz_signed;
+                std::vector<unsigned char> bin(sz);
+                if (!f.read(reinterpret_cast<char*>(bin.data()), sz)) {
+                    if (nnopt_kcache_log()) {
+                        fprintf(stderr, "[kernel_cache] MISS read-fail %s\n", cache_path.c_str());
+                    }
+                } else {
+                    cl_int binary_status = CL_SUCCESS;
+                    const unsigned char* bp = bin.data();
+                    program = clCreateProgramWithBinary(ctx, 1, &dev, &sz, &bp,
+                                                        &binary_status, &err);
+                    if (err == CL_SUCCESS && binary_status == CL_SUCCESS && program) {
+                        err = clBuildProgram(program, 1, &dev, options.c_str(),
+                                             nullptr, nullptr);
+                        if (err == CL_SUCCESS) {
+                            if (nnopt_kcache_log()) {
+                                fprintf(stderr, "[kernel_cache] HIT %s (%zu B)\n",
+                                        cache_path.c_str(), sz);
+                            }
+                            return program;
+                        }
+                        fprintf(stderr, "[kernel_cache] HIT-but-rebuild-failed "
+                                        "(err=%d); falling back to source: %s\n",
+                                (int)err, cache_path.c_str());
+                        clReleaseProgram(program);
+                        program = nullptr;
+                    } else {
+                        if (nnopt_kcache_log()) {
+                            fprintf(stderr, "[kernel_cache] MISS createProgramWithBinary "
+                                            "err=%d binary_status=%d %s\n",
+                                    (int)err, (int)binary_status, cache_path.c_str());
+                        }
+                        if (program) { clReleaseProgram(program); program = nullptr; }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Cache MISS path: build from source, then save binary ─────────────
     const char* src_ptr = source.c_str();
     size_t src_len = source.size();
-
-    cl_program program = clCreateProgramWithSource(context_, 1, &src_ptr, &src_len, &err);
-    if (err != CL_SUCCESS) {
+    program = clCreateProgramWithSource(ctx, 1, &src_ptr, &src_len, &err);
+    if (err != CL_SUCCESS || !program) {
         NNOPT_ERROR_FMT("clCreateProgramWithSource failed (err=%d)", (int)err);
         return nullptr;
     }
 
+    err = clBuildProgram(program, 1, &dev, options.c_str(), nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("clBuildProgram FAILED (err=%d)", (int)err);
+        size_t log_size = 0;
+        clGetProgramBuildInfo(program, dev, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
+        if (log_size > 0) {
+            std::vector<char> log(log_size + 1, 0);
+            clGetProgramBuildInfo(program, dev, CL_PROGRAM_BUILD_LOG, log_size, log.data(), nullptr);
+            fprintf(stderr, "OpenCL Build Log: %s\n", log.data());
+            fflush(stderr);
+        }
+        clReleaseProgram(program);
+        return nullptr;
+    }
+
+    // Persist the device binary for next launch. fopen/fwrite/fflush/fsync/
+    // fclose with explicit error checks at every step — std::ofstream's
+    // implicit dtor close doesn't flush to durable storage, leaving a 0-byte
+    // file behind if the process exits before the OS commits the page.
+    size_t bin_sz = 0;
+    if (clGetProgramInfo(program, CL_PROGRAM_BINARY_SIZES, sizeof(bin_sz),
+                         &bin_sz, nullptr) == CL_SUCCESS && bin_sz > 0) {
+        std::vector<unsigned char> bin(bin_sz);
+        unsigned char* binp = bin.data();
+        if (clGetProgramInfo(program, CL_PROGRAM_BINARIES, sizeof(binp),
+                             &binp, nullptr) == CL_SUCCESS) {
+            if (!nnopt_ensure_cache_dir()) {
+                if (nnopt_kcache_log()) {
+                    fprintf(stderr, "[kernel_cache] SAVE skipped — cache dir unavailable\n");
+                }
+            } else {
+                FILE* fp = std::fopen(cache_path.c_str(), "wb");
+                bool ok = false;
+                if (fp) {
+                    const size_t wrote = std::fwrite(bin.data(), 1, bin.size(), fp);
+                    if (wrote == bin.size()) {
+                        if (std::fflush(fp) == 0) {
+                            const int fd = fileno(fp);
+                            if (fd >= 0 && fsync(fd) == 0) {
+                                ok = true;
+                            } else if (nnopt_kcache_log()) {
+                                fprintf(stderr, "[kernel_cache] fsync failed: %s\n",
+                                        cache_path.c_str());
+                            }
+                        } else if (nnopt_kcache_log()) {
+                            fprintf(stderr, "[kernel_cache] fflush failed: %s\n",
+                                    cache_path.c_str());
+                        }
+                    } else if (nnopt_kcache_log()) {
+                        fprintf(stderr, "[kernel_cache] short-write %zu/%zu: %s\n",
+                                wrote, bin.size(), cache_path.c_str());
+                    }
+                    std::fclose(fp);
+                } else if (nnopt_kcache_log()) {
+                    fprintf(stderr, "[kernel_cache] fopen-for-write failed: %s\n",
+                            cache_path.c_str());
+                }
+                if (ok && nnopt_kcache_log()) {
+                    fprintf(stderr, "[kernel_cache] SAVE %s (%zu B)\n",
+                            cache_path.c_str(), bin.size());
+                }
+                if (!ok) {
+                    std::remove(cache_path.c_str());
+                }
+            }
+        }
+    }
+
+    return program;
+}
+
+cl_program OpenCLContext::build_program(const std::string& source, const std::string& options) {
     // Forward host-side dtype to the kernel preamble. Without this, every
-    // scaffold-emitted and agent-written kernel falls through to the fp32
-    // path of `#ifdef USE_FP16` and reads garbage from cl_half buffers.
+    // kernel falls through to the fp32 path of `#ifdef USE_FP16` and reads
+    // garbage from cl_half buffers.
     std::string effective_options = options;
 #ifdef NNOPT_USE_FP16
     if (effective_options.find("USE_FP16") == std::string::npos) {
@@ -237,22 +432,10 @@ cl_program OpenCLContext::build_program(const std::string& source, const std::st
         }
     }
 
-    err = clBuildProgram(program, 1, &device_, effective_options.c_str(), nullptr, nullptr);
-    if (err != CL_SUCCESS) {
-        NNOPT_ERROR_FMT("clBuildProgram FAILED (err=%d)", (int)err);
-        size_t log_size = 0;
-        clGetProgramBuildInfo(program, device_, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
-        if (log_size > 0) {
-            std::vector<char> log(log_size + 1, 0);
-            clGetProgramBuildInfo(program, device_, CL_PROGRAM_BUILD_LOG, log_size, log.data(), nullptr);
-            fprintf(stderr, "OpenCL Build Log: %s\n", log.data());
-            fflush(stderr);
-        }
-        clReleaseProgram(program);
-        return nullptr;
-    }
-
-    return program;
+    // The cache key must include `effective_options` (not the raw `options`)
+    // so an fp16 build and an fp32 build don't share a cache entry — different
+    // -D defines compile to different device binaries.
+    return nnopt_build_program_cached(context_, device_, source, effective_options);
 }
 
 cl_program OpenCLContext::build_program_from_file(const std::string& path, const std::string& options) {
