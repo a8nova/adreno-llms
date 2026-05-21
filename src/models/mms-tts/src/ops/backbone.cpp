@@ -369,15 +369,15 @@ extern "C" int tts_forward_graph(OpenCLContext& cl_ctx,
   fprintf(stderr, "▶ duration_predictor\n"); fflush(stderr);
   auto t_dp_start = std::chrono::steady_clock::now();
   NNOPT_CHECKPOINT("forward_graph: about to call op_duration_predictor");
-  // Weight keys MUST match .nnport/layer_contracts/DurationPredictor.json.
-  // Note: contract uses the "duration_predictor_*" flattened keys, not the HF dotted module path.
+  // Weight keys here must match what's actually in the on-disk weights file.
+  // We use the original HF "duration_predictor.*" dotted-path keys.
   cl_mem log_durations_dev = op_duration_predictor(cl_ctx,
                                                   weights,
                                                   queue,
                                                   enc_hidden,
                                                   /*T=*/T_chars,
                                                   /*C=*/H,
-                                                  // Use the actual HF tensor keys (see .nnport/layer_contracts/DurationPredictor.json::full_key_examples)
+                                                  // Original HF tensor keys (see weights/model.fp16.meta.json for the canonical list)
                                                   "duration_predictor.conv_pre.weight",
                                                   "duration_predictor.conv_pre.bias",
                                                   "duration_predictor.post_conv_pre.weight",
@@ -781,6 +781,7 @@ extern "C" int tts_forward_graph(OpenCLContext& cl_ctx,
   auto t_voc_start = std::chrono::steady_clock::now();
   NNOPT_CHECKPOINT("forward_graph: about to call op_Vocoder");
   std::vector<int16_t> pcm;
+
   rc = op_Vocoder(cl_ctx, weights, queue, z_latent, B, FLOW_C, T_frames, pcm);
   auto t_voc_end = std::chrono::steady_clock::now();
   double voc_ms = std::chrono::duration<double, std::milli>(t_voc_end - t_voc_start).count();

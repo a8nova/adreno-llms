@@ -114,12 +114,38 @@ KEEPALIVE_FD=9
 
 # ── Forward user lines to the binary ──────────────────────────────────────
 # The binary prints its own "> " prompt; don't double-prompt.
+#
+# STREAMING: split the user's input on sentence-ending punctuation and feed
+# each sentence as a separate utterance. The binary's --interactive mode
+# processes one utterance per line, so this lets the FIRST sentence's audio
+# start playing while sentences 2+ are still being synthesized. For a
+# two-sentence input at RTF 1.5, the listener hears audio after ~3s instead
+# of ~12s — true wall doesn't change, but perceived latency drops by 2-4×.
+#
+# Disable with NNOPT_NO_SENTENCE_SPLIT=1 to send the whole line at once.
 while IFS= read -r utt; do
     if [[ -z "$utt" ]]; then
         printf '\n' >&9
         break
     fi
-    printf '%s\n' "$utt" >&9
+    if [[ "${NNOPT_NO_SENTENCE_SPLIT:-0}" == "1" ]]; then
+        printf '%s\n' "$utt" >&9
+    else
+        # Python split — handles "abc. def! ghi?" -> ["abc.", "def!", "ghi?"].
+        # The trailing fragment (no terminator) is also kept. Empty fragments
+        # dropped. Regex is a lookbehind on .?! followed by whitespace so the
+        # punctuation stays attached to its sentence.
+        python3 - "$utt" <<'PY' | while IFS= read -r sent; do
+import re, sys
+text = sys.argv[1]
+for s in re.split(r'(?<=[.?!])\s+', text):
+    s = s.strip()
+    if s:
+        print(s)
+PY
+            printf '%s\n' "$sent" >&9
+        done
+    fi
 done
 
 # Closing FD 9 signals EOF to the binary; it prints "bye." and exits.

@@ -5,9 +5,10 @@
 // loop a generate step (or single forward for non-autoregressive), write
 // output. The interesting code lives in src/ops/*.cpp.
 //
-// API REFERENCE (DO NOT GUESS — these are the canonical signatures the
-// scaffold emits; matching them avoids the iteration tax of inventing
-// non-existent methods like load_from_disk / decode_one / sample_argmax):
+// API REFERENCE (DO NOT GUESS — these are the canonical signatures used
+// throughout this codebase; matching them avoids the iteration tax of
+// inventing non-existent methods like load_from_disk / decode_one /
+// sample_argmax):
 //
 //   class Weights {
 //     Weights();                                 // default ctor only — no OpenCLContext arg
@@ -195,8 +196,6 @@ static bool read_input_ids_bin(const std::string& path, std::vector<int32_t>& ou
 }
 
 int main(int argc, char** argv) {
-        // NOTE: NNOPT_VERSION_BANNER macro is not available in this scaffold; keep version.h include for provenance.
-
     // Argument parsing: positional "prompt" + optional flags.
     //   ./binary "<prompt>" [max_new_tokens] [--token-ids <file>]
     std::string prompt = "The teacher worked at the ";
@@ -411,17 +410,51 @@ int main(int argc, char** argv) {
             }
             double fwd_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
             double audio_ms = (double)utt_pcm.size() * 1000.0 / 16000.0;
-            const std::string utt_wav = "output.wav";   // overwrite each turn
-            if (!write_wav(utt_wav, utt_pcm.data(), (int)utt_pcm.size(), 16000)) {
-                NNOPT_ERROR_FMT("write_wav failed: %s", utt_wav.c_str());
-                continue;
+            const int32_t sample_rate = 16000;
+
+            // PCM stream path: skip the WAV write+disk-roundtrip and send raw
+            // int16 LE samples to stdout, framed by markers on stderr. The
+            // Kotlin side feeds these straight to AudioTrack(MODE_STREAM)
+            // with zero file IO. Save ~200-500 ms per sentence vs the
+            // write_wav+read+decode path. Gated by NNOPT_PCM_STREAM=1; the
+            // legacy WAV path stays default so CLI bench scripts keep working.
+            //
+            // Frame format:
+            //   stderr: "TTS_PCM_BEGIN <num_samples> <sample_rate>\n"
+            //   stdout: <num_samples * 2> bytes of int16 LE
+            //   stderr: "TTS_PCM_END\n"
+            // Both fflushed so the consumer sees the BEGIN marker before any
+            // PCM bytes arrive on stdout.
+            static int s_pcm_stream = -1;
+            if (s_pcm_stream < 0) {
+                const char* e = std::getenv("NNOPT_PCM_STREAM");
+                s_pcm_stream = (e && e[0] == '1') ? 1 : 0;
             }
-            std::fprintf(stderr,
-                "done  audio=%.2f s  rtf=%.2f  fwd=%.2f s\n",
-                audio_ms / 1000.0, audio_ms > 0 ? fwd_ms / audio_ms : 0.0, fwd_ms / 1000.0);
-            // Host-watcher contract: pull + play this file.
-            std::fprintf(stderr, "TTS_WAV_READY %s\n", utt_wav.c_str());
-            std::fflush(stderr);
+            if (s_pcm_stream) {
+                std::fprintf(stderr,
+                    "done  audio=%.2f s  rtf=%.2f  fwd=%.2f s\n",
+                    audio_ms / 1000.0, audio_ms > 0 ? fwd_ms / audio_ms : 0.0, fwd_ms / 1000.0);
+                std::fprintf(stderr, "TTS_PCM_BEGIN %zu %d\n",
+                             utt_pcm.size(), sample_rate);
+                std::fflush(stderr);
+                const size_t bytes = utt_pcm.size() * sizeof(int16_t);
+                std::fwrite(utt_pcm.data(), 1, bytes, stdout);
+                std::fflush(stdout);
+                std::fprintf(stderr, "TTS_PCM_END\n");
+                std::fflush(stderr);
+            } else {
+                const std::string utt_wav = "output.wav";   // overwrite each turn
+                if (!write_wav(utt_wav, utt_pcm.data(), (int)utt_pcm.size(), sample_rate)) {
+                    NNOPT_ERROR_FMT("write_wav failed: %s", utt_wav.c_str());
+                    continue;
+                }
+                std::fprintf(stderr,
+                    "done  audio=%.2f s  rtf=%.2f  fwd=%.2f s\n",
+                    audio_ms / 1000.0, audio_ms > 0 ? fwd_ms / audio_ms : 0.0, fwd_ms / 1000.0);
+                // Host-watcher contract: pull + play this file.
+                std::fprintf(stderr, "TTS_WAV_READY %s\n", utt_wav.c_str());
+                std::fflush(stderr);
+            }
             utt++;
         }
         std::fprintf(stderr, "\nbye.\n");

@@ -1372,6 +1372,194 @@ static cl_mem convt1d(OpenCLContext& cl_ctx,
   return out;
 }
 
+// ── Phase A: single-dispatch fused ResBlock conv ──────────────────────────
+// Each HiFi-GAN ResBlock kpair currently issues 4 dispatches (im2col_fused +
+// HGemm for conv1, then again for conv2). Across 4 upsample stages × 3
+// branches × 3 kpairs × 2 convs that's 144 conv calls × 2 dispatches = 288.
+// Each pays a 75-226 ms QUEUED→SUBMIT gap on Adreno 620 (vocoder GPU-busy is
+// 5% per the profiler — the rest is driver scheduling). Collapsing each conv
+// to ONE dispatch via a custom kernel ports the flow_wn_fused.cl win to the
+// vocoder. Gated by NNOPT_VOC_RESBLOCK_FUSED=1; legacy path stays live.
+
+// Reordered weight cache for the fused path. Key = original weight name.
+// Storage layout: [OC, K, IC] (vs disk [OC, IC, K]) so the kernel's inner
+// ci-loop is stride-1 → vload_half4 → dot(float4).
+struct VocKicEntry {
+  cl_mem weight = nullptr;
+  int OC = 0, IC = 0, K = 0;
+};
+static std::unordered_map<std::string, VocKicEntry> g_voc_kic_cache;
+
+static cl_mem get_or_make_voc_kic_weight(const std::string& key,
+                                         Weights& weights,
+                                         OpenCLContext& cl_ctx,
+                                         cl_command_queue queue,
+                                         int OC, int IC, int K) {
+  auto it = g_voc_kic_cache.find(key);
+  if (it != g_voc_kic_cache.end()) return it->second.weight;
+
+  std::vector<float> host = weights.get_host_vec(key);
+  if (host.empty()) {
+    NNOPT_ERROR_FMT("voc_kic: get_host_vec(%s) empty", key.c_str());
+    return nullptr;
+  }
+  const size_t expected = (size_t)OC * (size_t)IC * (size_t)K;
+  if (host.size() != expected) {
+    NNOPT_ERROR_FMT("voc_kic: %s size mismatch (got %zu, expect %zu)",
+                    key.c_str(), host.size(), expected);
+    return nullptr;
+  }
+
+  // Reorder [OC, IC, K] → [OC, K, IC] on host. One-shot per weight; cached.
+  std::vector<float> reordered(host.size());
+  for (int oc = 0; oc < OC; ++oc) {
+    for (int ic = 0; ic < IC; ++ic) {
+      for (int k = 0; k < K; ++k) {
+        reordered[(size_t)oc * K * IC + (size_t)k * IC + ic] =
+            host[(size_t)oc * IC * K + (size_t)ic * K + k];
+      }
+    }
+  }
+
+  // Upload as storage_t (fp16 if NNOPT_USE_FP16 else fp32).
+  cl_int err = CL_SUCCESS;
+  const size_t nbytes = reordered.size() * sizeof(nnopt_storage_t);
+  std::vector<uint8_t> buf(nbytes);
+#ifdef NNOPT_USE_FP16
+  for (size_t i = 0; i < reordered.size(); ++i) {
+    uint16_t h = nnopt_f32_to_f16(reordered[i]);
+    std::memcpy(buf.data() + i * 2, &h, 2);
+  }
+#else
+  std::memcpy(buf.data(), reordered.data(), nbytes);
+#endif
+  cl_mem b = clCreateBuffer(cl_ctx.context(), CL_MEM_READ_ONLY, nbytes, nullptr, &err);
+  if (err != CL_SUCCESS || !b) {
+    NNOPT_ERROR_FMT("voc_kic: clCreateBuffer(%s) failed (%d)", key.c_str(), (int)err);
+    return nullptr;
+  }
+  err = clEnqueueWriteBuffer(queue, b, CL_TRUE, 0, nbytes, buf.data(), 0, nullptr, nullptr);
+  if (err != CL_SUCCESS) {
+    NNOPT_ERROR_FMT("voc_kic: clEnqueueWriteBuffer(%s) failed (%d)", key.c_str(), (int)err);
+    clReleaseMemObject(b);
+    return nullptr;
+  }
+  VocKicEntry e{b, OC, IC, K};
+  g_voc_kic_cache.emplace(key, e);
+  return b;
+}
+
+// Single-dispatch fused replacement for conv1d_resblock. Computes
+//   out[c, t] = (has_resid ? resid[c, t] : 0) + bias[c]
+//              + sum_k sum_ci w[c, k, ci] * leaky_in_opt(in[ci, t - pad + k*d])
+// using __local memory tile for the K-wide input window. Returns a freshly
+// pool-acquired cl_mem (same ownership contract as conv1d_resblock).
+static cl_mem conv1d_resblock_fused_dispatch(OpenCLContext& cl_ctx,
+                                             cl_command_queue queue,
+                                             Weights& weights,
+                                             cl_mem in,
+                                             const std::string& weight_key,
+                                             cl_mem b_buf,
+                                             int C, int L, int K,
+                                             int padding, int dilation,
+                                             bool leaky_in,
+                                             cl_mem residual_add,
+                                             const char* label) {
+  cl_mem w_kic = get_or_make_voc_kic_weight(weight_key, weights, cl_ctx, queue, C, C, K);
+  if (!w_kic) {
+    NNOPT_ERROR_FMT("conv1d_resblock_fused(%s): w_kic missing", label);
+    return nullptr;
+  }
+  if (K > 11 || C > 256) {
+    NNOPT_ERROR_FMT("conv1d_resblock_fused(%s): K=%d/C=%d exceed VOC_K_MAX=11/VOC_C_MAX=256",
+                    label, K, C);
+    return nullptr;
+  }
+
+  cl_program prog = cl_ctx.get_program("kernels/voc_resblock_conv_fused.cl");
+  if (!prog) prog = cl_ctx.build_program_from_file("kernels/voc_resblock_conv_fused.cl");
+  if (!prog) {
+    NNOPT_ERROR_FMT("conv1d_resblock_fused(%s): program build failed", label);
+    return nullptr;
+  }
+
+  static cl_kernel kf = nullptr;
+  if (!kf) {
+    cl_int err = CL_SUCCESS;
+    kf = clCreateKernel(prog, "voc_conv1d_resblock_fused", &err);
+    if (err != CL_SUCCESS || !kf) {
+      NNOPT_ERROR_FMT("conv1d_resblock_fused(%s): clCreateKernel (%d)", label, (int)err);
+      return nullptr;
+    }
+  }
+
+  cl_context ctx = cl_ctx.context();
+  cl_int err = CL_SUCCESS;
+  const size_t n_out = (size_t)C * (size_t)L;
+  cl_mem out = pool_acquire(ctx, n_out * sizeof(nnopt_storage_t));
+  if (!out) {
+    NNOPT_ERROR_FMT("conv1d_resblock_fused(%s): pool_acquire(%zu)", label, n_out);
+    return nullptr;
+  }
+
+  // Dummy resid buffer; Adreno is happier with non-null cl_mem args even when
+  // the kernel never reads them (has_resid=0 path).
+  static cl_mem g_dummy_resid = nullptr;
+  if (!g_dummy_resid) {
+    g_dummy_resid = clCreateBuffer(ctx, CL_MEM_READ_WRITE, 16, nullptr, &err);
+    if (err != CL_SUCCESS || !g_dummy_resid) {
+      NNOPT_ERROR_FMT("conv1d_resblock_fused(%s): dummy resid (%d)", label, (int)err);
+      pool_release_or_release(out);
+      return nullptr;
+    }
+  }
+  cl_mem resid_arg = residual_add ? residual_add : g_dummy_resid;
+
+  const int leaky_flag     = leaky_in       ? 1 : 0;
+  const int has_resid_flag = residual_add   ? 1 : 0;
+
+  bool ok = true;
+  ok = ok && set_arg_checked(kf,  0, sizeof(cl_mem), &in,         "h_in");
+  ok = ok && set_arg_checked(kf,  1, sizeof(cl_mem), &w_kic,      "w");
+  ok = ok && set_arg_checked(kf,  2, sizeof(cl_mem), &b_buf,      "b");
+  ok = ok && set_arg_checked(kf,  3, sizeof(cl_mem), &resid_arg,  "resid");
+  ok = ok && set_arg_checked(kf,  4, sizeof(cl_mem), &out,        "h_out");
+  ok = ok && set_arg_checked(kf,  5, sizeof(int),    &C,          "C");
+  ok = ok && set_arg_checked(kf,  6, sizeof(int),    &L,          "L");
+  ok = ok && set_arg_checked(kf,  7, sizeof(int),    &K,          "K");
+  ok = ok && set_arg_checked(kf,  8, sizeof(int),    &dilation,   "dilation");
+  ok = ok && set_arg_checked(kf,  9, sizeof(int),    &padding,    "pad");
+  ok = ok && set_arg_checked(kf, 10, sizeof(int),    &leaky_flag, "leaky_in");
+  ok = ok && set_arg_checked(kf, 11, sizeof(int),    &has_resid_flag, "has_resid");
+  if (!ok) {
+    pool_release_or_release(out);
+    return nullptr;
+  }
+
+  // gws = (C, L) ; lws = (C, 1). One WG per output time-step. WG size = C
+  // because each WI loads one channel row into the cooperative __local tile.
+  const size_t gws[2] = {(size_t)C, (size_t)L};
+  const size_t lws[2] = {(size_t)C, 1};
+  err = clEnqueueNDRangeKernel(queue, kf, 2, nullptr, gws, lws, 0, nullptr,
+                               KernelProfiler::event_for("vocoder.resblock_fused"));
+  if (err != CL_SUCCESS) {
+    NNOPT_ERROR_FMT("conv1d_resblock_fused(%s): dispatch (%d)", label, (int)err);
+    pool_release_or_release(out);
+    return nullptr;
+  }
+  return out;
+}
+
+// Env-gated selector. Returns true once when NNOPT_VOC_RESBLOCK_FUSED=1.
+static bool voc_resblock_fused_enabled() {
+  static int s = -1;
+  if (s < 0) {
+    const char* e = std::getenv("NNOPT_VOC_RESBLOCK_FUSED");
+    s = (e && e[0] == '1') ? 1 : 0;
+  }
+  return s == 1;
+}
+
 }  // namespace
 
 extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
@@ -1565,12 +1753,24 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
         }
         const int pad1 = (ks * dilations[kpair] - dilations[kpair]) / 2;
         // Fused leaky+im2col absorbs the standalone leaky_relu dispatch.
-        cl_mem h1 = conv1d_resblock(cl_ctx, queue, h, w1b, b1b,
+        cl_mem h1;
+        if (voc_resblock_fused_enabled()) {
+          // Single-dispatch fused path. The fused kernel does
+          // leaky→conv→bias in one shot (no separate im2col).
+          h1 = conv1d_resblock_fused_dispatch(cl_ctx, queue, weights, h,
+                                              w1, b1b,
+                                              C, L, ks, pad1, dilations[kpair],
+                                              /*leaky_in=*/true,
+                                              /*residual_add=*/nullptr,
+                                              "vocoder.resblock.conv1");
+        } else {
+          h1 = conv1d_resblock(cl_ctx, queue, h, w1b, b1b,
                                     C, C, L, ks, 1, pad1, dilations[kpair],
                                     /*has_bias=*/true,
                                     /*leaky_in=*/true, 0.0f,
                                     /*resid=*/nullptr,
                                     "vocoder.resblock.conv1");
+        }
         if (!h1) {
           if (h_owns_buffer) pool_release_or_release(h);
           for (int bi = 0; bi < 3; ++bi) if (branch_outs[bi]) pool_release_or_release(branch_outs[bi]);
@@ -1595,12 +1795,22 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
         const int pad2 = (ks - 1) / 2;
         // Fused leaky+im2col on h1 → conv2; bias AND residual fused via the
         // existing add_bias_broadcast_resid kernel.
-        cl_mem h2 = conv1d_resblock(cl_ctx, queue, h1, w2b, b2b,
+        cl_mem h2;
+        if (voc_resblock_fused_enabled()) {
+          h2 = conv1d_resblock_fused_dispatch(cl_ctx, queue, weights, h1,
+                                              w2, b2b,
+                                              C, L, ks, pad2, /*dilation=*/1,
+                                              /*leaky_in=*/true,
+                                              /*residual_add=*/residual_kpair,
+                                              "vocoder.resblock.conv2");
+        } else {
+          h2 = conv1d_resblock(cl_ctx, queue, h1, w2b, b2b,
                                     C, C, L, ks, 1, pad2, 1,
                                     /*has_bias=*/true,
                                     /*leaky_in=*/true, 0.0f,
                                     /*resid=*/residual_kpair,
                                     "vocoder.resblock.conv2");
+        }
         pool_release_or_release(h1);
         if (!h2) {
           if (resid_owns_buffer) pool_release_or_release(residual_kpair);
