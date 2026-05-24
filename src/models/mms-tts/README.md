@@ -65,9 +65,9 @@ Any [MMS-TTS language code](https://dl.fbaipublicfiles.com/mms/tts/all-tts-langu
 
 ### Pre-built packs (used by the see-and-say example)
 
-Ready-to-download packs (~69 MB each: `model.fp16.bin` + `tokenizer_vocab.bin` + metadata) live in this HF dataset:
+Ready-to-download packs (~69 MB each: `model.fp16.bin` + `tokenizer_vocab.bin` + metadata) live under the `mms-tts/` prefix of the project's weights repo:
 
-  https://huggingface.co/datasets/a8nova/mms-tts-language-packs
+  https://huggingface.co/a8nova/adreno-llms-weights/tree/main/mms-tts
 
 The see-and-say Android picker lists every language with a pack present there. Languages without a pack stay greyed out until one is uploaded.
 
@@ -81,8 +81,9 @@ The see-and-say Android picker lists every language with a pack present there. L
 
 2. **Upload to HF.** One-time `huggingface-cli login`, then:
    ```bash
-   huggingface-cli upload a8nova/mms-tts-language-packs packs/ . --repo-type dataset
+   huggingface-cli upload a8nova/adreno-llms-weights packs/ mms-tts/
    ```
+   (No `--repo-type` flag — `adreno-llms-weights` is the same model repo that hosts all the other ports' weights; `mms-tts/` is the destination subfolder inside it.)
 
 The picker UI in the app picks up the new language on next launch — no code change, no app release.
 

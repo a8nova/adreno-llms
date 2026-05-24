@@ -130,7 +130,7 @@ class LanguageRegistry(private val context: Context) {
      */
     suspend fun refreshRegistry(): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            val url = URL("https://huggingface.co/datasets/$HF_REPO/resolve/main/languages.json")
+            val url = URL("https://huggingface.co/$HF_REPO/resolve/main/mms-tts/languages.json")
             (url.openConnection() as HttpURLConnection).run {
                 connectTimeout = 15_000
                 readTimeout = 30_000
@@ -188,7 +188,7 @@ class LanguageRegistry(private val context: Context) {
         val totalGuess = current?.sizeBytes ?: (75L * 1024 * 1024)
         updateOne(code) { it.copy(status = LangEntry.Status.Downloading(0, totalGuess)) }
 
-        val url = URL("https://huggingface.co/datasets/$HF_REPO/resolve/main/mms-tts-$code.zip")
+        val url = URL("https://huggingface.co/$HF_REPO/resolve/main/mms-tts/mms-tts-$code.zip")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             connectTimeout = 30_000
             readTimeout = 60_000
@@ -289,7 +289,7 @@ class LanguageRegistry(private val context: Context) {
 
     companion object {
         private const val TAG = "LanguageRegistry"
-        private const val HF_REPO = "a8nova/mms-tts-language-packs"
+        private const val HF_REPO = "a8nova/adreno-llms-weights"
 
         // Bundled-in-APK languages (extracted by AssetExtractor). Keep this
         // list in sync with what prepare_assets.sh actually ships.

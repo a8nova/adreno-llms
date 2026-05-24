@@ -186,17 +186,16 @@ def _write_upload_md() -> Path:
     out.write_text(
         "# Upload to HuggingFace\n\n"
         "After convert_all_languages.py finishes, push the packs/ directory\n"
-        "to your HF dataset repo:\n\n"
+        "into the project's weights repo (under the mms-tts/ prefix):\n\n"
         "```\n"
         "huggingface-cli login   # one-time\n"
-        "huggingface-cli upload a8nova/mms-tts-language-packs packs/ \\\n"
-        "    . --repo-type dataset\n"
+        "huggingface-cli upload a8nova/adreno-llms-weights packs/ mms-tts/\n"
         "```\n\n"
-        "Note the trailing `. --repo-type dataset` — `.` is the path inside\n"
-        "the repo (root), and `--repo-type dataset` selects the dataset\n"
-        "namespace (HF defaults to model repos). After upload, the in-app\n"
+        "`packs/` is the local source folder, `mms-tts/` is the destination\n"
+        "prefix inside the repo. No --repo-type flag needed — adreno-llms-weights\n"
+        "is a model repo and HF defaults to that. After upload, the in-app\n"
         "downloader fetches from:\n"
-        "  https://huggingface.co/datasets/a8nova/mms-tts-language-packs/resolve/main/<file>\n"
+        "  https://huggingface.co/a8nova/adreno-llms-weights/resolve/main/mms-tts/<file>\n"
     )
     return out
 
