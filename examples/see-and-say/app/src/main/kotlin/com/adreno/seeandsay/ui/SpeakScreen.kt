@@ -11,10 +11,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -26,6 +32,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
@@ -34,6 +41,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.adreno.seeandsay.MainViewModel
 import com.adreno.seeandsay.SpeakFlow
 import com.adreno.seeandsay.TtsLanguage
+// Note: TtsLanguage is now a data class, not an enum. References to
+// TtsLanguage.Amharic / .English have been replaced with code-string checks.
 import kotlinx.coroutines.delay
 
 @Composable
@@ -42,7 +51,21 @@ fun SpeakScreen(viewModel: MainViewModel) {
     val examples = examplesFor(language)
     var text by rememberSaveable(language.code) { mutableStateOf(examples.first()) }
     val state by viewModel.speak.collectAsStateWithLifecycle()
+    val sampler by viewModel.samplerSettings.collectAsStateWithLifecycle()
+    val tts by viewModel.ttsSettings.collectAsStateWithLifecycle()
+    val systemPrompt by viewModel.systemPrompt.collectAsStateWithLifecycle()
+    var showConfigs by remember { mutableStateOf(false) }
+    val device by viewModel.deviceInfo.collectAsStateWithLifecycle()
 
+    // Input character budget. MMS-TTS synthesis cost scales with sentence
+    // length (text_encoder + flow_inverse are both O(T_frames), and T_frames
+    // ≈ 2× chars). On low-memory devices (Adreno 619 with 1708 MB GPU mem on
+    // the Tab A9 we tested) a 250-char Amharic input triggers Android's LMK
+    // mid-synthesis and the app process is killed. 600 chars is enough for
+    // 3-4 short sentences without OOM on the marginal devices.
+    val maxChars = if ((device?.globalMemMb ?: 4096) < 2048) 350 else 800
+
+    Box(modifier = Modifier.fillMaxSize()) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -50,24 +73,49 @@ fun SpeakScreen(viewModel: MainViewModel) {
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.Top,
     ) {
-        Text(
-            text = "✏︎  Text to speak  ·  ${language.label}",
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.primary,
-        )
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(
+                text = "✏︎  Text to speak  ·  ${language.label}",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                text = "${text.length}/$maxChars",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (text.length > maxChars)
+                    MaterialTheme.colorScheme.error
+                else
+                    MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
+            )
+        }
         Spacer(Modifier.height(6.dp))
         OutlinedTextField(
             value = text,
-            onValueChange = { text = it },
+            onValueChange = { new ->
+                // Hard-cap input to maxChars. Trying to type past it is a
+                // silent no-op rather than an alert toast — less disruptive,
+                // and the counter turning red is the visible signal.
+                if (new.length <= maxChars) text = new
+            },
             modifier = Modifier.fillMaxWidth().height(110.dp),
             textStyle = MaterialTheme.typography.bodyMedium,
             placeholder = {
                 Text(
-                    text = if (language == TtsLanguage.Amharic) "በዚህ ይተይቡ…" else "Type text here…",
+                    text = if (language.code == "amh") "በዚህ ይተይቡ…" else "Type text here…",
                     style = MaterialTheme.typography.bodySmall,
                 )
             },
         )
+        // On low-memory devices: warn explicitly so user knows why the cap is tight.
+        if (maxChars < 500) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "⚠  Device GPU memory is < 2 GB; long inputs can crash the app " +
+                       "mid-synthesis. Cap is $maxChars chars.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.85f),
+            )
+        }
 
         Spacer(Modifier.height(10.dp))
 
@@ -112,8 +160,12 @@ fun SpeakScreen(viewModel: MainViewModel) {
                     while (true) { value = System.currentTimeMillis() - t0; delay(200) }
                 }
                 val dots = ".".repeat(((tickMs / 200) % 4).toInt() + 1)
+                val progress = if (s.sentenceTotal > 0)
+                    "  · sentence ${s.sentenceIndex}/${s.sentenceTotal}"
+                else
+                    ""
                 Text(
-                    text = "🎙  generating speech$dots  · %.1fs".format(tickMs / 1000.0),
+                    text = "🎙  generating speech$dots  · %.1fs%s".format(tickMs / 1000.0, progress),
                     color = MaterialTheme.colorScheme.primary,
                     style = MaterialTheme.typography.labelMedium,
                 )
@@ -133,6 +185,40 @@ fun SpeakScreen(viewModel: MainViewModel) {
                 style = MaterialTheme.typography.bodySmall,
             )
             SpeakFlow.Idle -> Text(" ", style = MaterialTheme.typography.bodySmall)
+        }
+    }
+        // Top-right Configurations launcher — same affordance as the Camera tab.
+        // Restarting either the SmolVLM or MMS-TTS session via this dialog
+        // bounces the corresponding process; the loader screen reappears
+        // during the restart.
+        FilledIconButton(
+            onClick = { showConfigs = true },
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(top = 6.dp, end = 6.dp)
+                .size(44.dp),
+            colors = IconButtonDefaults.filledIconButtonColors(
+                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                contentColor = MaterialTheme.colorScheme.onSurface,
+            ),
+        ) {
+            Icon(Icons.Filled.Tune, contentDescription = "Configurations", modifier = Modifier.size(22.dp))
+        }
+
+        if (showConfigs) {
+            ConfigurationsDialog(
+                current = sampler,
+                currentTts = tts,
+                currentSystemPrompt = systemPrompt,
+                defaultSystemPrompt = com.adreno.seeandsay.DEFAULT_SYSTEM_PROMPT,
+                onDismiss = { showConfigs = false },
+                onConfirm = { newSampler, newTts, newSys ->
+                    viewModel.updateSamplerSettings(newSampler)
+                    viewModel.updateTtsSettings(newTts)
+                    viewModel.updateSystemPrompt(newSys)
+                    showConfigs = false
+                },
+            )
         }
     }
 }
@@ -209,15 +295,22 @@ private fun ExampleChip(text: String, onClick: () -> Unit) {
  * device, long enough to show off the voice. Pick from a variety of registers
  * (greeting, descriptive, demo-narrative) so the user can pressure-test.
  */
-private fun examplesFor(lang: TtsLanguage): List<String> = when (lang) {
-    TtsLanguage.English -> listOf(
+private fun examplesFor(lang: TtsLanguage): List<String> = when (lang.code) {
+    "eng" -> listOf(
         "Hello! My name is Adreno. I'm an on-device speech model running entirely on this phone.",
         "The quick brown fox jumps over the lazy dog. Speech synthesis is harder than it looks.",
         "This entire app, including the language model and the text-to-speech, runs without any internet connection.",
     )
-    TtsLanguage.Amharic -> listOf(
+    "amh" -> listOf(
         "ሰላም! ስሜ አድሬኖ ነው። ይህን ስልክ ላይ የሚሰራ የንግግር ሞዴል ነኝ።",
         "የአየር ሁኔታው ዛሬ በጣም ጥሩ ነው። ሙቀቱ ሃያ አምስት ዲግሪ ሴንቲግሬድ ነው።",
         "ይህ ሙሉ መተግበሪያ፣ የቋንቋ ሞዴል እና የጽሁፍ-ወደ-ንግግር ጨምሮ፣ ያለ ኢንተርኔት ግንኙነት ይሰራል።",
+    )
+    // For all the downloaded languages we have no curated examples; show a
+    // generic placeholder so the chip strip isn't empty.
+    else -> listOf(
+        "Hello.",
+        "This is a test.",
+        "The quick brown fox jumps over the lazy dog.",
     )
 }

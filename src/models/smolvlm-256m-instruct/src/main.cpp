@@ -78,6 +78,14 @@ static bool read_input_ids_bin(const std::string& path, std::vector<int32_t>& ou
     return f.good() || f.eof();
 }
 
+// Runtime selector for SigLIP input resolution. 384 = "Fast" mode (24x24
+// patch grid, 36 image tokens, ~44% less vision-tower compute). 512 = "Quality"
+// mode (32x32 grid, 64 image tokens, matches upstream training resolution).
+// Set ONCE at process start by `--image-size` argv flag below; all readers
+// go through MODEL_CONFIG::runtime_image_size() / runtime_num_image_placeholders().
+// MUST live inside the MODEL_CONFIG namespace — the header declares it there.
+namespace MODEL_CONFIG { int g_runtime_image_size = 384; }
+
 int main(int argc, char** argv) {
     // Argument parsing: positional "prompt" + optional flags.
     //   ./binary "<prompt>" [max_new_tokens] [--token-ids <file>]
@@ -114,6 +122,21 @@ int main(int argc, char** argv) {
                 sampler_config.top_p = std::stof(argv[++i]);
             } else if (a == "--seed" && i + 1 < argc) {
                 sampler_config.seed = static_cast<uint32_t>(std::stoul(argv[++i]));
+            } else if (a == "--max-tokens" && i + 1 < argc) {
+                max_new_tokens = std::stoi(argv[++i]);
+            } else if (a == "--image-size" && i + 1 < argc) {
+                const int v = std::stoi(argv[++i]);
+                // Only 384 and 512 are supported by the current weights bundle
+                // (pos-embed `_384` variant is baked for 384; the main key for
+                // 512). Other values would need their own pos-embed variant
+                // baked offline.
+                if (v == 384 || v == 512) {
+                    MODEL_CONFIG::g_runtime_image_size = v;
+                } else {
+                    std::fprintf(stderr,
+                                 "WARN: --image-size %d unsupported (only 384/512); "
+                                 "keeping default %d\n", v, MODEL_CONFIG::g_runtime_image_size);
+                }
             } else if (a.rfind("--", 0) == 0) {
                 // Unknown flag — skip the value too if present.
                 if (i + 1 < argc && argv[i + 1][0] != '-') ++i;
@@ -217,7 +240,10 @@ int main(int argc, char** argv) {
         }
 
         constexpr int32_t END_OF_UTTERANCE = 49279;
-        constexpr int     MAX_DECODE_PER_TURN = 128;
+        // Per-turn cap on decoded tokens. Honors `--max-tokens N` from argv
+        // (positional max_new_tokens parses to the same variable) — falls
+        // back to a safe default if the caller didn't override.
+        const int         MAX_DECODE_PER_TURN = (max_new_tokens > 0 ? max_new_tokens : 128);
         constexpr int     KV_CACHE_LIMIT = 2048;   // matches llama_sdpa_attention.cpp:43
         constexpr int     KV_HEADROOM = 256;
 
@@ -291,6 +317,23 @@ int main(int argc, char** argv) {
             if (ids.empty()) {
                 std::fprintf(stderr, "tokenize produced no ids — try different text\n");
                 continue;
+            }
+
+            // NNOPT_DUMP_PROMPT_IDS=1 prints what we're actually feeding the
+            // model this turn — useful when follow-up answers diverge from
+            // what the chat template should produce. Format:
+            //   ▶ prompt total_pos=N turn=K ids=[id,id,...] decoded=<text>
+            if (const char* dbg = std::getenv("NNOPT_DUMP_PROMPT_IDS"); dbg && dbg[0] == '1') {
+                std::fprintf(stderr, "▶ prompt total_pos=%d turn=%d ids=[", total_pos, turn);
+                for (size_t i = 0; i < ids.size(); ++i) {
+                    std::fprintf(stderr, "%d%s", ids[i], (i + 1 < ids.size()) ? "," : "");
+                }
+                // Decoded text (image-placeholder tokens render as empty per
+                // kSkipOnDecodeIds, so the printed text shows just the chat
+                // template structure around the user text).
+                std::fprintf(stderr, "] decoded=<%s>\n",
+                             tok.decode(ids).c_str());
+                std::fflush(stderr);
             }
 
             auto t_prefill_0 = std::chrono::steady_clock::now();

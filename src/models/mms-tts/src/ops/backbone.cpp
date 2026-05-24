@@ -297,9 +297,16 @@ extern "C" int tts_forward_graph(OpenCLContext& cl_ctx,
   const int FLOW_C = MODEL_CONFIG::FLOW_SIZE;
   // Reference: modeling_vits.py VitsModel.forward
   // speaking_rate defaults to config.speaking_rate; length_scale = 1.0 / speaking_rate.
-  // Here we use config default (MODEL_CONFIG::SPEAKING_RATE), since our CLI path
-  // does not override speaking_rate.
-  const float length_scale = 1.0f / MODEL_CONFIG::SPEAKING_RATE;
+  // Optionally overridden at runtime via NNOPT_TTS_LENGTH_SCALE (multiplier:
+  // < 1.0 = faster speech, > 1.0 = slower). This is the user-facing speed knob
+  // in the see-and-say app's Configurations dialog.
+  float length_scale = 1.0f / MODEL_CONFIG::SPEAKING_RATE;
+  if (const char* ls_env = std::getenv("NNOPT_TTS_LENGTH_SCALE")) {
+    try {
+      const float v = std::stof(ls_env);
+      if (v > 0.0f && v < 100.0f) length_scale = v;
+    } catch (...) { /* keep default */ }
+  }
 
   if (T_chars <= 0) {
     NNOPT_ERROR("tts_forward_graph: empty input_ids");

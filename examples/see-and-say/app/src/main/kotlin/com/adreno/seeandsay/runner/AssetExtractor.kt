@@ -93,9 +93,20 @@ class AssetExtractor(private val context: Context) {
         // v3: added kernels/slice_along_t.cl for the vocoder-chunked streaming
         // path. Devices on v2 must re-extract or the binary fails to open the
         // new kernel at runtime.
+        // v6: smolvlm bin now ships both 32x32 (key
+        // model.vision_model.embeddings.position_embedding.weight) and 24x24
+        // (key …weight_384) pos-embed variants for the Fast/Quality vision
+        // resolution toggle. Devices on v5 don't have the _384 key in their
+        // extracted weights/model.fp16.bin and crash with
+        // "weight key not found: …position_embedding.weight_384" on first
+        // vision pass at IMAGE_SIZE=384.
+        // v7: added weights/amh/* + assets/amh/* for Amharic TTS. Devices on
+        // v6 only have eng/ extracted; switching language to Amharic in
+        // Settings fails with "Tokenizer::load failed to open
+        // weights/amh/tokenizer_vocab.bin".
         // BUMP THIS whenever any file is added/changed under app/src/main/
         // assets/{mmstts,smolvlm} so existing installs pick up the new tree.
-        private const val FLAG_FILE = ".extracted_v5"
+        private const val FLAG_FILE = ".extracted_v7"
         private const val BUFFER_BYTES = 256 * 1024
         // Top-level asset directories we extract — limits the scan so we don't
         // walk into AGP's internal asset paths.

@@ -91,13 +91,27 @@ constexpr bool  VISION_CONFIG_DO_SAMPLE                    = false;  // flattene
 constexpr bool  VISION_CONFIG_EARLY_STOPPING               = false;  // flattened from vision_config.early_stopping
 constexpr int   VISION_CONFIG_ENCODER_NO_REPEAT_NGRAM_SIZE = 0;  // flattened from vision_config.encoder_no_repeat_ngram_size
 constexpr int   VISION_CONFIG_HIDDEN_SIZE                  = 768;  // flattened from vision_config.hidden_size
-// IMAGE_SIZE was 512 (32x32 patch grid → 1024 patches → 64 image tokens after
-// pixel-shuffle scale 4). Dropped to 384 (24x24 → 576 patches → 36 image
-// tokens) to cut vision-tower compute by ~44%. Requires the position
-// embedding to be bilinearly re-baked from the trained 32x32 grid to 24x24 —
-// done offline by scripts/rebake_pos_embed_384.py. The connector, splice,
-// and image_features path are all shape-driven dynamically; only this
-// constant + NUM_IMAGE_PLACEHOLDERS in tokenizer.cpp need updating in code.
+// IMAGE_SIZE selects the SigLIP input resolution at runtime. 384 (24x24 patch
+// grid → 576 patches → 36 image tokens after pixel-shuffle scale 4) is the
+// Fast mode default — ~44% less vision-tower compute than 512 (32x32 grid →
+// 64 image tokens, the upstream-trained resolution). The convert_weights.py
+// pipeline emits BOTH the upstream-trained 32x32 position embedding and a
+// bicubic-resized 24x24 variant (suffix `_384`), so the runtime can switch
+// modes without re-converting weights. The connector, splice, and
+// image_features path are all shape-driven, so only IMAGE_SIZE +
+// NUM_IMAGE_PLACEHOLDERS care about this number.
+//
+// Override at process start via --image-size {384,512} (see main.cpp).
+extern int g_runtime_image_size;
+inline int runtime_image_size() { return g_runtime_image_size; }
+inline int runtime_num_image_placeholders() {
+    const int g = runtime_image_size() / 16;       // patches per side (PATCH_SIZE=16)
+    const int t = (g / 4) * (g / 4);                // pixel-shuffle scale 4
+    return t;                                       // 36 at 384, 64 at 512
+}
+// Legacy compile-time constant kept for callsites that haven't been migrated;
+// reading it gives the COMPILED-IN default (384), NOT the live runtime value.
+// New code should call runtime_image_size() instead.
 constexpr int   IMAGE_SIZE                                 = 384;  // flattened from vision_config.image_size
 constexpr float VISION_CONFIG_INITIALIZER_RANGE            = 0.02f;  // flattened from vision_config.initializer_range
 constexpr int   VISION_CONFIG_INTERMEDIATE_SIZE            = 3072;  // flattened from vision_config.intermediate_size

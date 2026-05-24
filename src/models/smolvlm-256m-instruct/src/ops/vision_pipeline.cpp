@@ -138,8 +138,12 @@ bool vision_pipeline_forward(
   }
 
   // ── Resize to model image size (u8 HWC → u8 HWC) ──
-  const int outW = MODEL_CONFIG::IMAGE_SIZE;
-  const int outH = MODEL_CONFIG::IMAGE_SIZE;
+  // runtime_image_size() honours the --image-size CLI flag (Fast/Quality
+  // toggle in the see-and-say Configurations dialog). The Fast default is
+  // 384 (24x24 grid → 36 image tokens); Quality is 512 (32x32 → 64 tokens,
+  // matches upstream training).
+  const int outW = MODEL_CONFIG::runtime_image_size();
+  const int outH = MODEL_CONFIG::runtime_image_size();
   const int C = MODEL_CONFIG::NUM_CHANNELS;
   {
     cl_int err = CL_SUCCESS;
@@ -280,6 +284,15 @@ bool vision_pipeline_forward(
 
   // ── Vision tower (already ported) ──
   // Input must be pixel_values [B,C,H,W].
+  // The convert_weights.py pipeline emits two pos-embed variants when run
+  // with --rebake-pos-embed-384:
+  //   model.vision_model.embeddings.position_embedding.weight       (32x32, 512-mode)
+  //   model.vision_model.embeddings.position_embedding.weight_384   (24x24 padded, 384-mode)
+  // Pick the one matching the current runtime image size.
+  const char* pos_emb_key =
+      (MODEL_CONFIG::runtime_image_size() == 384)
+          ? "model.vision_model.embeddings.position_embedding.weight_384"
+          : "model.vision_model.embeddings.position_embedding.weight";
   vision_hidden = op_Idefics3VisionTransformer(cl_ctx,
                                                weights,
                                                queue,
@@ -292,7 +305,7 @@ bool vision_pipeline_forward(
                                                /*patch_size=*/patch,
                                                /*patch_emb_w=*/"model.vision_model.embeddings.patch_embedding.weight",
                                                /*patch_emb_b=*/"model.vision_model.embeddings.patch_embedding.bias",
-                                               /*pos_emb_w=*/"model.vision_model.embeddings.position_embedding.weight");
+                                               /*pos_emb_w=*/pos_emb_key);
   if (!vision_hidden) {
     NNOPT_ERROR("vision_pipeline_forward: op_Idefics3VisionTransformer failed");
     cleanup();

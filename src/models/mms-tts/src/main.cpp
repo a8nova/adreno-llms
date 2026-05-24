@@ -210,6 +210,14 @@ int main(int argc, char** argv) {
     sampler_config.top_p = 1.0f;
     sampler_config.repetition_penalty = 1.0f;
     sampler_config.seed = 42u;
+
+    // VITS-specific runtime knobs surfaced to the see-and-say Configurations
+    // dialog. Defaults match HF VitsModel.generate(): noise_scale = 0.667,
+    // noise_scale_w = 0.8, length_scale = 1.0 (the C++ default for length_scale
+    // lives in backbone.cpp, set by NNOPT_TTS_LENGTH_SCALE).
+    float tts_noise_scale   = 0.667f;
+    float tts_noise_scale_w = 0.8f;
+    float tts_length_scale  = -1.0f;   // -1 → leave backbone default
     {
         int positional = 0;
         for (int i = 1; i < argc; i++) {
@@ -229,6 +237,18 @@ int main(int argc, char** argv) {
                 sampler_config.top_p = std::stof(argv[++i]);
             } else if (a == "--seed" && i + 1 < argc) {
                 sampler_config.seed = static_cast<uint32_t>(std::stoul(argv[++i]));
+            } else if (a == "--noise-scale" && i + 1 < argc) {
+                tts_noise_scale = std::stof(argv[++i]);
+            } else if (a == "--noise-scale-w" && i + 1 < argc) {
+                tts_noise_scale_w = std::stof(argv[++i]);
+            } else if (a == "--length-scale" && i + 1 < argc) {
+                tts_length_scale = std::stof(argv[++i]);
+                // backbone.cpp:tts_forward_graph reads this env var to
+                // override the compile-time speaking_rate. Set ONCE here so it
+                // propagates through every utterance in the interactive loop.
+                if (tts_length_scale > 0.0f) {
+                    setenv("NNOPT_TTS_LENGTH_SCALE", argv[i], 1);
+                }
             } else if (a.rfind("--", 0) == 0) {
                 // Unknown flag — skip the value too if present.
                 if (i + 1 < argc && argv[i + 1][0] != '-') ++i;
@@ -394,6 +414,18 @@ int main(int argc, char** argv) {
             duration_noise_buf.assign(2 * in_ids.size(), 0.0f);
             rng.fill(duration_noise_buf.data(), duration_noise_buf.size());
             rng.fill(prior_noise_buf.data(), prior_noise_buf.size());
+
+            // VITS noise scaling. HF defaults: noise_scale=0.667 (prior z),
+            // noise_scale_w=0.8 (duration latent). Both are user-tunable in
+            // the see-and-say Configurations dialog. Apply by scaling the
+            // pre-filled noise buffers in place — no graph change needed
+            // since both ops just consume these buffers as the noise source.
+            if (tts_noise_scale_w != 1.0f) {
+                for (auto& v : duration_noise_buf) v *= tts_noise_scale_w;
+            }
+            if (tts_noise_scale != 1.0f) {
+                for (auto& v : prior_noise_buf) v *= tts_noise_scale;
+            }
 
             std::fprintf(stderr, "▶ tokenize  T_chars=%zu  lang=%s  utt=%d\n",
                          in_ids.size(),

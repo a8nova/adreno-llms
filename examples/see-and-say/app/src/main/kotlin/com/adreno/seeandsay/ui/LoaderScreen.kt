@@ -7,6 +7,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -45,23 +49,29 @@ fun LoaderScreen(phase: UiPhase) {
                 // SurfaceFlinger keep showing the latched buffer while the GPU
                 // is saturated; an animated indicator would force per-vsync
                 // recompositions that drop frames and surface as white flashes.
-                Text(
-                    text = "🔥  " + phase.step,
-                    textAlign = TextAlign.Center,
-                    color = MaterialTheme.colorScheme.onBackground,
+                Icon(
+                    Icons.Filled.Memory,
+                    contentDescription = "GPU",
+                    modifier = Modifier.size(72.dp),
+                    tint = MaterialTheme.colorScheme.primary,
                 )
-                Spacer(Modifier.height(8.dp))
                 Text(
-                    text = "Please wait. The GPU is busy with one-time setup —\nthe screen may pause briefly.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f),
+                    text = "🔥🔥🔥",
+                    style = MaterialTheme.typography.displayMedium,
                     textAlign = TextAlign.Center,
                 )
                 Spacer(Modifier.height(20.dp))
                 Text(
-                    text = "sacrifices, sacrifices, sacrifices —\neither you wait now while we warm up the GPU,\nor for every single query  :)",
+                    text = "Warming up the GPU",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = phase.step,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.75f),
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f),
                     textAlign = TextAlign.Center,
                 )
             }

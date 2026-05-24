@@ -49,7 +49,13 @@ sealed interface CameraFlow {
 
 sealed interface SpeakFlow {
     data object Idle : SpeakFlow
-    data object Synthesizing : SpeakFlow
+    /**
+     * Synthesizing one sentence of a multi-sentence speak() job.
+     * Reported as 1-based for display; e.g. (3, 8) means "sentence 3 of 8 is
+     * currently being synthesized." Lets the UI show progress instead of
+     * leaving the user staring at a frozen "Synthesizing…" for 20+ seconds.
+     */
+    data class Synthesizing(val sentenceIndex: Int = 0, val sentenceTotal: Int = 0) : SpeakFlow
     data class Done(
         val audioSec: Double,
         val rtf: Double,
@@ -63,12 +69,106 @@ sealed interface SpeakFlow {
     data class Failed(val message: String) : SpeakFlow
 }
 
-// Languages supported by MMS-TTS at runtime. Each maps to a `--lang <code>`
-// flag on the binary, which reads from `weights/<code>/`. Switching language
-// restarts the MMS-TTS session — the binary is single-language at launch.
-enum class TtsLanguage(val code: String, val label: String, val available: Boolean) {
-    English("eng", "English", true),
-    Amharic("amh", "Amharic (አማርኛ)", true),
+/**
+ * Languages supported at runtime — dynamic. Bundled defaults (eng + amh)
+ * are extracted from the APK assets on first launch; any other code shows
+ * up here AFTER the user downloads its language pack via LanguagePickerScreen.
+ *
+ * `code` maps to `--lang <code>` on the binary, which reads from
+ * `<filesDir>/mmstts/weights/<code>/`. `label` is the display string in the
+ * Settings radio list. `available` is true once the language's
+ * `tokenizer_vocab.bin` exists on disk; false means greyed-out (shouldn't
+ * happen for the dynamic list — those entries are filtered out).
+ */
+data class TtsLanguage(val code: String, val label: String, val available: Boolean)
+
+/**
+ * SmolVLM sampler knobs surfaced to the user via the Configurations dialog.
+ * These are passed as CLI flags to the binary at process start — changing any
+ * of them restarts the SmolVLM session (kills the process and re-launches
+ * with new args). Defaults match the binary's own greedy defaults so that the
+ * dialog "matches reality" before the user touches it.
+ */
+data class SamplerSettings(
+    val maxNewTokens: Int = 128,  // bumped from 64 — 64 truncates SmolVLM mid-sentence on detailed prompts
+    val topK: Int = 1,            // greedy default; > 1 enables stochastic sampling
+    val topP: Float = 1.0f,
+    val temperature: Float = 0.0f,
+    // Fast (384, 36 image tokens, ~44% less vision compute) vs Quality (512,
+    // 64 image tokens, matches upstream training). Passed as --image-size to
+    // the binary. The bin ships both pos-embed variants so switching at
+    // runtime needs no re-conversion.
+    val imageSize: Int = 384,
+)
+
+/**
+ * SmolVLM's chat template (`<|im_start|>User:<image>...<end_of_utterance>\nAssistant:`)
+ * has no native system role — idefics3 wasn't trained with one. We approximate
+ * it by prepending the system text to the user prompt in Kotlin: the model
+ * sees `<system_prompt>\n\n<user_question>` as one user turn. Effect is
+ * looser than Gemma's structured system slot, but for SmolVLM-256M this nudges
+ * verbosity / format reliably enough to be useful.
+ */
+const val DEFAULT_SYSTEM_PROMPT: String =
+    "You are a careful visual describer. For every image, list what you see in detail: " +
+    "the main subjects, their colors and shapes, any text or labels, the setting or background, " +
+    "and any notable details. Be specific and concrete, and answer the user's question completely."
+
+/**
+ * MMS-TTS / VITS knobs surfaced via the Configurations dialog. Passed as
+ * --noise-scale / --noise-scale-w / --length-scale to the mms-tts binary at
+ * process start; changing them restarts the TTS session.
+ *
+ * Defaults match HuggingFace VitsModel.generate(): noise_scale=0.667 (prior
+ * z variance), noise_scale_w=0.8 (duration-predictor latent variance),
+ * length_scale=1.0 (speech-rate multiplier — < 1.0 faster, > 1.0 slower).
+ */
+data class TtsSettings(
+    val noiseScale: Float = 0.667f,
+    val noiseScaleW: Float = 0.8f,
+    val lengthScale: Float = 1.0f,
+    /**
+     * Playback pacing for multi-sentence text.
+     *  true  — synthesize ALL sentences first, then play continuously (no
+     *          mid-utterance silence gaps). Costs an upfront wait roughly
+     *          equal to total_audio_seconds × RTF.
+     *  false — start playing sentence 1 the moment it's ready, while later
+     *          sentences are still synthesizing. With RTF > 1 (common on
+     *          mobile) you hear noticeable silence between sentences.
+     */
+    val prebufferAll: Boolean = true,
+)
+
+/**
+ * Snapshot of the device's OpenCL device-info block (printed by
+ * opencl_context.cpp at process start, captured from SmolVLM's stderr stream).
+ * Used to render the "Device & compatibility" section in Settings and decide
+ * whether the current hardware can run our kernels.
+ */
+data class DeviceInfo(
+    val platform: String,
+    val device: String,
+    val openclVersion: String,
+    val driver: String,
+    val computeUnits: Int,
+    val maxClockMhz: Int,
+    val maxWorkgroup: Int,
+    val globalMemMb: Int,
+    val localMemKb: Int,
+    val hasFp16: Boolean,
+    val hasQcomPerfHint: Boolean,
+    val hasQcomRecordableQueues: Boolean,
+    val hasQcomDotProduct8: Boolean,
+) {
+    /** True iff the device meets every hard requirement to run our fp16 build. */
+    val isCompatible: Boolean
+        get() = hasFp16 &&
+                maxWorkgroup >= 64 &&
+                globalMemMb >= 1024 &&
+                localMemKb >= 12
+
+    /** True iff the device is an Adreno (which is what our kernels are tuned for). */
+    val isAdreno: Boolean get() = device.contains("Adreno", ignoreCase = true)
 }
 
 /** Per-query performance snapshot for the debug panel at the bottom of the camera screen. */
@@ -109,8 +209,43 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _speak = MutableStateFlow<SpeakFlow>(SpeakFlow.Idle)
     val speak: StateFlow<SpeakFlow> = _speak.asStateFlow()
 
-    private val _language = MutableStateFlow(TtsLanguage.English)
+    private val _language = MutableStateFlow(TtsLanguage("eng", "English", true))
     val language: StateFlow<TtsLanguage> = _language.asStateFlow()
+
+    // Language registry + downloader. Public so the Compose screen can wire
+    // directly to its StateFlow; ViewModel doesn't need to mediate the UI.
+    val languageRegistry = com.adreno.seeandsay.runner.LanguageRegistry(context)
+
+    /**
+     * Installed-or-bundled languages, projected into the form the Settings
+     * radio list consumes. Derived from LanguageRegistry — adding a language
+     * via download automatically expands this list.
+     */
+    val installedLanguages: StateFlow<List<TtsLanguage>> = run {
+        val flow = kotlinx.coroutines.flow.MutableStateFlow<List<TtsLanguage>>(
+            listOf(TtsLanguage("eng", "English", true), TtsLanguage("amh", "Amharic (አማርኛ)", true)),
+        )
+        viewModelScope.launch {
+            languageRegistry.entries.collect { entries ->
+                flow.value = entries
+                    .filter { e ->
+                        e.status is com.adreno.seeandsay.runner.LanguageRegistry.LangEntry.Status.Bundled ||
+                        e.status is com.adreno.seeandsay.runner.LanguageRegistry.LangEntry.Status.Installed
+                    }
+                    .map { e ->
+                        val pretty = buildString {
+                            append(e.name)
+                            if (e.nativeName.isNotBlank() && e.nativeName != e.name) {
+                                append(" (").append(e.nativeName).append(")")
+                            }
+                        }
+                        TtsLanguage(e.code, pretty, true)
+                    }
+                    .sortedBy { it.label.lowercase() }
+            }
+        }
+        flow
+    }
 
     private val _lastAnswer = MutableStateFlow<String?>(null)
     val lastAnswer: StateFlow<String?> = _lastAnswer.asStateFlow()
@@ -118,18 +253,129 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _metrics = MutableStateFlow(AskMetrics())
     val metrics: StateFlow<AskMetrics> = _metrics.asStateFlow()
 
+    private val _samplerSettings = MutableStateFlow(SamplerSettings())
+    val samplerSettings: StateFlow<SamplerSettings> = _samplerSettings.asStateFlow()
+
+    private val _ttsSettings = MutableStateFlow(TtsSettings())
+    val ttsSettings: StateFlow<TtsSettings> = _ttsSettings.asStateFlow()
+
+    // Populated once by SmolVLMSession when its stderr emits the OpenCL device
+    // block at process start. SmolVLM runs first so we always have this by the
+    // time Settings is opened.
+    private val _deviceInfo = MutableStateFlow<DeviceInfo?>(null)
+    val deviceInfo: StateFlow<DeviceInfo?> = _deviceInfo.asStateFlow()
+
+    /**
+     * Live VmRSS readings for both subprocesses, polled every ~1.2 s. Drives
+     * the top-bar status pill so the user can watch memory move as inference
+     * runs. Reads /proc/<pid>/status — a ~1 ms file read, free vs. inference.
+     */
+    data class LiveRss(val smolvlmMb: Int?, val mmsttsMb: Int?)
+
+    private val _liveRss = MutableStateFlow(LiveRss(null, null))
+    val liveRss: StateFlow<LiveRss> = _liveRss.asStateFlow()
+
+    init {
+        smolvlm.onDeviceInfo = { info -> _deviceInfo.value = info }
+        // Live-RSS poller. Lifecycle-bound via viewModelScope; cancels with
+        // the ViewModel. Quiet when either subprocess is down (returns null).
+        viewModelScope.launch(Dispatchers.IO) {
+            while (true) {
+                val sv = smolvlm.rssKb()?.let { it / 1024 }
+                val mt = mmstts.rssKb()?.let { it / 1024 }
+                _liveRss.value = LiveRss(sv, mt)
+                kotlinx.coroutines.delay(1200)
+            }
+        }
+    }
+
+    // Plain text prepended to every user prompt sent to SmolVLM. Per-query
+    // (no binary restart on change) — see askAndSpeak() for the prepend site.
+    private val _systemPrompt = MutableStateFlow(DEFAULT_SYSTEM_PROMPT)
+    val systemPrompt: StateFlow<String> = _systemPrompt.asStateFlow()
+
+    fun updateSystemPrompt(text: String) { _systemPrompt.value = text }
+
+    /**
+     * Apply new sampler settings. If they differ from the current values, this
+     * kicks off a SmolVLM process restart in the background (the binary takes
+     * --temperature / --top-k / --top-p / --max-tokens at launch only).
+     * During the restart the UI flips to UiPhase.WarmingUp so the loader
+     * screen reappears with the chip+fire animation. Preloaded image state is
+     * cleared because the new process has no KV cache.
+     */
+    fun updateSamplerSettings(new: SamplerSettings) {
+        if (_samplerSettings.value == new) return
+        _samplerSettings.value = new
+        viewModelScope.launch(Dispatchers.IO) {
+            _phase.value = UiPhase.WarmingUp("Applying new sampler settings…")
+            preloadedJpegPath = null
+            try {
+                smolvlm.stop()
+                smolvlm.start(new)
+                _phase.value = UiPhase.Ready
+            } catch (t: Throwable) {
+                _phase.value = UiPhase.Error("SmolVLM restart failed: ${t.message}")
+            }
+        }
+    }
+
+    /**
+     * Apply new MMS-TTS / VITS knobs. Restarts the mms-tts session in the
+     * background (length_scale + noise scales are passed at process start);
+     * the SmolVLM session is untouched.
+     */
+    fun updateTtsSettings(new: TtsSettings) {
+        if (_ttsSettings.value == new) return
+        _ttsSettings.value = new
+        viewModelScope.launch(Dispatchers.IO) {
+            _phase.value = UiPhase.WarmingUp("Applying new TTS settings…")
+            try {
+                mmstts.stop()
+                mmstts.start(_language.value.code, new)
+                _phase.value = UiPhase.Ready
+            } catch (t: Throwable) {
+                _phase.value = UiPhase.Error("MMS-TTS restart failed: ${t.message}")
+            }
+        }
+    }
+
+    /** Convenience overload — accepts a raw code string from the Language Picker. */
+    fun setLanguage(code: String) {
+        val installed = installedLanguages.value
+        val lang = installed.firstOrNull { it.code == code }
+            ?: TtsLanguage(code, code, true)
+        setLanguage(lang)
+    }
+
     fun setLanguage(lang: TtsLanguage) {
         if (_language.value == lang) return
+        val previous = _language.value
         _language.value = lang
         // The MMS-TTS binary loads a single language at launch via --lang <code>.
         // Switching means: stop the current session, start a fresh one. Done off
         // the main thread because start() blocks on the binary's `ready.` marker.
+        // If start fails (missing weights for this language, OpenCL OOM, …) we
+        // surface the error to the UI AND revert _language so the user can
+        // pick a working option — otherwise the next Speak would fire
+        // `mmstts session not running` with no explanation.
         viewModelScope.launch(Dispatchers.IO) {
+            _phase.value = UiPhase.WarmingUp("Loading ${lang.label}…")
             try {
                 mmstts.stop()
-                mmstts.start(lang.code)
+                mmstts.start(lang.code, _ttsSettings.value)
+                _phase.value = UiPhase.Ready
             } catch (t: Throwable) {
                 Log.w("MainViewModel", "language switch to ${lang.code} failed", t)
+                _language.value = previous
+                // Best-effort: bring the previous language's session back so
+                // the rest of the app keeps working.
+                try { mmstts.stop(); mmstts.start(previous.code, _ttsSettings.value) }
+                catch (_: Throwable) { /* nothing more we can do here */ }
+                _phase.value = UiPhase.Error(
+                    "Failed to load ${lang.label} — weights/${lang.code}/ probably missing. " +
+                    "Reverted to ${previous.label}.",
+                )
             }
         }
     }
@@ -169,7 +415,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun startSessions() {
         _phase.value = UiPhase.WarmingUp("Loading SmolVLM vision-language model…")
         try {
-            withContext(Dispatchers.IO) { smolvlm.start() }
+            withContext(Dispatchers.IO) { smolvlm.start(_samplerSettings.value) }
         } catch (t: Throwable) {
             _phase.value = UiPhase.Error("SmolVLM start failed: ${t.message}")
             return
@@ -187,7 +433,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
         _phase.value = UiPhase.WarmingUp("Loading MMS-TTS speech model…")
         try {
-            withContext(Dispatchers.IO) { mmstts.start(_language.value.code) }
+            withContext(Dispatchers.IO) { mmstts.start(_language.value.code, _ttsSettings.value) }
         } catch (t: Throwable) {
             _phase.value = UiPhase.Error("MMS-TTS start failed: ${t.message}")
             return
@@ -285,9 +531,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             var finalText: String? = null
             var lastEmitMs = 0L
             val streamThrottleMs = 500L
+            // Prepend the system prompt ONLY to the first turn (build_vlm_prompt
+            // path). Follow-ups already have the system context in the KV cache
+            // from turn 1 — re-adding it on every follow-up wastes context.
+            val sys = _systemPrompt.value.trim()
+            val effectivePrompt = if (!isFollowUp && sys.isNotEmpty())
+                "$sys\n\n$prompt"
+            else
+                prompt
             try {
-                val flow = if (isFollowUp) smolvlm.ask(prompt)
-                           else smolvlm.askWithImage(jpeg.absolutePath, prompt)
+                val flow = if (isFollowUp) smolvlm.ask(effectivePrompt)
+                           else smolvlm.askWithImage(jpeg.absolutePath, effectivePrompt)
                 flow.collect { out ->
                     when (out) {
                         is SmolVLMSession.Output.Token -> {
@@ -335,9 +589,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             _metrics.value = _metrics.value.copy(
                 e2eSec = (System.currentTimeMillis() - askStart) / 1000.0,
             )
-            // TTS is disabled in the Camera tab — text answer only. Use the
-            // Speak tab if you want the answer read aloud (paste the text or
-            // use the dedicated Speak-the-last-answer affordance below).
+            // Camera mode = vision-only. Auto-TTS was previously firing here,
+            // but the user wants the camera tab to stop at "text answer
+            // visible" — TTS lives in the dedicated Text-to-speech screen.
             _camera.value = CameraFlow.Asking(jpeg, AskPhase.Done, finalShown)
         }
     }
@@ -453,7 +707,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (text.isBlank()) return
         speakJob?.cancel()
         wavPlayer.stop()
-        _speak.value = SpeakFlow.Synthesizing
+        _speak.value = SpeakFlow.Synthesizing(0, 0)
         speakJob = viewModelScope.launch(Dispatchers.Default) {
             val startMs = System.currentTimeMillis()
             try {
@@ -462,16 +716,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val audioDir = File(cwd, "speak_queue").also { it.mkdirs() }
                 audioDir.listFiles()?.forEach { it.delete() }
 
-                // Pre-buffer policy: ZERO. Sentence 1 plays the instant it's
-                // synthesized; subsequent sentences synthesize in parallel and
-                // queue behind it. Previously this was 2, which doubled TTFS
-                // for any 2+ sentence response — at the current RTF ≈ 1.45 the
-                // sentence-2 synthesis usually completes before sentence-1
-                // playback finishes (a 1.45-second synthesis covers 1 second
-                // of speech, so anything ≥ 1.5s long buys us enough headroom).
-                // If sentence 2 runs over, we eat a small audible gap instead
-                // of a guaranteed multi-second wall before any sound plays.
-                val prebufferTarget = 0
+                // Pre-buffer policy: depends on tts.prebufferAll.
+                //   true  → buffer ALL sentences first, then play continuously
+                //           (no mid-utterance silence — recommended whenever
+                //           RTF > 1, which is the case on every Adreno 6xx).
+                //   false → drain sentence 1 the instant it's ready; later
+                //           sentences may not finish synthesizing in time and
+                //           you hear a gap before each one.
+                // Hard-coded "0" was the old default and is the source of the
+                // "huge silence gaps mid-output" complaint.
+                val prebufferTarget = if (_ttsSettings.value.prebufferAll)
+                    sentences.size  // never satisfies index < target → all sentences buffer
+                else
+                    0
                 var firstWav: com.adreno.seeandsay.runner.MMSTTSSession.Result? = null
                 var lastRes: com.adreno.seeandsay.runner.MMSTTSSession.Result? = null
                 // Aggregate metrics across all sentences for the live perf panel.
@@ -494,6 +751,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 for ((index, sentence) in sentences.withIndex()) {
+                    // Surface per-sentence progress so the user knows the job
+                    // is alive during the multi-second synthesis windows.
+                    _speak.value = SpeakFlow.Synthesizing(index + 1, sentences.size)
                     val target = File(audioDir, "speak_${index.toString().padStart(3, '0')}.wav")
                     val res = mmstts.speak(sentence, persistTo = target)
                     if (firstWav == null) firstWav = res
@@ -584,6 +844,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         wavPlayer.stop()
         smolvlm.stop()
         mmstts.stop()
+        languageRegistry.shutdown()
         super.onCleared()
     }
 }

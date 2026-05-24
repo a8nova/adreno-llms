@@ -26,6 +26,8 @@ import java.io.OutputStreamWriter
 import java.io.PrintWriter
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
+import com.adreno.seeandsay.DeviceInfo
+import com.adreno.seeandsay.SamplerSettings
 
 /**
  * Long-lived `libsmolvlm.so --interactive` process. Replaces the one-shot
@@ -55,11 +57,23 @@ class SmolVLMSession(context: Context) {
     @Volatile private var process: Process? = null
     @Volatile private var writer: PrintWriter? = null
 
-    private val readyDeferred = CompletableDeferred<Unit>()
+    // Recreated on EACH start() so stop() + start() (Configurations dialog
+    // sampler/image-size changes) actually waits for the NEW process's
+    // "ready." marker instead of returning instantly because the old
+    // CompletableDeferred was already completed on the first launch.
+    private var readyDeferred = CompletableDeferred<Unit>()
     private val mutex = Mutex()
 
     @Volatile private var stdoutTarget: SendChannel<String>? = null
     @Volatile private var stderrTarget: SendChannel<String>? = null
+
+    /**
+     * Callback fired once per process start when the OpenCL device-info block
+     * has finished printing to stderr. Lets MainViewModel expose hardware
+     * details + compatibility analysis without each consumer re-running
+     * clGetDeviceInfo.
+     */
+    @Volatile var onDeviceInfo: ((DeviceInfo) -> Unit)? = null
 
     sealed interface Output {
         data class Token(val text: String) : Output
@@ -80,14 +94,32 @@ class SmolVLMSession(context: Context) {
         ) : Output
     }
 
-    suspend fun start() = withContext(Dispatchers.IO) {
+    suspend fun start(settings: SamplerSettings = SamplerSettings()) = withContext(Dispatchers.IO) {
         if (process?.isAlive == true) return@withContext
         require(cwd.isDirectory) { "smolvlm cwd missing: $cwd" }
+        // Reset the ready signal for this fresh launch — see field comment.
+        readyDeferred = CompletableDeferred()
 
         val bin = "$nativeLibDir/libsmolvlm.so"
-        val pb = ProcessBuilder(listOf(bin, "--interactive")).directory(cwd)
+        // Sampler knobs (Configurations dialog in the UI) are passed at process
+        // start. Changing any of them requires a stop()+start() — see
+        // MainViewModel.updateSamplerSettings.
+        val args = mutableListOf(
+            bin, "--interactive",
+            "--temperature", settings.temperature.toString(),
+            "--top-k", settings.topK.toString(),
+            "--top-p", settings.topP.toString(),
+            "--max-tokens", settings.maxNewTokens.toString(),
+            "--image-size", settings.imageSize.toString(),
+        )
+        val pb = ProcessBuilder(args).directory(cwd)
         pb.environment()["LD_LIBRARY_PATH"] = "$nativeLibDir:/vendor/lib64:/system/lib64"
         pb.environment()["NNOPT_DEBUG_LAYERS"] = "0"
+        // Dump the exact token ids + decoded chat-template each turn (including
+        // follow-ups) so we can diff against HF's reference rendering when an
+        // answer looks off. Surfaces as `stderr: ▶ prompt total_pos=N turn=K …`
+        // in Logcat under the SmolVLMSession tag.
+        pb.environment()["NNOPT_DUMP_PROMPT_IDS"] = "1"
         // Diagnostic: have the binary print [kernel_cache] HIT/MISS/SAVE lines so we
         // can see in logcat whether the on-device binary cache is actually being
         // used across app restarts. Cheap (one line per kernel build, ~20 lines
@@ -130,6 +162,11 @@ class SmolVLMSession(context: Context) {
         }
 
         thread(name = "smolvlm-stderr", isDaemon = true) {
+            // Buffer for the "── OpenCL device …" block. We append lines
+            // between the opener and the closing "─────" line, then parse
+            // once at end so a partial block never reaches onDeviceInfo.
+            val deviceBlock = mutableListOf<String>()
+            var inDeviceBlock = false
             try {
                 BufferedReader(InputStreamReader(p.errorStream, Charsets.UTF_8)).useLines { lines ->
                     for (line in lines) {
@@ -137,6 +174,23 @@ class SmolVLMSession(context: Context) {
                         stderrTarget?.trySend(line)
                         if (!readyDeferred.isCompleted && line.startsWith("ready.")) {
                             readyDeferred.complete(Unit)
+                        }
+                        // Device-info capture (one-shot per process).
+                        if (line.startsWith("── OpenCL device")) {
+                            inDeviceBlock = true
+                            deviceBlock.clear()
+                        } else if (inDeviceBlock) {
+                            if (line.startsWith("──")) {
+                                inDeviceBlock = false
+                                parseDeviceInfo(deviceBlock)?.let { info ->
+                                    try { onDeviceInfo?.invoke(info) }
+                                    catch (t: Throwable) {
+                                        Log.w(TAG, "onDeviceInfo callback threw", t)
+                                    }
+                                }
+                            } else {
+                                deviceBlock.add(line)
+                            }
                         }
                     }
                 }
@@ -290,6 +344,13 @@ class SmolVLMSession(context: Context) {
 
     fun isAlive(): Boolean = process?.isAlive == true
 
+    /** PID of the running subprocess, or null if not running. Used by the
+     *  ViewModel's live-RSS poller to read /proc/<pid>/status. */
+    fun pid(): Long? = pidOf(process)
+
+    /** Read VmRSS from /proc/<pid>/status, in KB. Cheap (~1 ms file read). */
+    fun rssKb(): Int? = readProcKb(pid(), "VmRSS")
+
     fun stop() {
         try { writer?.println("/quit"); writer?.flush() } catch (_: Throwable) {}
         try { writer?.close() } catch (_: Throwable) {}
@@ -362,5 +423,53 @@ class SmolVLMSession(context: Context) {
 
     companion object {
         private const val TAG = "SmolVLMSession"
+
+        /**
+         * Parses the body of the "── OpenCL device" block printed by
+         * opencl_context.cpp at process start. Returns null if a required
+         * field is missing (defensive — keeps onDeviceInfo from firing with
+         * partial data on a future opencl_context refactor).
+         */
+        internal fun parseDeviceInfo(lines: List<String>): DeviceInfo? {
+            val kv = mutableMapOf<String, String>()
+            // Lines look like: "  platform        QUALCOMM Snapdragon(TM)"
+            val rx = Regex("""^\s+(\S+)\s+(.+)$""")
+            for (line in lines) {
+                rx.matchEntire(line)?.let { m ->
+                    kv[m.groupValues[1]] = m.groupValues[2].trim()
+                }
+            }
+            fun yn(k: String) = kv[k]?.equals("yes", ignoreCase = true) == true
+            fun intOf(k: String): Int? {
+                val raw = kv[k] ?: return null
+                // Strip trailing unit, e.g. "1708 MB" → "1708", "32 KB" → "32".
+                val numTok = raw.trim().split(Regex("\\s+")).firstOrNull() ?: return null
+                return numTok.toIntOrNull()
+            }
+            val platform = kv["platform"] ?: return null
+            val device = kv["device"] ?: return null
+            val openclVersion = kv["version"] ?: ""
+            val driver = kv["driver"] ?: ""
+            val cu = intOf("compute_units") ?: return null
+            val clockMhz = intOf("max_clock_MHz") ?: 0
+            val maxWg = intOf("max_workgroup") ?: return null
+            val gmem = intOf("global_mem") ?: return null
+            val lmem = intOf("local_mem") ?: return null
+            return DeviceInfo(
+                platform = platform,
+                device = device,
+                openclVersion = openclVersion,
+                driver = driver,
+                computeUnits = cu,
+                maxClockMhz = clockMhz,
+                maxWorkgroup = maxWg,
+                globalMemMb = gmem,
+                localMemKb = lmem,
+                hasFp16 = yn("cl_khr_fp16"),
+                hasQcomPerfHint = yn("qcom_perf_hint"),
+                hasQcomRecordableQueues = yn("qcom_recordable_queues"),
+                hasQcomDotProduct8 = yn("qcom_dot_product8"),
+            )
+        }
     }
 }

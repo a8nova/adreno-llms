@@ -13,15 +13,26 @@ Inference is **100% on-device C++**. The Python script in `scripts/prep_lang.py`
 From this directory, with an Android device connected over `adb`:
 
 ```bash
-# 1. One-time per language: download from HF and convert to on-device format.
-#    Run on your laptop (needs transformers + torch + uroman in a venv).
+# 0. One-time Python deps for the offline weight conversion step
+pip install huggingface_hub transformers safetensors torch numpy
+
+# 1. One-time per language: download from HF and convert to the on-device
+#    format. Writes weights/<lang>/{model.fp16.bin, model.fp16.meta.json,
+#    tokenizer_vocab.bin} and assets/<lang>/{test_input_ids, *_noise}.bin.
 python3 scripts/prep_lang.py eng "Hello, my name is."
 python3 scripts/prep_lang.py amh "ሰላም፣ እንደምን አደርክ?"
 
-# 2. Build (single binary handles all languages at runtime)
+# 1b. ONLY for non-Latin scripts (amh, ara, khm, tha, …): fetch the uroman
+#     romanization tables into assets/uroman/. Latin-script langs skip this.
+./scripts/fetch_uroman.sh
+
+# 2. Build (first run auto-invokes scripts/setup_deps.sh to fetch OpenCL
+#    headers + pull libOpenCL.so from your connected Android device).
+#    Single binary handles all languages at runtime via --lang.
 NNOPT_DTYPE=fp16 ./scripts/build.sh
 
-# 3. Deploy binary + every weight pack present in weights/<lang>/
+# 3. Deploy. Pushes the binary + every weights/<lang>/ subdir that
+#    prep_lang.py has populated + assets/<lang>/ + assets/uroman/.
 NNOPT_DTYPE=fp16 ./scripts/deploy_android.sh
 
 # 4. Run — text goes in, /tmp/tts_out.wav comes out, plays automatically
@@ -51,6 +62,29 @@ NNOPT_REF_TEST=1 NNOPT_DTYPE=fp16 ./scripts/run_android.sh "x" 1
 ## Languages
 
 Any [MMS-TTS language code](https://dl.fbaipublicfiles.com/mms/tts/all-tts-languages.html) — Latin-script (eng, deu, fra, spa, ...) and non-Latin (amh, ara, khm, tha, ...) both work. Non-Latin scripts go through uroman romanization before the on-device char tokenizer; uroman tables ship in `assets/uroman/` (loaded once at process start).
+
+### Pre-built packs (used by the see-and-say example)
+
+Ready-to-download packs (~69 MB each: `model.fp16.bin` + `tokenizer_vocab.bin` + metadata) live in this HF dataset:
+
+  https://huggingface.co/datasets/a8nova/mms-tts-language-packs
+
+The see-and-say Android picker lists every language with a pack present there. Languages without a pack stay greyed out until one is uploaded.
+
+### Adding a language not yet in the dataset
+
+1. **Convert + zip locally.** From this directory:
+   ```bash
+   python3 scripts/convert_all_languages.py --codes <code>
+   ```
+   This calls `prep_lang.py <code>` under the hood, zips the runtime files into `packs/mms-tts-<code>.zip`, and regenerates `packs/languages.json`. (For bulk conversion, drop `--codes` to walk the full 1140-code list in `scripts/mms_tts_languages.json` — it's resumable and skips codes whose zip already exists.)
+
+2. **Upload to HF.** One-time `huggingface-cli login`, then:
+   ```bash
+   huggingface-cli upload a8nova/mms-tts-language-packs packs/ . --repo-type dataset
+   ```
+
+The picker UI in the app picks up the new language on next launch — no code change, no app release.
 
 ## Layout
 

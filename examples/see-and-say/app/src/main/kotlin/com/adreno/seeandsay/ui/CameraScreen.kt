@@ -7,11 +7,14 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -24,11 +27,17 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Lens
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
@@ -106,6 +115,10 @@ fun CameraScreen(viewModel: MainViewModel) {
     }
 
     val flow by viewModel.camera.collectAsStateWithLifecycle()
+    val sampler by viewModel.samplerSettings.collectAsStateWithLifecycle()
+    val tts by viewModel.ttsSettings.collectAsStateWithLifecycle()
+    val systemPrompt by viewModel.systemPrompt.collectAsStateWithLifecycle()
+    var showConfigs by remember { mutableStateOf(false) }
 
     // LivePreview stays always-mounted so its CameraX binding doesn't churn
     // on every state change. CapturedView is rendered conditionally — when in
@@ -122,6 +135,40 @@ fun CameraScreen(viewModel: MainViewModel) {
                 else -> {}
             }
         }
+
+        // Top-right Configurations launcher. Sits above both LivePreview and
+        // CapturedView so the user can tune sampler settings whether or not an
+        // image is loaded. Tapping opens the dialog; OK fires off a SmolVLM
+        // restart (the binary takes these as CLI flags at launch only).
+        FilledIconButton(
+            onClick = { showConfigs = true },
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(top = 12.dp, end = 12.dp)
+                .size(44.dp),
+            colors = IconButtonDefaults.filledIconButtonColors(
+                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                contentColor = MaterialTheme.colorScheme.onSurface,
+            ),
+        ) {
+            Icon(Icons.Filled.Tune, contentDescription = "Configurations", modifier = Modifier.size(22.dp))
+        }
+
+        if (showConfigs) {
+            ConfigurationsDialog(
+                current = sampler,
+                currentTts = tts,
+                currentSystemPrompt = systemPrompt,
+                defaultSystemPrompt = com.adreno.seeandsay.DEFAULT_SYSTEM_PROMPT,
+                onDismiss = { showConfigs = false },
+                onConfirm = { newSampler, newTts, newSys ->
+                    viewModel.updateSamplerSettings(newSampler)
+                    viewModel.updateTtsSettings(newTts)
+                    viewModel.updateSystemPrompt(newSys)
+                    showConfigs = false
+                },
+            )
+        }
     }
 }
 
@@ -130,6 +177,10 @@ private fun LivePreview(viewModel: MainViewModel, lifecycleOwner: androidx.lifec
     val context = LocalContext.current
     val controller = remember { CameraController(context) }
     var streaming by remember { mutableStateOf(false) }
+    // Tracked separately from controller.lensFacing so a re-composition
+    // updates the icon's contentDescription. Initial value matches
+    // CameraController's default (back).
+    var facingFront by remember { mutableStateOf(false) }
 
     val pickImageLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent(),
@@ -144,76 +195,148 @@ private fun LivePreview(viewModel: MainViewModel, lifecycleOwner: androidx.lifec
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
-            factory = { ctx ->
-                val pv = PreviewView(ctx).apply {
-                    setBackgroundColor(android.graphics.Color.BLACK)
-                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                    previewStreamState.observe(lifecycleOwner) { s ->
-                        streaming = s == PreviewView.StreamState.STREAMING
+    // Form-style layout: bounded camera preview at top, then shutter, then
+    // upload-from-gallery. Fixed pixel sizes everywhere — aspectRatio
+    // combined with heightIn produces conflicting constraints that pushed
+    // the whole cluster to the bottom of large screens. No verticalScroll
+    // either; if a future device can't fit ~600dp of content we add it back
+    // explicitly.
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        // ── Fixed-height camera preview ────────────────────────────────────
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(260.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(androidx.compose.ui.graphics.Color.Black),
+        ) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    val pv = PreviewView(ctx).apply {
+                        setBackgroundColor(android.graphics.Color.BLACK)
+                        implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                        previewStreamState.observe(lifecycleOwner) { s ->
+                            streaming = s == PreviewView.StreamState.STREAMING
+                        }
                     }
-                }
-                controller.bind(lifecycleOwner, pv)
-                pv
-            },
-        )
-
-        // Opaque black scrim — covers the camera surface until the first frame
-        // has actually been delivered. Prevents the white-flash on fold/unfold
-        // transitions and on cold camera bind.
-        if (!streaming) {
-            Box(modifier = Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black))
+                    controller.bind(lifecycleOwner, pv)
+                    pv
+                },
+            )
+            // Opaque scrim until the first camera frame lands — kills the
+            // white flash on fold/unfold + cold bind.
+            if (!streaming) {
+                Box(modifier = Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black))
+            }
+            // Flip-camera pill (overlaid top-left of the preview box).
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(8.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f))
+                    .clickable {
+                        controller.flip()
+                        facingFront = !facingFront
+                    }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Filled.FlipCameraAndroid,
+                    contentDescription = "Flip camera",
+                    tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.size(4.dp))
+                Text(
+                    text = if (facingFront) "Front" else "Back",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
         }
 
+        Spacer(Modifier.height(16.dp))
+
+        // ── Primary action: big shutter button ─────────────────────────────
+        FilledIconButton(
+            onClick = {
+                val target = File(context.filesDir, "captures/last.jpg")
+                controller.capture(target) { result ->
+                    result.onSuccess { viewModel.onCaptured(it) }
+                }
+            },
+            modifier = Modifier.size(72.dp),
+            shape = CircleShape,
+            colors = IconButtonDefaults.filledIconButtonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+            ),
+        ) {
+            Icon(Icons.Filled.Lens, contentDescription = "Capture photo", modifier = Modifier.size(40.dp))
+        }
+        Text(
+            text = "Tap to snap a photo",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f),
+            modifier = Modifier.padding(top = 4.dp),
+        )
+
+        Spacer(Modifier.height(20.dp))
+
+        // ── Divider with "or" ──────────────────────────────────────────────
         Row(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .padding(bottom = 16.dp, start = 24.dp, end = 24.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            FilledIconButton(
-                onClick = {
-                    val sample = File(context.filesDir, "smolvlm/fixtures/warmup.jpg")
-                    if (sample.exists()) viewModel.onCaptured(sample)
-                },
-                modifier = Modifier.size(48.dp),
-                colors = IconButtonDefaults.filledIconButtonColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
-                    contentColor = MaterialTheme.colorScheme.onSurface,
-                ),
-            ) {
-                Icon(Icons.Filled.Star, contentDescription = "Use sample image", modifier = Modifier.size(22.dp))
-            }
-            FilledIconButton(
-                onClick = {
-                    val target = File(context.filesDir, "captures/last.jpg")
-                    controller.capture(target) { result ->
-                        result.onSuccess { viewModel.onCaptured(it) }
-                    }
-                },
-                modifier = Modifier.size(64.dp),
-                shape = CircleShape,
-                colors = IconButtonDefaults.filledIconButtonColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                ),
-            ) {
-                Icon(Icons.Filled.Cameraswitch, contentDescription = "Capture", modifier = Modifier.size(28.dp))
-            }
-            FilledIconButton(
-                onClick = { pickImageLauncher.launch("image/*") },
-                modifier = Modifier.size(48.dp),
-                colors = IconButtonDefaults.filledIconButtonColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
-                    contentColor = MaterialTheme.colorScheme.onSurface,
-                ),
-            ) {
-                Icon(Icons.Filled.Image, contentDescription = "Pick from gallery", modifier = Modifier.size(22.dp))
-            }
+            androidx.compose.material3.HorizontalDivider(
+                modifier = Modifier.weight(1f),
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.2f),
+            )
+            Text(
+                text = "  or  ",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f),
+            )
+            androidx.compose.material3.HorizontalDivider(
+                modifier = Modifier.weight(1f),
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.2f),
+            )
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        // ── Alt action: upload from gallery (full-width, prominent) ────────
+        Button(
+            onClick = { pickImageLauncher.launch("image/*") },
+            modifier = Modifier.fillMaxWidth().height(54.dp),
+        ) {
+            Icon(Icons.Filled.Image, contentDescription = null, modifier = Modifier.size(22.dp))
+            Spacer(Modifier.size(8.dp))
+            Text("Upload from gallery", style = MaterialTheme.typography.titleSmall)
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // ── Tertiary: sample image (small, low-key) ────────────────────────
+        OutlinedButton(
+            onClick = {
+                val sample = File(context.filesDir, "smolvlm/fixtures/warmup.jpg")
+                if (sample.exists()) viewModel.onCaptured(sample)
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Icon(Icons.Filled.Star, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.size(8.dp))
+            Text("Use sample image", style = MaterialTheme.typography.bodySmall)
         }
     }
 }

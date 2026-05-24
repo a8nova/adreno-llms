@@ -48,7 +48,11 @@ class MMSTTSSession(context: Context) {
     @Volatile private var writer: PrintWriter? = null
     @Volatile private var pcmIn: DataInputStream? = null
 
-    private val readyDeferred = CompletableDeferred<Unit>()
+    // Recreated on EACH start() so that stop() + start() (e.g. on TTS-settings
+    // change via the Configurations dialog) properly waits for the NEW process
+    // to print "ready." instead of returning instantly because the old
+    // CompletableDeferred was already completed on the first launch.
+    private var readyDeferred = CompletableDeferred<Unit>()
     private val mutex = Mutex()
     @Volatile private var stderrTarget: SendChannel<String>? = null
 
@@ -75,14 +79,27 @@ class MMSTTSSession(context: Context) {
         override fun hashCode(): Int = System.identityHashCode(this)
     }
 
-    suspend fun start(langCode: String = "") = withContext(Dispatchers.IO) {
+    suspend fun start(
+        langCode: String = "",
+        tts: com.adreno.seeandsay.TtsSettings = com.adreno.seeandsay.TtsSettings(),
+    ) = withContext(Dispatchers.IO) {
         if (process?.isAlive == true) return@withContext
         require(cwd.isDirectory) { "mmstts cwd missing: $cwd" }
+        // Reset the ready signal for this fresh launch — see field comment.
+        readyDeferred = CompletableDeferred()
 
         val bin = "$nativeLibDir/libmmstts.so"
         val args = buildList {
             add("--interactive")
             if (langCode.isNotBlank()) { add("--lang"); add(langCode) }
+            // VITS knobs surfaced by the Configurations dialog. The binary
+            // parses these in main.cpp and applies them per-utterance: noise
+            // scales multiply the rng-filled noise buffers before forward,
+            // length-scale is forwarded via NNOPT_TTS_LENGTH_SCALE inside the
+            // binary (read by backbone.cpp::tts_forward_graph).
+            add("--noise-scale");   add(tts.noiseScale.toString())
+            add("--noise-scale-w"); add(tts.noiseScaleW.toString())
+            add("--length-scale");  add(tts.lengthScale.toString())
         }
         val pb = ProcessBuilder(listOf(bin) + args).directory(cwd)
         pb.environment()["LD_LIBRARY_PATH"] = "$nativeLibDir:/vendor/lib64:/system/lib64"
@@ -317,6 +334,13 @@ class MMSTTSSession(context: Context) {
     }
 
     fun isAlive(): Boolean = process?.isAlive == true
+
+    /** PID of the running subprocess, null if not running. */
+    fun pid(): Long? = pidOf(process)
+
+    /** VmRSS (resident set size) of the subprocess in KB. Returns null if
+     *  the process isn't running or /proc isn't readable. */
+    fun rssKb(): Int? = readProcKb(pid(), "VmRSS")
 
     fun stop() {
         // A blank line cleanly exits the REPL.

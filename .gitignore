@@ -43,3 +43,15 @@ venv/
 
 # Local demo captures (kept private, never committed)
 adreno-llms-demos/
+
+# MMS-TTS language packs (~70 MB per zip, distributed via HuggingFace dataset)
+**/packs/
+
+# Uroman romanization tables, fetched on demand by scripts/fetch_uroman.sh
+**/assets/uroman/
+
+# Local reference-output dumps from prep_lang.py / cos_check.py
+**/reference/reference/
+
+# Local Claude Code config
+**/.claude/

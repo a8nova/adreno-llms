@@ -24,8 +24,36 @@ class CameraController(private val context: Context) {
 
     private var imageCapture: ImageCapture? = null
     private val captureExecutor = Executors.newSingleThreadExecutor()
+    private var boundLifecycle: LifecycleOwner? = null
+    private var boundPreview: PreviewView? = null
+    // Default to the rear camera — the see-and-say use case is "point at the
+    // world and ask about it". Toggled by flip() from the UI.
+    var lensFacing: CameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+        private set
 
     fun bind(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
+        boundLifecycle = lifecycleOwner
+        boundPreview = previewView
+        rebind()
+    }
+
+    /**
+     * Flip between rear and front cameras. Cheap — just rebinds CameraX with
+     * the other selector. PreviewView stays mounted so there's no surface
+     * teardown flicker. Returns the new facing for the UI to reflect.
+     */
+    fun flip(): CameraSelector {
+        lensFacing = if (lensFacing == CameraSelector.DEFAULT_BACK_CAMERA)
+            CameraSelector.DEFAULT_FRONT_CAMERA
+        else
+            CameraSelector.DEFAULT_BACK_CAMERA
+        rebind()
+        return lensFacing
+    }
+
+    private fun rebind() {
+        val lo = boundLifecycle ?: return
+        val pv = boundPreview ?: return
         val providerFuture = ProcessCameraProvider.getInstance(context)
         providerFuture.addListener({
             val provider = providerFuture.get()
@@ -39,7 +67,7 @@ class CameraController(private val context: Context) {
             val preview = Preview.Builder()
                 .setResolutionSelector(resolutionSelector)
                 .build()
-                .apply { setSurfaceProvider(previewView.surfaceProvider) }
+                .apply { setSurfaceProvider(pv.surfaceProvider) }
 
             imageCapture = ImageCapture.Builder()
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
@@ -47,7 +75,7 @@ class CameraController(private val context: Context) {
                 .build()
 
             provider.unbindAll()
-            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture)
+            provider.bindToLifecycle(lo, lensFacing, preview, imageCapture)
         }, ContextCompat.getMainExecutor(context))
     }
 

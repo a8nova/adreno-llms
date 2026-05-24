@@ -14,11 +14,21 @@ This port is at the bring-up / perf-investigation stage — see `BENCHMARK.md` f
 From this directory, with an Android device connected over `adb`:
 
 ```bash
-# 1. Fetch weights (when published to the HF mirror; until then convert locally
-#    from HuggingFaceTB/SmolVLM-256M-Instruct).
-../../../scripts/fetch_weights.sh smolvlm-256m-instruct
+# 0. One-time Python deps for the converter (skip if already installed)
+pip install safetensors numpy torch huggingface_hub
 
-# 2. Build
+# 1. Convert weights from upstream (SmolVLM bins aren't on the HF mirror yet,
+#    so we pull safetensors + tokenizer.json from HuggingFaceTB/SmolVLM-256M-Instruct
+#    and pack them into the nnopt layout. --rebake-pos-embed-384 resizes the
+#    SigLIP position embedding from the upstream 32x32 grid to 24x24 for
+#    IMAGE_SIZE=384.)
+../../../scripts/convert_weights.py \
+    --hf-repo-id HuggingFaceTB/SmolVLM-256M-Instruct \
+    --out-dir weights \
+    --rebake-pos-embed-384
+
+# 2. Build (first run auto-invokes scripts/setup_deps.sh to fetch OpenCL
+#    headers + pull libOpenCL.so from your connected Android device).
 NNOPT_DTYPE=fp16 ./scripts/build.sh
 
 # 3. Deploy

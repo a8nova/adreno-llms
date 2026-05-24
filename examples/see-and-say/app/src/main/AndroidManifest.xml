@@ -3,6 +3,13 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- INTERNET: required for the Language Picker to fetch languages.json
+         and per-language zip packs from HuggingFace. Inference itself is
+         100% on-device — this permission is only used during language-pack
+         downloads. ACCESS_NETWORK_STATE so the downloader can surface a
+         meaningful error if the device is offline. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <uses-feature android:name="android.hardware.camera" android:required="true" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />

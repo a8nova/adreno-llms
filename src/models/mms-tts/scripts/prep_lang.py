@@ -113,7 +113,7 @@ def convert_weights():
     local = Path(snapshot_download(repo_id=HF_ID, allow_patterns=[
         "*.safetensors", "pytorch_model.bin", "config.json",
         "vocab.json", "tokenizer_config.json", "special_tokens_map.json",
-    ]))
+    ], max_workers=1))
     config = json.loads((local / "config.json").read_text())
     vocab = json.loads((local / "vocab.json").read_text())
     tok_config_path = local / "tokenizer_config.json"
@@ -243,8 +243,17 @@ def make_fixtures(config):
 def main():
     print(f"[1/2] Converting weights {HF_ID} -> {WEIGHTS}")
     config, vocab = convert_weights()
-    print(f"[2/2] Building input fixtures for: {TEXT!r}")
-    make_fixtures(config)
+    # Fixture generation requires transformers' VitsTokenizer which calls
+    # `return_tensors="pt"` (needs PyTorch ≥ 2.4). It also produces files the
+    # on-device interactive binary doesn't need (the runtime generates its
+    # own GaussianRng noise). Skip when batch-converting all 1100+ languages
+    # by setting NNOPT_SKIP_FIXTURES=1 in the environment.
+    import os as _os
+    if _os.environ.get("NNOPT_SKIP_FIXTURES") == "1":
+        print("[2/2] Skipping fixtures (NNOPT_SKIP_FIXTURES=1)")
+    else:
+        print(f"[2/2] Building input fixtures for: {TEXT!r}")
+        make_fixtures(config)
     print("Done.")
 
 

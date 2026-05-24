@@ -101,16 +101,31 @@ echo "Target ABI: arm64-v8a"
 echo "Target API Level: 21"
 
 # ============================================
-# OpenCL headers + extracted device library are expected under $DEPS_DIR.
-# Override the location by exporting ADRENO_LLMS_DEPS_DIR in your shell.
-# CLBlast is built from source via CMake FetchContent.
+# Check OpenCL headers + libOpenCL.so link stub.
+#
+# Cache lives at $HOME/.cache/adreno-llms/ (override with $ADRENO_LLMS_CACHE).
+# If headers are missing, scripts/setup_deps.sh is invoked automatically — it
+# downloads the Khronos OpenCL headers and pulls libOpenCL.so from a connected
+# Android device. CLBlast is built from source via CMake FetchContent on first
+# configure.
 # ============================================
-DEPS_DIR="${ADRENO_LLMS_DEPS_DIR:-$HOME/.cache/adreno-llms-deps}"
-OPENCL_INC="$DEPS_DIR/opencl/include"
+ADRENO_LLMS_CACHE="${ADRENO_LLMS_CACHE:-$HOME/.cache/adreno-llms}"
+OPENCL_INC="$ADRENO_LLMS_CACHE/opencl/include"
+OPENCL_LIB_DIR="$ADRENO_LLMS_CACHE/opencl/lib/android-arm64-v8a"
 
 if [ ! -f "$OPENCL_INC/CL/cl.h" ]; then
-    echo "ERROR: OpenCL headers not found at $OPENCL_INC"
-    echo "Set ADRENO_LLMS_DEPS_DIR to the directory containing opencl/include/CL/cl.h."
+    SETUP_SH="$(cd "$(dirname "$0")/../../../../scripts" && pwd)/setup_deps.sh"
+    if [ -x "$SETUP_SH" ]; then
+        echo "OpenCL deps not found in $ADRENO_LLMS_CACHE — running setup_deps.sh"
+        bash "$SETUP_SH"
+    else
+        echo "ERROR: OpenCL headers not found and setup_deps.sh missing at $SETUP_SH" >&2
+        exit 1
+    fi
+fi
+
+if [ ! -f "$OPENCL_INC/CL/cl.h" ]; then
+    echo "ERROR: OpenCL headers still not found at $OPENCL_INC after setup" >&2
     exit 1
 fi
 
@@ -118,7 +133,6 @@ echo "Using OpenCL headers: $OPENCL_INC"
 echo "CLBlast will be built from source via CMake FetchContent"
 
 # Check for extracted OpenCL library (used as stub for linking)
-OPENCL_LIB_DIR="$DEPS_DIR/opencl/lib/android-arm64-v8a"
 OPENCL_LIB="$OPENCL_LIB_DIR/libOpenCL.so"
 CMAKE_OPENCL_ARG=""
 

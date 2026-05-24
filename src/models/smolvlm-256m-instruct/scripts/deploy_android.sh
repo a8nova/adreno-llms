@@ -49,13 +49,26 @@ $ADB push "$NNOPT_BUILD_DIR/$BINARY_NAME" $REMOTE_DIR/
 $ADB shell "chmod +x $REMOTE_DIR/$BINARY_NAME"
 
 # Push OpenCL library if available
-OPENCL_LIB="$HOME/.nnopt/deps/opencl/lib/android-arm64-v8a/libOpenCL.so"
+OPENCL_LIB="$HOME/.cache/adreno-llms/opencl/lib/android-arm64-v8a/libOpenCL.so"
 if [ -f "$OPENCL_LIB" ]; then
     echo "Pushing OpenCL library..."
     $ADB push "$OPENCL_LIB" $REMOTE_DIR/lib/libOpenCL.so
     echo "  libOpenCL.so deployed to device"
 else
     echo "Note: Using system OpenCL library (no cached lib found)"
+fi
+
+# Push libclblast.so. CLBlast is built from source via CMake FetchContent into
+# build/<dtype>/_deps/clblast-build/. Pushing it here keeps the deployed
+# library's libc++ ABI in sync with the binary — otherwise a stale device-side
+# libclblast.so (from an earlier NDK build) causes a dynamic-linker symbol
+# error like `cannot locate symbol _ZNKSt6__ndk1...` at process start.
+CLBLAST_LIB="$NNOPT_BUILD_DIR/_deps/clblast-build/libclblast.so"
+if [ -f "$CLBLAST_LIB" ]; then
+    echo "Pushing libclblast.so..."
+    $ADB push "$CLBLAST_LIB" $REMOTE_DIR/lib/libclblast.so
+else
+    echo "Warning: $CLBLAST_LIB not found — device may load a stale libclblast.so"
 fi
 
 # Push weights matching the dtype (model.bin OR model.fp16.bin — never both).

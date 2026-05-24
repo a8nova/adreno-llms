@@ -5,6 +5,7 @@
 // future tokenizers require a step type not handled here.
 
 #include "tokenizer.h"
+#include "model_config.h"
 
 #include <algorithm>
 #include <array>
@@ -432,10 +433,11 @@ std::vector<int32_t> Tokenizer::build_vlm_prompt(bool image_present,
     constexpr int32_t FAKE_TOKEN_AROUND_IMAGE = 49189;
     constexpr int32_t GLOBAL_IMG = 49152;
     constexpr int32_t IMAGE_TOKEN = 49190;
-    // 64 at IMAGE_SIZE=512 (32x32 patch grid → pixel-shuffle scale 4 → 8x8=64).
-    // 36 at IMAGE_SIZE=384 (24x24 → 6x6=36). Must equal
-    // (IMAGE_SIZE/PATCH_SIZE/SCALE_FACTOR)^2 = (384/16/4)^2 = 36.
-    constexpr int NUM_IMAGE_PLACEHOLDERS = 36;
+    // Tracks the runtime --image-size flag: 36 placeholders at 384px (24x24 →
+    // pixel-shuffle scale 4 → 6x6=36), 64 at 512px (32x32 → 8x8=64). Must
+    // equal (IMAGE_SIZE/PATCH_SIZE/SCALE_FACTOR)^2 or splice op crashes on
+    // count mismatch with the vision-tower output.
+    const int NUM_IMAGE_PLACEHOLDERS = MODEL_CONFIG::runtime_num_image_placeholders();
 
     std::vector<int32_t> out;
     out.reserve(128 + user_text.size());
@@ -468,11 +470,24 @@ std::vector<int32_t> Tokenizer::build_vlm_prompt(bool image_present,
     return out;
 }
 
-// Follow-up user turn for an in-progress conversation. KV cache from the prior
-// assistant turn already ends with <end_of_utterance>; this helper picks up
-// from there. No image placeholders — they belong only in turn 1.
+// Follow-up user turn for an in-progress conversation. Verified against the
+// HF idefics3 chat template:
+//
+//   <|im_start|>User:<image>Q1<end_of_utterance>
+//   Assistant: A1<end_of_utterance>
+//   User: Q2<end_of_utterance>
+//   Assistant:
+//
+// Two things that look like they should be here but ARE NOT:
+//   - No <|im_start|> per follow-up turn. The template emits IM_START
+//     exactly once at the very start of the conversation, not per turn.
+//     Inserting it mid-dialogue confuses the model.
+//   - The leading <end_of_utterance> closes the PRIOR assistant turn.
+//     main.cpp's decode loop breaks on EOU sample WITHOUT forwarding
+//     it, so the KV cache from the prior turn does not contain that
+//     closing EOU. We re-supply it here so the model sees the same
+//     turn-boundary token train as HF's chat-template rendering.
 std::vector<int32_t> Tokenizer::build_vlm_followup_user_turn(const std::string& user_text) const {
-    constexpr int32_t IM_START = 1;
     constexpr int32_t END_OF_UTTERANCE = 49279;
 
     std::vector<int32_t> out;
@@ -483,8 +498,8 @@ std::vector<int32_t> Tokenizer::build_vlm_followup_user_turn(const std::string& 
         out.insert(out.end(), enc.begin(), enc.end());
     };
 
+    out.push_back(END_OF_UTTERANCE);     // close prior assistant turn (KV is missing this)
     append_encoded("\n");
-    out.push_back(IM_START);
     append_encoded("User: ");
     append_encoded(user_text);
     out.push_back(END_OF_UTTERANCE);
