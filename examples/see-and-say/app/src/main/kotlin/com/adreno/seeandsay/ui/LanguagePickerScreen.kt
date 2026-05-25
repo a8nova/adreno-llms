@@ -51,11 +51,19 @@ import kotlinx.coroutines.launch
  * Browse-and-download UI for MMS-TTS language packs. Auto-fetches the
  * registry from HF on first open; the list survives across opens via the
  * disk cache.
+ *
+ * `onUseLanguage` is invoked after the user activates (taps "Use this") an
+ * installed/bundled language — typically used by the host to navigate back
+ * to the Speak screen so the user can immediately try the new voice.
  */
 @Composable
-fun LanguagePickerScreen(viewModel: MainViewModel) {
+fun LanguagePickerScreen(
+    viewModel: MainViewModel,
+    onUseLanguage: () -> Unit = {},
+) {
     val registry = viewModel.languageRegistry
     val entries by registry.entries.collectAsStateWithLifecycle()
+    val active by viewModel.language.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var query by remember { mutableStateOf("") }
     var refreshing by remember { mutableStateOf(false) }
@@ -149,9 +157,14 @@ fun LanguagePickerScreen(viewModel: MainViewModel) {
             items(filtered, key = { it.code }) { e ->
                 LangRow(
                     entry = e,
+                    isActive = e.code == active.code,
                     onDownload = { registry.download(e.code) },
                     onCancel = { registry.cancel(e.code) },
                     onRetry = { registry.download(e.code) },
+                    onUse = {
+                        viewModel.setLanguage(e.code)
+                        onUseLanguage()
+                    },
                 )
             }
             if (filtered.isEmpty()) {
@@ -174,15 +187,24 @@ fun LanguagePickerScreen(viewModel: MainViewModel) {
 @Composable
 private fun LangRow(
     entry: LanguageRegistry.LangEntry,
+    isActive: Boolean,
     onDownload: () -> Unit,
     onCancel: () -> Unit,
     onRetry: () -> Unit,
+    onUse: () -> Unit,
 ) {
+    val installedOrBundled = entry.status is LanguageRegistry.LangEntry.Status.Installed
+                          || entry.status is LanguageRegistry.LangEntry.Status.Bundled
     Surface(
         shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surface,
+        color = if (isActive)
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+        else
+            MaterialTheme.colorScheme.surface,
         tonalElevation = 1.dp,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (installedOrBundled && !isActive) Modifier.clickable(onClick = onUse) else Modifier),
     ) {
         Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -216,7 +238,7 @@ private fun LangRow(
                     )
                 }
                 Spacer(Modifier.size(8.dp))
-                StatusAction(entry, onDownload, onCancel, onRetry)
+                StatusAction(entry, isActive, onDownload, onCancel, onRetry, onUse)
             }
             // Downloading: progress bar below the row.
             (entry.status as? LanguageRegistry.LangEntry.Status.Downloading)?.let { d ->
@@ -240,13 +262,23 @@ private fun LangRow(
 @Composable
 private fun StatusAction(
     entry: LanguageRegistry.LangEntry,
+    isActive: Boolean,
     onDownload: () -> Unit,
     onCancel: () -> Unit,
     onRetry: () -> Unit,
+    onUse: () -> Unit,
 ) {
     when (val s = entry.status) {
-        is LanguageRegistry.LangEntry.Status.Bundled -> InstalledPill("Bundled")
-        is LanguageRegistry.LangEntry.Status.Installed -> InstalledPill("Installed")
+        is LanguageRegistry.LangEntry.Status.Bundled,
+        is LanguageRegistry.LangEntry.Status.Installed -> {
+            if (isActive) {
+                InstalledPill("In use")
+            } else {
+                TextButton(onClick = onUse, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 6.dp)) {
+                    Text("Use", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
+                }
+            }
+        }
         is LanguageRegistry.LangEntry.Status.Available -> {
             FilledIconButton(
                 onClick = onDownload,

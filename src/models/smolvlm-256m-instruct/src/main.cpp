@@ -431,8 +431,10 @@ int main(int argc, char** argv) {
         // splice in backbone.cpp has the right number of positions.
         prompt_ids = tok.build_vlm_prompt(/*image_present=*/true, prompt);
     } else {
-        const std::vector<int> encoded = tok.encode(prompt);
-        prompt_ids.assign(encoded.begin(), encoded.end());
+        // Text-only one-shot: still apply the chat template so the instruct-
+        // tuned model gets the User:/Assistant: framing it was trained on.
+        // Without this the model acts as a base completer and hallucinates.
+        prompt_ids = tok.build_vlm_prompt(/*image_present=*/false, prompt);
     }
     const size_t prompt_len = prompt_ids.size();
     // NNOPT_DUMP_PROMPT_IDS=1 prints the on-device tokenization for parity

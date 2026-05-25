@@ -185,8 +185,14 @@ private fun AppNavigator(viewModel: MainViewModel, onExit: () -> Unit) {
                     onSettings = { route = Route.SETTINGS },
                 )
                 Route.CHAT -> CameraScreen(viewModel)
-                Route.TTS -> SpeakScreen(viewModel)
-                Route.LANGUAGES -> LanguagePickerScreen(viewModel)
+                Route.TTS -> SpeakScreen(
+                    viewModel = viewModel,
+                    onManageLanguages = { route = Route.LANGUAGES },
+                )
+                Route.LANGUAGES -> LanguagePickerScreen(
+                    viewModel = viewModel,
+                    onUseLanguage = { route = Route.TTS },
+                )
                 Route.SETTINGS -> SettingsScreen(viewModel)
             }
         }

@@ -16,8 +16,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButtonDefaults
@@ -46,8 +54,12 @@ import com.adreno.seeandsay.TtsLanguage
 import kotlinx.coroutines.delay
 
 @Composable
-fun SpeakScreen(viewModel: MainViewModel) {
+fun SpeakScreen(
+    viewModel: MainViewModel,
+    onManageLanguages: () -> Unit = {},
+) {
     val language by viewModel.language.collectAsStateWithLifecycle()
+    val installed by viewModel.installedLanguages.collectAsStateWithLifecycle()
     val examples = examplesFor(language)
     var text by rememberSaveable(language.code) { mutableStateOf(examples.first()) }
     val state by viewModel.speak.collectAsStateWithLifecycle()
@@ -55,6 +67,7 @@ fun SpeakScreen(viewModel: MainViewModel) {
     val tts by viewModel.ttsSettings.collectAsStateWithLifecycle()
     val systemPrompt by viewModel.systemPrompt.collectAsStateWithLifecycle()
     var showConfigs by remember { mutableStateOf(false) }
+    var showLangMenu by remember { mutableStateOf(false) }
     val device by viewModel.deviceInfo.collectAsStateWithLifecycle()
 
     // Input character budget. MMS-TTS synthesis cost scales with sentence
@@ -73,12 +86,69 @@ fun SpeakScreen(viewModel: MainViewModel) {
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.Top,
     ) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(
-                text = "✏︎  Text to speak  ·  ${language.label}",
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
+        // Language picker row: tap chip → dropdown of installed/bundled langs.
+        // Tap "+" → navigate to LanguagePickerScreen to download more.
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Box {
+                AssistChip(
+                    onClick = { showLangMenu = true },
+                    label = {
+                        Text(
+                            text = language.label,
+                            style = MaterialTheme.typography.labelLarge,
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(Icons.Filled.Language, contentDescription = null, modifier = Modifier.size(16.dp))
+                    },
+                    trailingIcon = {
+                        Icon(Icons.Filled.ArrowDropDown, contentDescription = null, modifier = Modifier.size(18.dp))
+                    },
+                    colors = AssistChipDefaults.assistChipColors(
+                        containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                        labelColor = MaterialTheme.colorScheme.primary,
+                        leadingIconContentColor = MaterialTheme.colorScheme.primary,
+                        trailingIconContentColor = MaterialTheme.colorScheme.primary,
+                    ),
+                )
+                DropdownMenu(
+                    expanded = showLangMenu,
+                    onDismissRequest = { showLangMenu = false },
+                ) {
+                    installed.forEach { lang ->
+                        DropdownMenuItem(
+                            text = { Text(lang.label) },
+                            onClick = {
+                                viewModel.setLanguage(lang)
+                                showLangMenu = false
+                            },
+                            leadingIcon = if (lang.code == language.code) {
+                                { Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                            } else null,
+                        )
+                    }
+                    DropdownMenuItem(
+                        text = { Text("+ Download more…", style = MaterialTheme.typography.labelMedium) },
+                        onClick = {
+                            showLangMenu = false
+                            onManageLanguages()
+                        },
+                    )
+                }
+            }
+            OutlinedButton(
+                onClick = onManageLanguages,
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(14.dp))
+                Spacer(Modifier.size(4.dp))
+                Text("Manage", style = MaterialTheme.typography.labelMedium)
+            }
+            Spacer(Modifier.weight(1f))
             Text(
                 text = "${text.length}/$maxChars",
                 style = MaterialTheme.typography.labelSmall,
@@ -88,6 +158,12 @@ fun SpeakScreen(viewModel: MainViewModel) {
                     MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
             )
         }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "✏︎  Text to speak",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.primary,
+        )
         Spacer(Modifier.height(6.dp))
         OutlinedTextField(
             value = text,

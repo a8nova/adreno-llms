@@ -11,12 +11,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -24,7 +22,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -35,7 +32,6 @@ import com.adreno.seeandsay.MainViewModel
 fun SettingsScreen(viewModel: MainViewModel) {
     val current by viewModel.language.collectAsStateWithLifecycle()
     val device by viewModel.deviceInfo.collectAsStateWithLifecycle()
-    val installed by viewModel.installedLanguages.collectAsStateWithLifecycle()
 
     Column(
         modifier = Modifier
@@ -45,35 +41,20 @@ fun SettingsScreen(viewModel: MainViewModel) {
         verticalArrangement = Arrangement.Top,
     ) {
         Text("TTS language", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-        Spacer(Modifier.height(8.dp))
-
-        installed.forEach { lang ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .selectable(
-                        selected = current == lang,
-                        enabled = lang.available,
-                        role = Role.RadioButton,
-                        onClick = { viewModel.setLanguage(lang) },
-                    )
-                    .padding(vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                RadioButton(
-                    selected = current == lang,
-                    onClick = { if (lang.available) viewModel.setLanguage(lang) },
-                    enabled = lang.available,
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = lang.label,
-                    color = if (lang.available) MaterialTheme.colorScheme.onBackground
-                            else MaterialTheme.colorScheme.onBackground.copy(alpha = 0.4f),
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
-        }
+        Spacer(Modifier.height(6.dp))
+        // Read-only display. The active-language picker lives on the
+        // Text-to-speech screen now (next to the input field) so the user
+        // changes it where they actually use it.
+        Text(
+            text = "Active: ${current.label}",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onBackground,
+        )
+        Text(
+            text = "Change from the Text-to-speech screen, or download more from Languages.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
+        )
 
         Spacer(Modifier.height(16.dp))
         HorizontalDivider(color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.15f))
