@@ -1,5 +1,5 @@
 # adreno-llms 📱⚡
-> All code in this repo was ported and optimized by **NNOpt** — a coding agent for porting and optimizing neural networks for Android embedded targets. **Contact a8nova@gmail.com for early access.**
+> Autonomous kernel generation for Android embedded targets. Built by **NNOpt** — contact a8nova@gmail.com for early access.
 
 ### ⚡ Lightning-fast inference on Qualcomm Adreno 6xx GPUs ⚡
 
@@ -8,22 +8,29 @@
 https://github.com/user-attachments/assets/c5723e58-6bc7-4fbc-921b-59388e26f2c9
 
 
+## ✨ New: beyond text-only LLMs
+
+Two new ports extend the repo past plain decoder-only LMs:
+
+- **[MMS-TTS](src/models/mms-tts/)** — Facebook's VITS-based text-to-speech, end-to-end on-device. Verified on **English** and **Amharic** on the Razr 2020; the same binary handles any of the ~1100 MMS languages (per-language weights + vocab swap, non-Latin scripts go through uroman). Full graph — text encoder → stochastic duration predictor → residual coupling flow → HiFi-GAN vocoder — runs in C++/OpenCL with per-op cosine ≥ 0.996 vs the HuggingFace reference.
+- **[SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/)** — HuggingFace's smallest vision-language model (SigLIP vision tower → projector → 135M LLaMA-style LM with GQA).
+
 ## 📊 Models
 
 All ports run on the **Motorola Razr 2020** (Snapdragon 765G / **Adreno 620**, 3.9 GB GPU global memory). Decode tok/s = warm 3-run median, greedy (`--temperature 0`), 32-token generation. Peak CPU mem = highest `peak_cpu_memory_mb` reading across the run — the actual host-process working set during inference (weights + KV cache + activations + driver overhead). Measured 2026-05-16.
 
-| Model | Params | Architecture | Decode tok/s | TTFT (s) | Peak CPU mem (MB) | Notes |
-|---|---:|---|---:|---:|---:|---|
-| [Mamba2-130M](src/models/mamba2-130m/) fp16 | 130M | SSD | **24.26** | 1.61 | 946 | State-space duality |
-| [Mamba-130M](src/models/mamba-130m/) fp16 | 130M | SSM | 21.52 | 1.62 | 686 | No attention |
-| [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) fp16 | 135M | LLaMA + GQA | **24.40** | 1.67 | 923 | Instruct-tuned; 61% of ceiling |
-| [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) **int8** | 135M | LLaMA + GQA | 24.21 | **0.91** | **670** | Per-row symmetric int8; −27% memory at tied tok/s |
-| [OpenELM-270M](src/models/openelm-270m/) fp16 | 270M | LLaMA-style + tied lm_head | 14.65 | 2.00 | 1371 | 78.9% of 10 GB/s ceiling |
-| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) fp16 | 350M | Hybrid conv+attn | 11.43 | 2.21 | 1666 | Liquid AI hybrid; 58% of texture ceiling |
-| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) **int8** | 350M | Hybrid conv+attn | 13.67 | **0.81** | 1015 | +19.6% vs fp16 |
-| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) **Q4** | 350M | Hybrid conv+attn | **14.54** | **0.79** | **719** | +27.2% vs fp16; ALU-bound nibble unpack |
-| [Granite-4.0-350M](src/models/granite-4-0-350m/) fp16 | 350M | Dense decoder + GQA | 10.19 | 2.41 | 2580 | IBM Granite; 71% of 10 GB/s ceiling |
-| [Qwen2.5-0.5B](src/models/qwen2-5-0-5b/) fp16 | 500M | LLaMA + GQA | 10.36 | 3.66 | 2720 | Largest in the repo; 70% of 14 GB/s ceiling |
+| Model | Precision | Params | Architecture | Decode tok/s | TTFT (s) | Peak CPU mem (MB) | Notes |
+|---|:-:|---:|---|---:|---:|---:|---|
+| [Mamba2-130M](src/models/mamba2-130m/) | fp16 | 130M | SSD | **24.26** | 1.61 | 946 | State-space duality |
+| [Mamba-130M](src/models/mamba-130m/) | fp16 | 130M | SSM | 21.52 | 1.62 | 686 | No attention |
+| [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | fp16 | 135M | LLaMA + GQA | **24.40** | 1.67 | 923 | Instruct-tuned; 61% of ceiling |
+| [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | **int8** | 135M | LLaMA + GQA | 24.21 | **0.91** | **670** | Per-row symmetric int8; −27% memory at tied tok/s |
+| [OpenELM-270M](src/models/openelm-270m/) | fp16 | 270M | LLaMA-style + tied lm_head | 14.65 | 2.00 | 1371 | 78.9% of 10 GB/s ceiling |
+| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | fp16 | 350M | Hybrid conv+attn | 11.43 | 2.21 | 1666 | Liquid AI hybrid; 58% of texture ceiling |
+| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | **int8** | 350M | Hybrid conv+attn | 13.67 | **0.81** | 1015 | +19.6% vs fp16 |
+| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | **Q4** | 350M | Hybrid conv+attn | **14.54** | **0.79** | **719** | +27.2% vs fp16; ALU-bound nibble unpack |
+| [Granite-4.0-350M](src/models/granite-4-0-350m/) | fp16 | 350M | Dense decoder + GQA | 10.19 | 2.41 | 2580 | IBM Granite; 71% of 10 GB/s ceiling |
+| [Qwen2.5-0.5B](src/models/qwen2-5-0-5b/) | fp16 | 500M | LLaMA + GQA | 10.36 | 3.66 | 2720 | Largest in the repo; 70% of 14 GB/s ceiling |
 
 
 State-of-the-art small language models running on **Adreno 6xx GPUs** — the GPU class found in mid-range Android phones. Pure C++/OpenCL inference, cross-compiled on macOS, deployed via `adb` to `/data/local/tmp/`.
@@ -128,11 +135,15 @@ adreno-llms/
     └── weights/                  # tokenizer + meta (committed); model.bin (downloaded)
 ```
 
-## 🤖 How was this ported?
+## Model-specific kernel tuning
 
-By **NNOpt**, a coding agent that takes a HuggingFace repo URL and a target device and produces a port like the ones in this repo — kernel selection, weight layout, fp32/fp16 paths, deploy scripts, benchmark harness, all of it. None of this was hand-written.
+The OpenCL kernels in this repo are **tuned for the exact model dimensions shipped** (hidden sizes, head counts, intermediate sizes, conv kernel widths, etc.). Tile sizes, workgroup layouts, shared-memory allocation, and vectorized load patterns are all calibrated to those specific tensor shapes and the Adreno 6xx wave architecture.
 
-If you have a model you want running on Adreno, Snapdragon, Mali, or any Android device with this kind of polish, **email a8nova@gmail.com** for early access.
+**What this means in practice:** if you swap in a checkpoint with different dimensions (e.g., a 500M variant where we ship a 256M), the kernels may hit suboptimal tile boundaries, waste shared memory, or fail on hardcoded shape assertions. You won't get the same speedups — and in some cases it won't run at all.
+
+For MMS-TTS this isn't a concern — all ~1100 language checkpoints share the same VITS architecture and parameter count; only the weights differ.
+
+For decoder-only LMs and vision-language models, each model size needs its own kernel tuning pass. If you want optimized kernels for a model size not currently in the repo, reach out: **a8nova@gmail.com**.
 
 ## 🤝 Contributing
 
@@ -143,7 +154,3 @@ If you have a model you want running on Adreno, Snapdragon, Mali, or any Android
   - mamba / mamba2 / Qwen2.5 / SmolLM2 — Apache 2.0
   - LFM2.5 — Liquid AI's open license
   - **OpenELM — Apple Sample Code License (NOT redistributed in this repo; fetch script pulls from Apple's HF repo)**
-
-## 📧 Contact
-
-For NNOpt early access, custom ports, or commercial licensing: **a8nova@gmail.com**.

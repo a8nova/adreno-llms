@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">See &amp; Say</string>
+    <string name="tab_camera">Camera</string>
+    <string name="tab_speak">Speak</string>
+    <string name="loader_title">See &amp; Say · First-launch setup</string>
+    <string name="loader_subtitle">Unpacking on-device models…</string>
+    <string name="camera_default_prompt">In one short sentence, what is in this picture?</string>
+
+    <!-- Preset prompt chips on CameraScreen. Tapping a chip populates the prompt text
+         box. Designed to elicit short responses so the end-to-end demo (vision → LLM
+         decode → TTS) finishes faster — shorter VLM output = less decode + less TTS wall. -->
+    <string name="preset_describe_label">Describe</string>
+    <string name="preset_describe">In one short sentence, what is in this picture?</string>
+    <string name="preset_caption_label">Caption</string>
+    <string name="preset_caption">Write a 5-word caption for this image.</string>
+    <string name="preset_colors_label">Colors</string>
+    <string name="preset_colors">What are the main colors? Answer in one sentence.</string>
+    <string name="preset_read_label">Read</string>
+    <string name="preset_read">Read the text in this image if there is any.</string>
+    <string name="preset_guess_label">Guess</string>
+    <string name="preset_guess">What might be happening here? One sentence.</string>
+
+    <string name="ask_and_speak">Ask &amp; Speak</string>
+    <string name="speak">Speak</string>
+    <string name="stop">Stop</string>
+    <string name="retake">Retake</string>
+    <string name="camera_permission_rationale">See &amp; Say needs the camera so SmolVLM can answer questions about what you point at.</string>
+    <string name="grant_camera_permission">Grant camera access</string>
+</resources>
