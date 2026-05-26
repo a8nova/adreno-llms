@@ -12,19 +12,21 @@ https://github.com/user-attachments/assets/c5723e58-6bc7-4fbc-921b-59388e26f2c9
 
 Two new ports extend the repo past plain decoder-only LMs:
 
-- **[MMS-TTS](src/models/mms-tts/)** — Facebook's VITS-based text-to-speech, end-to-end on-device. Verified on **English** and **Amharic** on the Razr 2020; the same binary handles any of the ~1100 MMS languages (per-language weights + vocab swap, non-Latin scripts go through uroman). Full graph — text encoder → stochastic duration predictor → residual coupling flow → HiFi-GAN vocoder — runs in C++/OpenCL with per-op cosine ≥ 0.996 vs the HuggingFace reference.
-- **[SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/)** — HuggingFace's smallest vision-language model (SigLIP vision tower → projector → 135M LLaMA-style LM with GQA).
+- **[MMS-TTS](src/models/mms-tts/)** — Facebook's VITS-based text-to-speech, end-to-end on-device. 36M params, **RTF 9.26** (1.76 s audio in 16.3 s wall), 276 MB peak memory. Verified on **English** and **Amharic** on the Razr 2020; the same binary handles any of the ~1100 MMS languages (per-language weights + vocab swap, non-Latin scripts go through uroman). Full graph — text encoder → stochastic duration predictor → residual coupling flow → HiFi-GAN vocoder — runs in C++/OpenCL with per-op cosine ≥ 0.996 vs the HuggingFace reference.
+- **[SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/)** — HuggingFace's smallest vision-language model (SigLIP vision tower → projector → 135M LLaMA-style LM with GQA). **10.20** decode tok/s, 14.0 s TTFT, 1227 MB peak memory.
 
 ## 📊 Models
 
-All ports run on the **Motorola Razr 2020** (Snapdragon 765G / **Adreno 620**, 3.9 GB GPU global memory). Decode tok/s = warm 3-run median, greedy (`--temperature 0`), 32-token generation. Peak CPU mem = highest `peak_cpu_memory_mb` reading across the run — the actual host-process working set during inference (weights + KV cache + activations + driver overhead). Measured 2026-05-16.
+All ports run on the **Motorola Razr 2020** (Snapdragon 765G / **Adreno 620**, 3.9 GB GPU global memory). Decode tok/s = warm 3-run median, greedy (`--temperature 0`), 32-token generation unless noted. Peak CPU mem = highest `peak_cpu_memory_mb` reading across the run — the actual host-process working set during inference (weights + KV cache + activations + driver overhead). Measured 2026-05-18.
 
 | Model | Precision | Params | Architecture | Decode tok/s | TTFT (s) | Peak CPU mem (MB) | Notes |
 |---|:-:|---:|---|---:|---:|---:|---|
+| [MMS-TTS](src/models/mms-tts/) | fp16 | 36M | VITS (enc + flow + HiFi-GAN) | — | — | 276 | Text-to-speech; RTF 9.26 for 1.76 s audio; ~1100 languages |
 | [Mamba2-130M](src/models/mamba2-130m/) | fp16 | 130M | SSD | **24.26** | 1.61 | 946 | State-space duality |
 | [Mamba-130M](src/models/mamba-130m/) | fp16 | 130M | SSM | 21.52 | 1.62 | 686 | No attention |
 | [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | fp16 | 135M | LLaMA + GQA | **24.40** | 1.67 | 923 | Instruct-tuned; 61% of ceiling |
 | [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | **int8** | 135M | LLaMA + GQA | 24.21 | **0.91** | **670** | Per-row symmetric int8; −27% memory at tied tok/s |
+| [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) | fp16 | 256M | SigLIP + LLaMA (GQA) | **10.20** | 14.0 | 1227 | Vision-language; 64 decode tokens |
 | [OpenELM-270M](src/models/openelm-270m/) | fp16 | 270M | LLaMA-style + tied lm_head | 14.65 | 2.00 | 1371 | 78.9% of 10 GB/s ceiling |
 | [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | fp16 | 350M | Hybrid conv+attn | 11.43 | 2.21 | 1666 | Liquid AI hybrid; 58% of texture ceiling |
 | [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | **int8** | 350M | Hybrid conv+attn | 13.67 | **0.81** | 1015 | +19.6% vs fp16 |
@@ -151,6 +153,7 @@ For decoder-only LMs and vision-language models, each model size needs its own k
 
 - **Code:** Apache 2.0 — see [LICENSE](LICENSE).
 - **Weights:** carry their own upstream licenses, listed per-model:
-  - mamba / mamba2 / Qwen2.5 / SmolLM2 — Apache 2.0
+  - mamba / mamba2 / Qwen2.5 / SmolLM2 / SmolVLM / Granite — Apache 2.0
   - LFM2.5 — Liquid AI's open license
+  - MMS-TTS — CC-BY-NC 4.0 (Facebook)
   - **OpenELM — Apple Sample Code License (NOT redistributed in this repo; fetch script pulls from Apple's HF repo)**
