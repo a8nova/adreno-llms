@@ -104,9 +104,18 @@ class AssetExtractor(private val context: Context) {
         // v6 only have eng/ extracted; switching language to Amharic in
         // Settings fails with "Tokenizer::load failed to open
         // weights/amh/tokenizer_vocab.bin".
+        // v8: added romanization-auto-table.txt for uroman. Without it,
+        // non-Latin scripts (Ethiopic/Amharic, Devanagari, Arabic, etc.)
+        // produce no romanized output and TTS emits silence or garbage.
+        // v9: rebuilt libmmstts.so with GPU+fused flow_inverse (RTF 6.3→2.9).
+        // v10: GPU text encoder (new text_encoder.cl with fused attention,
+        // layernorm, transpose, bias kernels). Old stub .cl on device causes
+        // kernel build failure → garbage audio.
         // BUMP THIS whenever any file is added/changed under app/src/main/
         // assets/{mmstts,smolvlm} so existing installs pick up the new tree.
-        private const val FLAG_FILE = ".extracted_v7"
+        // v15: all MMS-TTS language weights removed from APK bundle — now
+        // downloaded from HuggingFace on demand via LanguageRegistry.
+        private const val FLAG_FILE = ".extracted_v15"
         private const val BUFFER_BYTES = 256 * 1024
         // Top-level asset directories we extract — limits the scan so we don't
         // walk into AGP's internal asset paths.

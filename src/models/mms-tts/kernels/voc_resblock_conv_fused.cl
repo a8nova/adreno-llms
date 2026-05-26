@@ -1,49 +1,20 @@
-// voc_resblock_conv_fused.cl — single-dispatch fused 1D conv for HiFi-GAN
-// ResBlocks in the MMS-TTS vocoder. Replaces the 2-dispatch sequence
-// (im2col_1d_fused_bias + CLBlast HGemm) with one custom kernel, mirroring
-// the flow_wn_fused.cl template that brought flow_inverse from 6.79s → 2.75s.
+// voc_resblock_conv_fused.cl — tiled fused 1D conv for HiFi-GAN resblocks.
+// Replaces im2col + CLBlast HGEMM with a single dispatch that computes
+// im2col on-the-fly inside a tiled GEMM loop.
 //
-// Why this exists
-// ---------------
-// Vocoder wall is 95% driver QUEUED→SUBMIT gap (75-226ms per dispatch on
-// Adreno 620). 144 resblock conv calls × 2 dispatches each = 288 dispatches.
-// Collapsing each conv to 1 dispatch saves ~144 × 75ms = ~10.8s of pure
-// scheduling overhead. CLBlast HGemm is FAST per kernel (the 5% GPU-busy
-// figure includes its compute), but the gap dominates. The fused kernel
-// only needs to match CLBlast's compute, not beat it.
+// The key insight: conv1d(h, w, K, dil, pad) = GEMM(w_flat, im2col(h))
+// where im2col(h)[ci*K + k, t] = h[ci, t + k*dil - pad].
+// Instead of materializing im2col in global memory, we gather h values
+// on-the-fly inside the GEMM tile loop.
 //
-// Per-call work
-// -------------
-//   acc[c, t] = bias[c] + sum_k sum_ci w[c, k, ci] * leaky_in_opt(h[ci, t - pad + k*d])
-//   if has_resid: acc[c, t] += resid[c, t]
-//   h_out[c, t] = acc[c, t]
+// Tiling: each workgroup computes a TILE_CO × TILE_T tile of output.
+// The reduction dimension is CI*K (input channels × kernel width).
+// We tile over CI in chunks of TILE_CI, and unroll over K.
 //
-// Layout (channels-first, B=1):
-//   h_in       : [C, L]        global, read-only
-//   w          : [C, K, C]     reordered from [C_out, C_in, K] → [C_out, K, C_in]
-//                              (one-shot host transpose, cached)
-//   b          : [C]
-//   resid      : [C, L]        global, read-only (ignored when has_resid=0)
-//   h_out      : [C, L]        global, write
-//
-// Workgroup model:
-//   gws = (C_padded, L)       local = (C_padded, 1)
-//   One WG per output time-step. WI index c (within WG) handles channel c.
-//   We round C up to the next multiple of WG_C_QUANTUM to keep the
-//   cooperative load lockstep; out-of-range WIs early-return after the load.
-//
-// Local memory budget:
-//   h_tile = K * C floats = at most 11 * 192 * 4 = 8.4KB on Adreno (32KB cap).
-//   acts/scratch = 0.
-//
-// Notes
-// -----
-// * Adreno's vload_half4 returns float4 (hardware does the half→float on
-//   load), so accumulation stays in fp32. Inner ci-loop is 4-wide.
-// * leaky_in is applied AT LOAD TIME — a leaky_relu_in followed by conv is
-//   exactly conv(leaky(h)), so we pre-leaky the local tile once and reuse
-//   it across K kernel positions. This is the same trick im2col_1d_fused
-//   used pre-fusion.
+// For C=256, K=11: reduction dim = 256*11 = 2816. TILE_CI=16 → 176 tiles.
+// Each tile loads TILE_CI × K values from h (with leaky ReLU on load)
+// and TILE_CO × TILE_CI × K values from w. All from global mem —
+// no __local needed for small tile sizes.
 
 #ifdef USE_FP16
   #pragma OPENCL EXTENSION cl_khr_fp16 : enable
@@ -56,24 +27,17 @@
   #define STORE(p,i,v) ((p)[(i)] = (v))
 #endif
 
-// MMS-TTS UPSAMPLE_INITIAL_CHANNEL=512 → 256 after stage-1 upsample → 128 → 64 → 32.
-// The pre-upsample conv_pre at C=512 does NOT go through this fused path (it
-// runs once outside the resblock loop). So max C entering resblocks is 256.
-#ifndef VOC_C_MAX
-#define VOC_C_MAX 256
-#endif
-#ifndef VOC_K_MAX
-#define VOC_K_MAX 11
-#endif
-
-// LeakyReLU slope used everywhere in the vocoder.
 #define VOC_LEAKY_SLOPE 0.1f
 
+// Each workitem computes one output element (co, t).
+// The inner loop walks over ci in steps of 4 (NEON-style vectorization
+// via vload_half4), accumulating K taps per ci.
+// Weight layout: w[co, ci, K] row-major (standard PyTorch layout).
 __kernel void voc_conv1d_resblock_fused(
     __global const storage_t* h_in,     // [C, L]
-    __global const storage_t* w,        // [C, K, C] (reordered ic↔k for stride-1 ci load)
-    __global const storage_t* b,        // [C]
-    __global const storage_t* resid,    // [C, L] (or dummy when has_resid=0)
+    __global const storage_t* w,        // [C_out, C_in, K] (standard layout)
+    __global const storage_t* b,        // [C_out]
+    __global const storage_t* resid,    // [C, L] (or dummy)
     __global storage_t*       h_out,    // [C, L]
     const int C,
     const int L,
@@ -83,63 +47,35 @@ __kernel void voc_conv1d_resblock_fused(
     const int leaky_in,
     const int has_resid)
 {
-    const int c = get_local_id(0);
-    const int t = get_group_id(1);
+    const int co = get_global_id(0);
+    const int t  = get_global_id(1);
+    if (co >= C || t >= L) return;
 
-    // Out-of-range WIs participate in the local load barrier (they own no
-    // channel rows so the load loop below skips them) but skip compute.
-    const bool active = (c < C);
+    float acc = (float)LOAD(b, co);
 
-    // ── Step 1: cooperative load of the K-wide input tile into __local memory.
-    //   Each active WI loads K timesteps for its own channel row ci=c.
-    //   h_tile layout = [k][ci] row-major (ci stride-1 — matches reordered w).
-    //   leaky_in is applied here so downstream MACs see pre-activation values.
-    __local float h_tile[VOC_K_MAX * VOC_C_MAX];
-    if (active) {
-        #pragma unroll
-        for (int k = 0; k < VOC_K_MAX; ++k) {
-            if (k >= K) break;
-            const int tk = t + k * dilation - pad;
-            float v = 0.0f;
-            if (tk >= 0 && tk < L) {
-                v = (float)LOAD(h_in, c * L + tk);
-                if (leaky_in) v = v < 0.0f ? VOC_LEAKY_SLOPE * v : v;
+    // w offset for this output channel: w[co, :, :] starts at co * C * K
+    const int w_base = co * C * K;
+
+    // Inner loop: iterate over input channels and kernel positions.
+    // For each (ci, k): acc += w[co, ci, k] * leaky(h[ci, t + k*dil - pad])
+    // Unroll K in the inner loop since K ∈ {3, 7, 11}.
+    for (int ci = 0; ci < C; ++ci) {
+        const int w_ci = w_base + ci * K;
+        const int h_ci_base = ci * L;
+        for (int k = 0; k < K; ++k) {
+            const int tt = t + k * dilation - pad;
+            float hv = 0.0f;
+            if (tt >= 0 && tt < L) {
+                hv = (float)LOAD(h_in, h_ci_base + tt);
+                if (leaky_in) hv = hv < 0.0f ? VOC_LEAKY_SLOPE * hv : hv;
             }
-            h_tile[k * C + c] = v;
+            acc += (float)LOAD(w, w_ci + k) * hv;
         }
-    }
-    barrier(CLK_LOCAL_MEM_FENCE);
-
-    if (!active) return;
-
-    // ── Step 2: convolve. w[c, k, ci] indexes as c*K*C + k*C + ci.
-    //   Inner ci loop is 4-wide via vload_half4 (returns float4) → dot(float4).
-    //   C is always a multiple of 4 in the vocoder (192/96/48/24).
-    float acc = (float)LOAD(b, c);
-    #pragma unroll
-    for (int k = 0; k < VOC_K_MAX; ++k) {
-        if (k >= K) break;
-        const int h_off = k * C;
-        const int w_off = c * K * C + k * C;
-#ifdef USE_FP16
-        for (int ci4 = 0; ci4 < C; ci4 += 4) {
-            const float4 wv4 = vload_half4(0, (__global const half*)w + w_off + ci4);
-            const float4 hv4 = (float4)(h_tile[h_off + ci4 + 0],
-                                        h_tile[h_off + ci4 + 1],
-                                        h_tile[h_off + ci4 + 2],
-                                        h_tile[h_off + ci4 + 3]);
-            acc += dot(wv4, hv4);
-        }
-#else
-        for (int ci = 0; ci < C; ++ci) {
-            acc += (float)LOAD(w, w_off + ci) * h_tile[h_off + ci];
-        }
-#endif
     }
 
     if (has_resid) {
-        acc += (float)LOAD(resid, c * L + t);
+        acc += (float)LOAD(resid, co * L + t);
     }
 
-    STORE(h_out, c * L + t, acc);
+    STORE(h_out, co * L + t, acc);
 }

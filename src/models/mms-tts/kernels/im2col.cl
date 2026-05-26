@@ -61,6 +61,13 @@ __kernel void im2col_1d(
 // Fused leaky_relu(slope=0.1) + im2col. Slope is hardcoded — passing it as
 // a float arg cost ~ms of dispatch overhead on Adreno. Same 3D NDRange as
 // im2col_1d above for the same div/mod elimination win (§8.12).
+// Vectorized 4-wide leaky_im2col per Qualcomm §10.3.3 + §10.3.6.
+// Each workitem processes 4 consecutive L_out positions.
+// Benefits:
+//   - 4x fewer memory transactions (vload_half4 = 128-bit = 4 halfs)
+//   - 4x fewer workitems → each runs longer → better gap hiding
+//   - Branchless leaky (no wave divergence)
+// gws[0] should be ceil(L_out/4), not L_out.
 __kernel void leaky_im2col_1d(
     __global const storage_t* in,        // [C_in, L_in]
     __global       storage_t* out,       // [C_in * K, L_out]
@@ -72,21 +79,53 @@ __kernel void leaky_im2col_1d(
     const int padding,
     const int dilation) {
 
-    const int col = get_global_id(0);
-    const int k   = get_global_id(1);
-    const int ic  = get_global_id(2);
+    const int col4 = get_global_id(0);   // processes cols [col4*4 .. col4*4+3]
+    const int k    = get_global_id(1);
+    const int ic   = get_global_id(2);
+    const int col  = col4 * 4;
     if (col >= L_out || k >= K || ic >= C_in) return;
 
     const int row = mad24(ic, K, k);
-    const int gid = mad24(row, L_out, col);
+    const int base_out = mad24(row, L_out, col);
+    const int in_base = mul24(ic, L_in);
+    const int k_dil = mul24(k, dilation);
 
-    const int src = mad24(col, stride, k * dilation) - padding;
-    float v = 0.0f;
-    if (src >= 0 && src < L_in) {
-        v = (float)LOAD(in, mad24(ic, L_in, src));
-        if (v < 0.0f) v *= 0.1f;   // HiFi-GAN's slope
+    // Process up to 4 consecutive output columns
+    const int n = min(4, L_out - col);
+
+    // When stride=1 (always for resblock convs), the 4 input positions
+    // are consecutive: src, src+1, src+2, src+3. Use vload_half4.
+    if (stride == 1 && n == 4) {
+        const int src0 = col + k_dil - padding;
+        // Check all 4 positions are in bounds
+        if (src0 >= 0 && src0 + 3 < L_in) {
+#ifdef USE_FP16
+            float4 v = vload_half4(0, (__global const half*)in + in_base + src0);
+#else
+            float4 v = vload4(0, (__global const float*)in + in_base + src0);
+#endif
+            // Branchless leaky on all 4 values
+            v = fmax(v, (float4)0.0f) + fmin(v, (float4)0.0f) * 0.1f;
+#ifdef USE_FP16
+            vstore_half4(v, 0, (__global half*)out + base_out);
+#else
+            vstore4(v, 0, (__global float*)out + base_out);
+#endif
+            return;
+        }
     }
-    STORE(out, gid, v);
+
+    // Scalar fallback for boundary / non-stride-1 cases
+    for (int i = 0; i < n; ++i) {
+        const int c = col + i;
+        const int src = mad24(c, stride, k_dil) - padding;
+        float v = 0.0f;
+        if (src >= 0 && src < L_in) {
+            v = (float)LOAD(in, in_base + src);
+            v = fmax(v, 0.0f) + fmin(v, 0.0f) * 0.1f;
+        }
+        STORE(out, base_out + i, v);
+    }
 }
 
 // Zero-stuff for ConvTranspose1d → Conv1d equivalence.
@@ -202,13 +241,16 @@ __kernel void add_bias_broadcast_resid(
 //
 // Adreno guide §8.1 (p.63): "Fuse multiple kernels into one kernel … if data
 // traffic can be reduced with good parallelization."
+// Fused im2col + bias-init. Branchless leaky (§10.3.6).
+// gws[0] = L_out (1 element per workitem — vectorization hurts on Adreno 620
+// due to boundary-check divergence outweighing the bandwidth gain).
 __kernel void im2col_1d_fused_bias(
     __global const storage_t* in,           // [C_in, L_in]
     __global       storage_t* out_im2col,   // [C_in * K, L_out]
-    __global       storage_t* out_C,        // [C_out, L_out] — pre-fill for HGemm beta=1
-    __constant     storage_t* bias          // [C_out] — promote to constant memory (§6.4)
+    __global       storage_t* out_C,        // [C_out, L_out]
+    __constant     storage_t* bias          // [C_out]
         __attribute__((max_constant_size(2048))),
-    __global const storage_t* resid,        // [C_out, L_out] (too large for __constant)
+    __global const storage_t* resid,        // [C_out, L_out]
     const int C_in,
     const int C_out,
     const int L_in,
@@ -217,32 +259,29 @@ __kernel void im2col_1d_fused_bias(
     const int stride,
     const int padding,
     const int dilation,
-    const int leaky_in,        // 0 or 1: apply leaky_relu(slope=0.1) on the read
-    const int has_bias,        // 0 or 1
-    const int has_resid) {     // 0 or 1
+    const int leaky_in,
+    const int has_bias,
+    const int has_resid) {
 
     const int col = get_global_id(0);
     const int k   = get_global_id(1);
     const int ic  = get_global_id(2);
     if (col >= L_out || k >= K || ic >= C_in) return;
 
-    // im2col write — every workitem writes one entry.
     const int row = mad24(ic, K, k);
     const int gid_im = mad24(row, L_out, col);
-    const int src = mad24(col, stride, k * dilation) - padding;
+    const int src = mad24(col, stride, mul24(k, dilation)) - padding;
     float v = 0.0f;
     if (src >= 0 && src < L_in) {
         v = (float)LOAD(in, mad24(ic, L_in, src));
-        if (leaky_in && v < 0.0f) v *= 0.1f;
+        if (leaky_in) v = fmax(v, 0.0f) + fmin(v, 0.0f) * 0.1f;
     }
     STORE(out_im2col, gid_im, v);
 
-    // bias-init: only workitems with k==0 and ic<C_out write one C cell each.
-    // Covers C[0..C_out, 0..L_out] exactly once when C_in >= C_out.
     if (k == 0 && ic < C_out) {
         const int gid_C = mad24(ic, L_out, col);
         float c_val = 0.0f;
-        if (has_bias)  c_val += (float)LOAD(bias,  ic);
+        if (has_bias)  c_val += (float)LOAD(bias, ic);
         if (has_resid) c_val += (float)LOAD(resid, gid_C);
         STORE(out_C, gid_C, c_val);
     }

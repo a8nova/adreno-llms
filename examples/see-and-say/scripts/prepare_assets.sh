@@ -99,29 +99,13 @@ else
 fi
 
 # ---- MMS-TTS assets ------------------------------------------------------
-say "Staging MMS-TTS weights + kernels → $ASSETS/mmstts"
+# Language weights are NOT bundled — all languages (including English) are
+# downloaded from HuggingFace at runtime via LanguageRegistry. Only the
+# binary, OpenCL kernels, and uroman tables ship in the APK.
+say "Staging MMS-TTS kernels + uroman → $ASSETS/mmstts"
 MTDST="$ASSETS/mmstts"
 rm -rf "$MTDST"
-mkdir -p "$MTDST/weights/eng" "$MTDST/weights/amh" "$MTDST/kernels" "$MTDST/assets/uroman"
-
-# Nested per-language layout: weights/eng/* and weights/amh/*. The binary
-# selects via `--lang <code>` at launch (see MMSTTSSession.start in Kotlin).
-# English (always present)
-cp -L "$MMSTTS_DIR/weights/eng/model.fp16.bin"        "$MTDST/weights/eng/"  || die "mmstts eng model.fp16.bin missing"
-cp -L "$MMSTTS_DIR/weights/eng/model.fp16.meta.json"  "$MTDST/weights/eng/"  || die "mmstts eng model.fp16.meta.json missing"
-cp -L "$MMSTTS_DIR/weights/eng/tokenizer_vocab.bin"   "$MTDST/weights/eng/"  || die "mmstts eng tokenizer_vocab.bin missing"
-
-# Amharic (optional — only included if the .bin is actually present;
-# weights/amh/model.fp16.bin is a symlink to the external port directory).
-if [[ -s "$MMSTTS_DIR/weights/amh/model.fp16.bin" ]]; then
-    cp -L "$MMSTTS_DIR/weights/amh/model.fp16.bin"       "$MTDST/weights/amh/" || warn "amh model.fp16.bin copy failed"
-    cp -L "$MMSTTS_DIR/weights/amh/model.fp16.meta.json" "$MTDST/weights/amh/" || warn "amh meta copy failed"
-    cp -L "$MMSTTS_DIR/weights/amh/tokenizer_vocab.bin"  "$MTDST/weights/amh/" || warn "amh tokenizer copy failed"
-    say "Amharic weights bundled."
-else
-    rmdir "$MTDST/weights/amh"
-    warn "Amharic weights not found at $MMSTTS_DIR/weights/amh/model.fp16.bin — skipping"
-fi
+mkdir -p "$MTDST/kernels" "$MTDST/assets/uroman"
 
 cp "$MMSTTS_DIR/kernels/"*.cl "$MTDST/kernels/"
 
@@ -131,18 +115,33 @@ cp "$MMSTTS_DIR/kernels/"*.cl "$MTDST/kernels/"
 # and contains all the non-trivial transliterations including Amharic Ge'ez.
 # Without it, non-Latin chars get dropped and you get tokenized garbage →
 # audible noise from the model. We MUST ship both tables for Amharic to work.
+#
+# If UROMAN_DIR is not set, auto-fetch from GitHub via scripts/fetch_uroman.sh.
+if [[ -z "$UROMAN_DIR" ]]; then
+    FETCH_SCRIPT="$MMSTTS_DIR/scripts/fetch_uroman.sh"
+    FETCHED_DIR="$MMSTTS_DIR/assets/uroman"
+    if [[ -s "$FETCHED_DIR/romanization-table.txt" && -s "$FETCHED_DIR/romanization-auto-table.txt" ]]; then
+        say "Uroman tables already fetched at $FETCHED_DIR"
+    elif [[ -x "$FETCH_SCRIPT" ]]; then
+        say "UROMAN_DIR not set — auto-fetching from GitHub..."
+        bash "$FETCH_SCRIPT"
+    else
+        die "UROMAN_DIR not set and $FETCH_SCRIPT not found — cannot bundle uroman tables"
+    fi
+    UROMAN_DIR="$FETCHED_DIR"
+fi
+
 if [[ -f "$UROMAN_DIR/romanization-table.txt" ]]; then
     cp "$UROMAN_DIR/romanization-table.txt" "$MTDST/assets/uroman/"
     if [[ -f "$UROMAN_DIR/romanization-auto-table.txt" ]]; then
         cp "$UROMAN_DIR/romanization-auto-table.txt" "$MTDST/assets/uroman/"
         say "Uroman tables: base + auto (Amharic-capable)."
     else
-        warn "uroman: romanization-auto-table.txt missing — Amharic transliteration will degrade."
+        die "romanization-auto-table.txt missing — Amharic and other non-Latin languages will not work."
     fi
     [[ -f "$UROMAN_DIR/chars-to-delete.txt" ]] && cp "$UROMAN_DIR/chars-to-delete.txt" "$MTDST/assets/uroman/"
 else
-    warn "Uroman tables not found at $UROMAN_DIR — English still works via passthrough."
-    : > "$MTDST/assets/uroman/romanization-table.txt"
+    die "romanization-table.txt missing at $UROMAN_DIR — run scripts/fetch_uroman.sh in $MMSTTS_DIR first."
 fi
 
 # ---- Summary -------------------------------------------------------------

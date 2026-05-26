@@ -160,6 +160,7 @@ fun CameraScreen(viewModel: MainViewModel) {
                 currentTts = tts,
                 currentSystemPrompt = systemPrompt,
                 defaultSystemPrompt = com.adreno.seeandsay.DEFAULT_SYSTEM_PROMPT,
+                currentRtf = viewModel.currentRtf,
                 onDismiss = { showConfigs = false },
                 onConfirm = { newSampler, newTts, newSys ->
                     viewModel.updateSamplerSettings(newSampler)

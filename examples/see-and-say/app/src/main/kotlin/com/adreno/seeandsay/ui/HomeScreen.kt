@@ -115,7 +115,7 @@ fun HomeScreen(
                 icon = Icons.Filled.Language,
                 title = "Languages",
                 subtitle = "Download any of ~1140 MMS-TTS languages on demand. " +
-                           "English + Amharic ship bundled with the app.",
+                           "~70 MB per language pack.",
                 accent = MaterialTheme.colorScheme.secondary,
                 onClick = onLanguages,
             )

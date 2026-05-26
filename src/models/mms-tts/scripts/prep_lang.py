@@ -39,6 +39,9 @@ HF_ID = f"facebook/mms-tts-{LANG}"
 # Default sample text per known language; user-supplied text overrides.
 _DEFAULT_TEXT = {
     "amh": "ሰላም፣ ስሜ አላዛር ነው፣ የተወለድኩት በአዲስ አበባ ነው።",
+    "amh_short": "ና፣ ቡና እንጠጣ።",
+    "amh_medium": "ዛሬ አየር ጥሩ ነው፣ ውጭ እንውጣ።",
+    "amh_long": "ኢትዮጵያ ውስጥ ብዙ ቋንቋዎች ይነገራሉ፣ አማርኛ ግን የመንግስት ቋንቋ ነው።",
     "eng": "Hello, my name is.",
     "deu": "Hallo, wie geht es dir?",
     "fra": "Bonjour, je m'appelle Pierre.",

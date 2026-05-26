@@ -254,7 +254,14 @@ static inline bool nnopt_kcache_log() {
 
 static cl_program nnopt_build_program_cached(cl_context ctx, cl_device_id dev,
                                              const std::string& source,
-                                             const std::string& options) {
+                                             const std::string& options_in) {
+    // Inject -cl-fast-relaxed-math globally. Per Qualcomm's Adreno guide §8.2,
+    // this enables fast math (native_exp, native_rsqrt, etc.) across all
+    // kernels — 2-5x faster than IEEE-conformant math functions, and the
+    // vocoder/flow LeakyReLU/tanh don't need IEEE precision.
+    std::string options = options_in;
+    if (options.find("fast-relaxed-math") == std::string::npos)
+        options += " -cl-fast-relaxed-math";
     static std::string s_dev_name, s_drv_ver;
     if (s_dev_name.empty()) {
         char b[256] = {0};

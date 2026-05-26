@@ -1,276 +1,124 @@
-// Reference: model_info/transformers_src/modeling_vits.py
-//   VitsTextEncoder.forward → embed → encoder.layers (6×) → project
-//
-// HOST-SIDE IMPLEMENTATION (2026-05-18, fourth pass).
-// The previous on-device version was a stub (token embeddings + zero logvars).
-// That left prior_logvars = 0 and means = raw embeddings, producing noise
-// downstream. This pass executes the real text encoder math in fp32 on the
-// host CPU and uploads the final hidden + stats buffers to the GPU. The
-// problem is small (T≈33, H=192, 6 layers) so CPU runtime is well under a
-// second — orders of magnitude smaller than the GPU vocoder dominates.
-//
-// What is implemented:
-//   * embed: x = embed_tokens[input_ids] * sqrt(H)
-//   * 6 encoder layers, each:
-//       residual = x
-//       x = MultiHeadAttentionWithRelPos(x)
-//       x = LayerNorm(residual + x)
-//       residual = x
-//       x = FFN(x)   conv1d k=3 (192→768) + ReLU + conv1d k=3 (768→192)
-//       x = LayerNorm(residual + x)
-//   * project: Conv1d 192→384 kernel=1 producing real (means || logvars)
-//
-// Relative position attention follows HF VitsAttention exactly: emb_rel_k/v
-// are tables of size [1, 2*window+1, head_dim] with window=4. For sequence
-// positions outside ±window the bias is 0 (HF achieves this via zero-padding
-// the embedding table; we just gate on |offset|<=window).
-//
-// All output is encoded to nnopt_storage_t (fp16 if NNOPT_USE_FP16, else fp32)
-// before upload to GPU. Downstream ops continue unchanged.
+// GPU text encoder for VITS. Runs 6 transformer layers entirely on GPU:
+//   embed → 6×(attention + LN + FFN_conv1d + LN) → project
+// No CPU roundtrips between layers. Uses CLBlast HGEMM for linear projections
+// and conv1d_gpu for FFN conv1d, custom OpenCL kernels for attention/LN/etc.
 
 #include "opencl_context.h"
 #include "weights.h"
 #include "debug_utils.h"
 #include "model_config.h"
 #include "utils.h"
+#include "conv1d_gpu.h"
+#include "profiler.h"
 
 #include <CL/cl.h>
-#include <cstdint>
+#include <clblast.h>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
 
 namespace {
 
-constexpr int kNumLayers   = 6;
-constexpr int kHiddenSize  = 192;
-constexpr int kFfnSize     = 768;
-constexpr int kHeadDim     = 96;
-constexpr int kNumHeads    = 2;     // 192 / 96
-constexpr int kWindowSize  = 4;     // emb_rel_k shape [1, 9, 96] → window=4
-constexpr int kProjOut     = 384;   // 2*kHiddenSize (means || log_variances)
-constexpr float kLayerNormEps = 1e-5f;
+constexpr int H   = 192;
+constexpr int FFN = 768;
+constexpr int D   = 96;
+constexpr int Nh  = 2;
+constexpr int W   = 4;
+constexpr int NL  = 6;
+constexpr float LN_EPS = 1e-5f;
 
-// y[t, oc] = sum_{ic} x[t, ic] * W[oc, ic] + b[oc]   (Linear, no transpose required)
-static void linear(const std::vector<float>& x, int T, int IC,
-                   const std::vector<float>& W, const std::vector<float>* b,
-                   int OC,
-                   std::vector<float>& y) {
-  y.assign((size_t)T * (size_t)OC, 0.0f);
-#ifdef NNOPT_HAS_OPENMP
-  #pragma omp parallel for collapse(2) schedule(static)
+static cl_kernel k_embed = nullptr;
+static cl_kernel k_ln_res = nullptr;
+static cl_kernel k_fused_attn = nullptr;
+static cl_kernel k_transpose = nullptr;
+static cl_kernel k_relu = nullptr;
+static cl_kernel k_copy = nullptr;
+static cl_kernel k_bias_row = nullptr;
+static cl_program g_prog = nullptr;
+
+static bool ensure_kernels(OpenCLContext& cl_ctx) {
+  if (g_prog) return true;
+  g_prog = cl_ctx.get_program("kernels/text_encoder.cl");
+  if (!g_prog) g_prog = cl_ctx.build_program_from_file("kernels/text_encoder.cl");
+  if (!g_prog) { NNOPT_ERROR("te: program build failed"); return false; }
+  cl_int e;
+  k_embed = clCreateKernel(g_prog, "te_embed_scale", &e);
+  if (e) { NNOPT_ERROR("te: kernel te_embed_scale"); return false; }
+  k_ln_res = clCreateKernel(g_prog, "te_layer_norm_residual", &e);
+  if (e) { NNOPT_ERROR("te: kernel te_layer_norm_residual"); return false; }
+  k_fused_attn = clCreateKernel(g_prog, "te_fused_attention", &e);
+  if (e) { NNOPT_ERROR("te: kernel te_fused_attention"); return false; }
+  k_transpose = clCreateKernel(g_prog, "te_transpose", &e);
+  if (e) { NNOPT_ERROR("te: kernel te_transpose"); return false; }
+  k_relu = clCreateKernel(g_prog, "te_relu", &e);
+  if (e) { NNOPT_ERROR("te: kernel te_relu"); return false; }
+  k_copy = clCreateKernel(g_prog, "te_copy", &e);
+  if (e) { NNOPT_ERROR("te: kernel te_copy"); return false; }
+  k_bias_row = clCreateKernel(g_prog, "te_bias_rowmajor", &e);
+  if (e) { NNOPT_ERROR("te: kernel te_bias_rowmajor"); return false; }
+  return true;
+}
+
+static bool set_arg(cl_kernel k, cl_uint i, size_t sz, const void* v) {
+  return clSetKernelArg(k, i, sz, v) == CL_SUCCESS;
+}
+
+// CLBlast HGEMM: y[T, OC] = x[T, IC] × W^T[IC, OC] + bias
+// W stored as [OC, IC], bias as [OC]. bias_buf can be nullptr.
+// When bias is present: pre-fill y with replicated bias rows on host (tiny:
+// OC ≤ 768, T ≤ 512 → 0.8 MB max), then GEMM with beta=1.
+static cl_mem linear_gpu(OpenCLContext& cl_ctx, cl_command_queue queue,
+                         cl_mem x, cl_mem w_buf, cl_mem bias_buf,
+                         int T, int IC, int OC, const char* label) {
+  cl_int err;
+  const size_t n = (size_t)T * OC;
+  cl_mem y = clCreateBuffer(cl_ctx.context(), CL_MEM_READ_WRITE,
+                            n * sizeof(nnopt_storage_t), nullptr, &err);
+  if (err || !y) return nullptr;
+
+  // GEMM: y = x × W^T (beta=0, no bias yet)
+#ifdef NNOPT_USE_FP16
+  cl_half h_one  = (cl_half)nnopt_f32_to_f16(1.0f);
+  cl_half h_zero = (cl_half)nnopt_f32_to_f16(0.0f);
+  auto st = clblast::Gemm<cl_half>(
+      clblast::Layout::kRowMajor, clblast::Transpose::kNo, clblast::Transpose::kYes,
+      T, OC, IC,
+      h_one, x, 0, IC, w_buf, 0, IC,
+      h_zero, y, 0, OC,
+      &queue, KernelProfiler::event_for(label));
+#else
+  auto st = clblast::Gemm<float>(
+      clblast::Layout::kRowMajor, clblast::Transpose::kNo, clblast::Transpose::kYes,
+      T, OC, IC,
+      1.0f, x, 0, IC, w_buf, 0, IC,
+      0.0f, y, 0, OC,
+      &queue, KernelProfiler::event_for(label));
 #endif
-  for (int t = 0; t < T; ++t) {
-    for (int oc = 0; oc < OC; ++oc) {
-      float s = (b ? (*b)[oc] : 0.0f);
-      const float* wrow = W.data() + (size_t)oc * IC;
-      const float* xrow = x.data() + (size_t)t * IC;
-      for (int ic = 0; ic < IC; ++ic) s += xrow[ic] * wrow[ic];
-      y[(size_t)t * OC + oc] = s;
-    }
-  }
-}
-
-// LayerNorm along last dim: y[t,c] = (x[t,c]-mean)/sqrt(var+eps) * gamma[c] + beta[c]
-static void layer_norm(std::vector<float>& x, int T, int C,
-                       const std::vector<float>& gamma,
-                       const std::vector<float>& beta) {
-  for (int t = 0; t < T; ++t) {
-    float* row = x.data() + (size_t)t * C;
-    float mean = 0.0f;
-    for (int c = 0; c < C; ++c) mean += row[c];
-    mean /= (float)C;
-    float var = 0.0f;
-    for (int c = 0; c < C; ++c) { float d = row[c] - mean; var += d * d; }
-    var /= (float)C;
-    const float inv = 1.0f / std::sqrt(var + kLayerNormEps);
-    for (int c = 0; c < C; ++c) {
-      row[c] = (row[c] - mean) * inv * gamma[c] + beta[c];
-    }
-  }
-}
-
-// Conv1d with kernel=3, stride=1, padding=1 (SAME). Channel-first layout:
-//   x: [IC, T], W: [OC, IC, 3], b: [OC]
-//   y: [OC, T]
-static void conv1d_k3_same(const std::vector<float>& x, int IC, int T,
-                           const std::vector<float>& W,
-                           const std::vector<float>& b, int OC,
-                           std::vector<float>& y) {
-  y.assign((size_t)OC * (size_t)T, 0.0f);
-#ifdef NNOPT_HAS_OPENMP
-  #pragma omp parallel for schedule(static)
-#endif
-  for (int oc = 0; oc < OC; ++oc) {
-    const float bias_v = b[oc];
-    for (int t = 0; t < T; ++t) {
-      float s = bias_v;
-      for (int ic = 0; ic < IC; ++ic) {
-        const float* wic = W.data() + ((size_t)oc * IC + ic) * 3;
-        for (int k = 0; k < 3; ++k) {
-          int tt = t + k - 1;
-          if (tt < 0 || tt >= T) continue;
-          s += x[(size_t)ic * T + tt] * wic[k];
-        }
-      }
-      y[(size_t)oc * T + t] = s;
-    }
-  }
-}
-
-// VitsAttention forward (host-side). Inputs/outputs are [T, H] in row-major.
-// Weights:
-//   q/k/v_proj.weight [H, H], q/k/v_proj.bias [H]
-//   out_proj.weight [H, H], out_proj.bias [H]
-//   emb_rel_k [1, 2W+1, head_dim]   (W = window_size = 4)
-//   emb_rel_v [1, 2W+1, head_dim]
-static void attention(const std::vector<float>& x, int T,
-                      const std::vector<float>& Wq, const std::vector<float>& bq,
-                      const std::vector<float>& Wk, const std::vector<float>& bk,
-                      const std::vector<float>& Wv, const std::vector<float>& bv,
-                      const std::vector<float>& Wo, const std::vector<float>& bo,
-                      const std::vector<float>& emb_rel_k,
-                      const std::vector<float>& emb_rel_v,
-                      std::vector<float>& y) {
-  const int H = kHiddenSize;
-  const int D = kHeadDim;
-  const int Nh = kNumHeads;
-  const int W = kWindowSize;
-  const float scale = 1.0f / std::sqrt((float)D);
-
-  std::vector<float> Q, K, V;
-  linear(x, T, H, Wq, &bq, H, Q);
-  linear(x, T, H, Wk, &bk, H, K);
-  linear(x, T, H, Wv, &bv, H, V);
-
-  // Reshape conceptually: [T, H] → [T, Nh, D]. Access via Q[t*H + h*D + d].
-  std::vector<float> attn((size_t)Nh * T * T, 0.0f);
-
-  // 1) Scores: attn[h, q, k] = (Q[h,q,:] @ K[h,k,:]) * scale
-  //    + rel_bias_k: only for |q-k| <= W:
-  //        rel = emb_rel_k[0, k - q + W, :]
-  //        rel_bias = Q[h,q,:] @ rel
-  for (int h = 0; h < Nh; ++h) {
-    for (int q = 0; q < T; ++q) {
-      const float* qv = Q.data() + (size_t)q * H + (size_t)h * D;
-      for (int k = 0; k < T; ++k) {
-        const float* kv = K.data() + (size_t)k * H + (size_t)h * D;
-        float s = 0.0f;
-        for (int d = 0; d < D; ++d) s += qv[d] * kv[d];
-        s *= scale;
-
-        int offset = k - q;
-        if (offset >= -W && offset <= W) {
-          const float* rk = emb_rel_k.data() + (size_t)(offset + W) * D;
-          float rs = 0.0f;
-          for (int d = 0; d < D; ++d) rs += qv[d] * rk[d];
-          s += rs * scale;  // HF scales the rel_logits too (same /sqrt(D))
-        }
-        attn[((size_t)h * T + q) * T + k] = s;
-      }
-    }
+  if (st != clblast::StatusCode::kSuccess) {
+    NNOPT_ERROR_FMT("te linear_gpu(%s): GEMM status=%d M=%d N=%d K=%d",
+                    label, (int)st, T, OC, IC);
+    clReleaseMemObject(y); return nullptr;
   }
 
-  // 2) Softmax along last dim.
-  for (int h = 0; h < Nh; ++h) {
-    for (int q = 0; q < T; ++q) {
-      float* row = attn.data() + ((size_t)h * T + q) * T;
-      float mx = row[0];
-      for (int k = 1; k < T; ++k) if (row[k] > mx) mx = row[k];
-      float sum = 0.0f;
-      for (int k = 0; k < T; ++k) { row[k] = std::exp(row[k] - mx); sum += row[k]; }
-      const float inv = 1.0f / sum;
-      for (int k = 0; k < T; ++k) row[k] *= inv;
-    }
+  // Bias add: y[t, oc] += b[oc] — fully on GPU, no host roundtrip.
+  if (bias_buf) {
+    set_arg(k_bias_row, 0, sizeof(cl_mem), &y);
+    set_arg(k_bias_row, 1, sizeof(cl_mem), &bias_buf);
+    set_arg(k_bias_row, 2, sizeof(int), &T);
+    set_arg(k_bias_row, 3, sizeof(int), &OC);
+    size_t gws_b[2] = {(size_t)T, (size_t)OC};
+    clEnqueueNDRangeKernel(queue, k_bias_row, 2, nullptr, gws_b, nullptr, 0, nullptr, nullptr);
   }
-
-  // 3) Output: ctx[h,q,:] = sum_k attn[h,q,k] * V[h,k,:]
-  //    + rel_v contribution: sum_k attn[h,q,k] * emb_rel_v[k - q + W] when |k-q|<=W
-  std::vector<float> ctx((size_t)T * H, 0.0f);
-  for (int h = 0; h < Nh; ++h) {
-    for (int q = 0; q < T; ++q) {
-      const float* arow = attn.data() + ((size_t)h * T + q) * T;
-      float* cv = ctx.data() + (size_t)q * H + (size_t)h * D;
-      for (int k = 0; k < T; ++k) {
-        const float w = arow[k];
-        const float* vv = V.data() + (size_t)k * H + (size_t)h * D;
-        for (int d = 0; d < D; ++d) cv[d] += w * vv[d];
-        int offset = k - q;
-        if (offset >= -W && offset <= W) {
-          const float* rv = emb_rel_v.data() + (size_t)(offset + W) * D;
-          for (int d = 0; d < D; ++d) cv[d] += w * rv[d];
-        }
-      }
-    }
-  }
-
-  // 4) Output projection: y = ctx @ Wo + bo
-  linear(ctx, T, H, Wo, &bo, H, y);
-}
-
-// FFN: hidden=192, ffn=768. Layout switches to channel-first for conv math then
-// back to [T, H].
-static void feed_forward(const std::vector<float>& x, int T,
-                         const std::vector<float>& W1, const std::vector<float>& b1,
-                         const std::vector<float>& W2, const std::vector<float>& b2,
-                         std::vector<float>& y) {
-  const int H = kHiddenSize;
-  const int F = kFfnSize;
-
-  // Transpose [T, H] → [H, T]
-  std::vector<float> x_cf((size_t)H * T);
-  for (int t = 0; t < T; ++t)
-    for (int c = 0; c < H; ++c)
-      x_cf[(size_t)c * T + t] = x[(size_t)t * H + c];
-
-  std::vector<float> h_cf;            // [F, T]
-  conv1d_k3_same(x_cf, H, T, W1, b1, F, h_cf);
-  // ReLU
-  for (float& v : h_cf) if (v < 0.0f) v = 0.0f;
-
-  std::vector<float> y_cf;            // [H, T]
-  conv1d_k3_same(h_cf, F, T, W2, b2, H, y_cf);
-
-  // Transpose back [H, T] → [T, H]
-  y.assign((size_t)T * H, 0.0f);
-  for (int c = 0; c < H; ++c)
-    for (int t = 0; t < T; ++t)
-      y[(size_t)t * H + c] = y_cf[(size_t)c * T + t];
-}
-
-// project: Conv1d(192 → 384, kernel=1) — equivalent to Linear(192, 384).
-// Weight shape [384, 192, 1]; treat as [384, 192].
-static void project(const std::vector<float>& x, int T,
-                    const std::vector<float>& W, const std::vector<float>& b,
-                    std::vector<float>& y) {
-  // Linear with W treated as [OC=384, IC=192]
-  linear(x, T, kHiddenSize, W, &b, kProjOut, y);
+  return y;
 }
 
 static std::string lkey(int i, const char* suffix) {
   char buf[256];
   std::snprintf(buf, sizeof(buf), "text_encoder.encoder.layers.%d.%s", i, suffix);
-  return std::string(buf);
-}
-
-static bool encode_storage_upload(OpenCLContext& cl_ctx, cl_command_queue queue,
-                                  const std::vector<float>& src, cl_mem dst) {
-  const size_t n = src.size();
-  std::vector<uint8_t> buf(n * sizeof(nnopt_storage_t));
-#ifdef NNOPT_USE_FP16
-  for (size_t i = 0; i < n; ++i) {
-    uint16_t h = nnopt_f32_to_f16(src[i]);
-    std::memcpy(buf.data() + i * 2, &h, 2);
-  }
-#else
-  std::memcpy(buf.data(), src.data(), n * sizeof(float));
-#endif
-  (void)cl_ctx;
-  cl_int err = clEnqueueWriteBuffer(queue, dst, CL_TRUE, 0,
-                                    n * sizeof(nnopt_storage_t),
-                                    buf.data(), 0, nullptr, nullptr);
-  return err == CL_SUCCESS;
+  return buf;
 }
 
 }  // namespace
@@ -287,117 +135,217 @@ extern "C" int op_text_encoder(OpenCLContext& cl_ctx,
     NNOPT_ERROR("op_text_encoder: bad args");
     return -1;
   }
-
-  // Validate required weights up front so the stub-gate sees real tensor reads.
-  if (!weights.has_tensor("text_encoder.embed_tokens.weight") ||
-      !weights.has_tensor("text_encoder.project.weight") ||
-      !weights.has_tensor("text_encoder.project.bias") ||
-      !weights.has_tensor("text_encoder.encoder.layers.0.attention.q_proj.weight")) {
-    NNOPT_ERROR("op_text_encoder: missing required text_encoder weights");
-    return -2;
-  }
+  if (!ensure_kernels(cl_ctx)) return -2;
 
   const int T = num_tokens;
-  const int H = kHiddenSize;
-
-  // 1) Read input_ids to host (int32 buffer).
-  std::vector<int32_t> ids((size_t)T);
-  cl_int err = clEnqueueReadBuffer(queue, input_ids_i32, CL_TRUE, 0,
-                                   (size_t)T * sizeof(int32_t), ids.data(),
-                                   0, nullptr, nullptr);
-  if (err != CL_SUCCESS) {
-    NNOPT_ERROR_FMT("op_text_encoder: read input_ids failed (%d)", (int)err);
-    return -3;
-  }
-
-  // 2) Token embedding lookup, scaled by sqrt(H).
-  std::vector<float> emb = weights.get_host_vec("text_encoder.embed_tokens.weight");
-  const int vocab = (int)(emb.size() / (size_t)H);
-  std::vector<float> x((size_t)T * H, 0.0f);
-  const float emb_scale = std::sqrt((float)H);
-  for (int t = 0; t < T; ++t) {
-    int id = ids[t];
-    if (id < 0) id = 0;
-    if (id >= vocab) id = vocab - 1;
-    const float* src = emb.data() + (size_t)id * H;
-    float* dst = x.data() + (size_t)t * H;
-    for (int c = 0; c < H; ++c) dst[c] = src[c] * emb_scale;
-  }
-
-  // 3) Encoder layers.
-  for (int li = 0; li < kNumLayers; ++li) {
-    // Pull weights for this layer.
-    auto Wq = weights.get_host_vec(lkey(li, "attention.q_proj.weight"));
-    auto bq = weights.get_host_vec(lkey(li, "attention.q_proj.bias"));
-    auto Wk = weights.get_host_vec(lkey(li, "attention.k_proj.weight"));
-    auto bk = weights.get_host_vec(lkey(li, "attention.k_proj.bias"));
-    auto Wv = weights.get_host_vec(lkey(li, "attention.v_proj.weight"));
-    auto bv = weights.get_host_vec(lkey(li, "attention.v_proj.bias"));
-    auto Wo = weights.get_host_vec(lkey(li, "attention.out_proj.weight"));
-    auto bo = weights.get_host_vec(lkey(li, "attention.out_proj.bias"));
-    auto erk = weights.get_host_vec(lkey(li, "attention.emb_rel_k"));
-    auto erv = weights.get_host_vec(lkey(li, "attention.emb_rel_v"));
-    auto ln_g = weights.get_host_vec(lkey(li, "layer_norm.weight"));
-    auto ln_b = weights.get_host_vec(lkey(li, "layer_norm.bias"));
-    auto W1 = weights.get_host_vec(lkey(li, "feed_forward.conv_1.weight"));
-    auto b1 = weights.get_host_vec(lkey(li, "feed_forward.conv_1.bias"));
-    auto W2 = weights.get_host_vec(lkey(li, "feed_forward.conv_2.weight"));
-    auto b2 = weights.get_host_vec(lkey(li, "feed_forward.conv_2.bias"));
-    auto fln_g = weights.get_host_vec(lkey(li, "final_layer_norm.weight"));
-    auto fln_b = weights.get_host_vec(lkey(li, "final_layer_norm.bias"));
-
-    // residual = x
-    std::vector<float> attn_out;
-    attention(x, T, Wq, bq, Wk, bk, Wv, bv, Wo, bo, erk, erv, attn_out);
-    // post-attn LN(residual + attn_out)
-    for (size_t i = 0; i < x.size(); ++i) x[i] += attn_out[i];
-    layer_norm(x, T, H, ln_g, ln_b);
-
-    // residual = x
-    std::vector<float> ffn_out;
-    feed_forward(x, T, W1, b1, W2, b2, ffn_out);
-    for (size_t i = 0; i < x.size(); ++i) x[i] += ffn_out[i];
-    layer_norm(x, T, H, fln_g, fln_b);
-  }
-
-  // 4) Project to stats [T, 384] = means || logvars.
-  auto proj_W = weights.get_host_vec("text_encoder.project.weight");
-  auto proj_b = weights.get_host_vec("text_encoder.project.bias");
-  std::vector<float> stats_host;
-  project(x, T, proj_W, proj_b, stats_host);
-
-  // 5) Allocate GPU buffers and upload.
+  cl_int err;
   cl_context ctx = cl_ctx.context();
-  const size_t hidden_bytes = (size_t)T * (size_t)H * sizeof(nnopt_storage_t);
-  cl_mem hidden = clCreateBuffer(ctx, CL_MEM_READ_WRITE, hidden_bytes, nullptr, &err);
-  if (err != CL_SUCCESS || !hidden) {
-    NNOPT_ERROR_FMT("op_text_encoder: clCreateBuffer(hidden) failed (%d)", (int)err);
-    return -4;
-  }
-  if (!encode_storage_upload(cl_ctx, queue, x, hidden)) {
-    NNOPT_ERROR("op_text_encoder: hidden upload failed");
-    clReleaseMemObject(hidden);
+
+  auto t0 = std::chrono::steady_clock::now();
+
+  // 1) Embedding: x[T, H] = embed[ids, :] * sqrt(H)
+  cl_mem emb_buf = weights.get_buffer("text_encoder.embed_tokens.weight");
+  if (!emb_buf) { NNOPT_ERROR("te: missing embed weight"); return -3; }
+
+  cl_mem x = clCreateBuffer(ctx, CL_MEM_READ_WRITE,
+                            (size_t)T * H * sizeof(nnopt_storage_t), nullptr, &err);
+  if (err || !x) return -4;
+
+  float emb_scale = std::sqrt((float)H);
+  set_arg(k_embed, 0, sizeof(cl_mem), &emb_buf);
+  set_arg(k_embed, 1, sizeof(cl_mem), &input_ids_i32);
+  set_arg(k_embed, 2, sizeof(cl_mem), &x);
+  int iT = T, iH = H;
+  set_arg(k_embed, 3, sizeof(int), &iT);
+  set_arg(k_embed, 4, sizeof(int), &iH);
+  set_arg(k_embed, 5, sizeof(float), &emb_scale);
+  size_t gws_emb[2] = {(size_t)T, (size_t)H};
+  clEnqueueNDRangeKernel(queue, k_embed, 2, nullptr, gws_emb, nullptr, 0, nullptr,
+                         KernelProfiler::event_for("te.embed"));
+
+  // Scratch buffers reused across layers
+  cl_mem residual = clCreateBuffer(ctx, CL_MEM_READ_WRITE,
+                                   (size_t)T * H * sizeof(nnopt_storage_t), nullptr, &err);
+  cl_mem attn_ctx = clCreateBuffer(ctx, CL_MEM_READ_WRITE,
+                                   (size_t)T * H * sizeof(nnopt_storage_t), nullptr, &err);
+  cl_mem x_cf = clCreateBuffer(ctx, CL_MEM_READ_WRITE,
+                               (size_t)H * T * sizeof(nnopt_storage_t), nullptr, &err);
+  cl_mem ffn_cf = clCreateBuffer(ctx, CL_MEM_READ_WRITE,
+                                 (size_t)FFN * T * sizeof(nnopt_storage_t), nullptr, &err);
+  if (!residual || !attn_ctx || !x_cf || !ffn_cf) {
+    NNOPT_ERROR("te: scratch alloc failed");
     return -5;
   }
 
-  const size_t stats_bytes = (size_t)T * (size_t)kProjOut * sizeof(nnopt_storage_t);
-  cl_mem stats_buf = clCreateBuffer(ctx, CL_MEM_READ_WRITE, stats_bytes, nullptr, &err);
-  if (err != CL_SUCCESS || !stats_buf) {
-    NNOPT_ERROR_FMT("op_text_encoder: clCreateBuffer(stats) failed (%d)", (int)err);
-    clReleaseMemObject(hidden);
-    return -6;
+  // 2) Encoder layers
+  for (int li = 0; li < NL; ++li) {
+    // Save residual
+    size_t n_th = (size_t)T * H;
+    set_arg(k_copy, 0, sizeof(cl_mem), &x);
+    set_arg(k_copy, 1, sizeof(cl_mem), &residual);
+    int iN = (int)n_th;
+    set_arg(k_copy, 2, sizeof(int), &iN);
+    clEnqueueNDRangeKernel(queue, k_copy, 1, nullptr, &n_th, nullptr, 0, nullptr, nullptr);
+
+    // Fused QKV projection: single GEMM [T, H] × [3H, H]^T = [T, 3H]
+    // Concatenated weights cached per layer on first call.
+    static cl_mem g_qkv_w[NL] = {};
+    static cl_mem g_qkv_b[NL] = {};
+    if (!g_qkv_w[li]) {
+      cl_mem wq = weights.get_buffer(lkey(li, "attention.q_proj.weight"));
+      cl_mem wk = weights.get_buffer(lkey(li, "attention.k_proj.weight"));
+      cl_mem wv = weights.get_buffer(lkey(li, "attention.v_proj.weight"));
+      if (!wq || !wk || !wv) { NNOPT_ERROR_FMT("te: missing attn weights layer %d", li); return -6; }
+      const size_t wh = (size_t)H * H * sizeof(nnopt_storage_t);
+      g_qkv_w[li] = clCreateBuffer(ctx, CL_MEM_READ_WRITE, 3 * wh, nullptr, &err);
+      clEnqueueCopyBuffer(queue, wq, g_qkv_w[li], 0, 0,     wh, 0, nullptr, nullptr);
+      clEnqueueCopyBuffer(queue, wk, g_qkv_w[li], 0, wh,    wh, 0, nullptr, nullptr);
+      clEnqueueCopyBuffer(queue, wv, g_qkv_w[li], 0, 2*wh,  wh, 0, nullptr, nullptr);
+      cl_mem bq = weights.get_buffer(lkey(li, "attention.q_proj.bias"));
+      cl_mem bk = weights.get_buffer(lkey(li, "attention.k_proj.bias"));
+      cl_mem bv = weights.get_buffer(lkey(li, "attention.v_proj.bias"));
+      const size_t bh = (size_t)H * sizeof(nnopt_storage_t);
+      g_qkv_b[li] = clCreateBuffer(ctx, CL_MEM_READ_WRITE, 3 * bh, nullptr, &err);
+      clEnqueueCopyBuffer(queue, bq, g_qkv_b[li], 0, 0,    bh, 0, nullptr, nullptr);
+      clEnqueueCopyBuffer(queue, bk, g_qkv_b[li], 0, bh,   bh, 0, nullptr, nullptr);
+      clEnqueueCopyBuffer(queue, bv, g_qkv_b[li], 0, 2*bh, bh, 0, nullptr, nullptr);
+    }
+
+    const int H3 = 3 * H;
+    cl_mem QKV = linear_gpu(cl_ctx, queue, x, g_qkv_w[li], g_qkv_b[li], T, H, H3, "te.qkv_proj");
+    if (!QKV) { NNOPT_ERROR("te: QKV projection failed"); return -7; }
+
+    // Fused attention: reads QKV[T, 3H], writes attn_ctx[T, H]
+    cl_mem rel_k = weights.get_buffer(lkey(li, "attention.emb_rel_k"));
+    cl_mem rel_v = weights.get_buffer(lkey(li, "attention.emb_rel_v"));
+    float scale = 1.0f / std::sqrt((float)D);
+    int iD = D, iNh = Nh, iW = W;
+    set_arg(k_fused_attn, 0, sizeof(cl_mem), &QKV);
+    set_arg(k_fused_attn, 1, sizeof(cl_mem), &rel_k);
+    set_arg(k_fused_attn, 2, sizeof(cl_mem), &rel_v);
+    set_arg(k_fused_attn, 3, sizeof(cl_mem), &attn_ctx);
+    set_arg(k_fused_attn, 4, sizeof(int), &iT);
+    set_arg(k_fused_attn, 5, sizeof(int), &iH);
+    set_arg(k_fused_attn, 6, sizeof(int), &iD);
+    set_arg(k_fused_attn, 7, sizeof(int), &iNh);
+    set_arg(k_fused_attn, 8, sizeof(int), &iW);
+    set_arg(k_fused_attn, 9, sizeof(float), &scale);
+    // Pad gws[0] to multiple of wave size for full utilization.
+    // Adreno 620 wave size is 64; lws=(1,64) aligns dim1 to wave boundary.
+    // H=192 = 64×3 → clean division. T may not divide evenly but the kernel
+    // has a bounds check (if q >= T return).
+    size_t gws_attn[2] = {(size_t)T, (size_t)H};
+    size_t lws_attn[2] = {1, 64};
+    clEnqueueNDRangeKernel(queue, k_fused_attn, 2, nullptr, gws_attn, lws_attn, 0, nullptr,
+                           KernelProfiler::event_for("te.fused_attn"));
+
+    // Out projection
+    cl_mem wo = weights.get_buffer(lkey(li, "attention.out_proj.weight"));
+    cl_mem bo = weights.get_buffer(lkey(li, "attention.out_proj.bias"));
+    cl_mem attn_out = linear_gpu(cl_ctx, queue, attn_ctx, wo, bo, T, H, H, "te.out_proj");
+    if (!attn_out) { NNOPT_ERROR("te: out_proj failed"); return -8; }
+
+    clReleaseMemObject(QKV);
+
+    // LayerNorm(x + attn_out): x = LN(residual + attn_out)
+    // Copy attn_out into x, then fuse LN with residual
+    clEnqueueCopyBuffer(queue, attn_out, x, 0, 0, n_th * sizeof(nnopt_storage_t), 0, nullptr, nullptr);
+    clReleaseMemObject(attn_out);
+
+    cl_mem ln_g = weights.get_buffer(lkey(li, "layer_norm.weight"));
+    cl_mem ln_b = weights.get_buffer(lkey(li, "layer_norm.bias"));
+    set_arg(k_ln_res, 0, sizeof(cl_mem), &x);
+    set_arg(k_ln_res, 1, sizeof(cl_mem), &residual);
+    set_arg(k_ln_res, 2, sizeof(cl_mem), &ln_g);
+    set_arg(k_ln_res, 3, sizeof(cl_mem), &ln_b);
+    set_arg(k_ln_res, 4, sizeof(int), &iT);
+    set_arg(k_ln_res, 5, sizeof(int), &iH);
+    set_arg(k_ln_res, 6, sizeof(float), &LN_EPS);
+    size_t gws_ln = (size_t)T;
+    clEnqueueNDRangeKernel(queue, k_ln_res, 1, nullptr, &gws_ln, nullptr, 0, nullptr,
+                           KernelProfiler::event_for("te.ln1"));
+
+    // Save residual for FFN
+    set_arg(k_copy, 0, sizeof(cl_mem), &x);
+    set_arg(k_copy, 1, sizeof(cl_mem), &residual);
+    set_arg(k_copy, 2, sizeof(int), &iN);
+    clEnqueueNDRangeKernel(queue, k_copy, 1, nullptr, &n_th, nullptr, 0, nullptr, nullptr);
+
+    // FFN: transpose [T,H]→[H,T], conv1d k=3 (H→FFN), ReLU, conv1d k=3 (FFN→H), transpose back
+    int rows_th = T, cols_th = H;
+    set_arg(k_transpose, 0, sizeof(cl_mem), &x);
+    set_arg(k_transpose, 1, sizeof(cl_mem), &x_cf);
+    set_arg(k_transpose, 2, sizeof(int), &rows_th);
+    set_arg(k_transpose, 3, sizeof(int), &cols_th);
+    size_t gws_tr[2] = {(size_t)T, (size_t)H};
+    clEnqueueNDRangeKernel(queue, k_transpose, 2, nullptr, gws_tr, nullptr, 0, nullptr,
+                           KernelProfiler::event_for("te.transpose1"));
+
+    // FFN conv1d_1: [H, T] → [FFN, T], kernel=3, pad=1
+    cl_mem w1 = weights.get_buffer(lkey(li, "feed_forward.conv_1.weight"));
+    cl_mem b1 = weights.get_buffer(lkey(li, "feed_forward.conv_1.bias"));
+    cl_mem ffn1 = conv1d_gpu(cl_ctx, queue, x_cf, w1, b1, H, FFN, T, 3, 1, 1, 1, true, "te.ffn1");
+    if (!ffn1) { NNOPT_ERROR("te: ffn conv1 failed"); return -9; }
+
+    // ReLU in-place
+    int relu_n = FFN * T;
+    set_arg(k_relu, 0, sizeof(cl_mem), &ffn1);
+    set_arg(k_relu, 1, sizeof(int), &relu_n);
+    size_t gws_relu = (size_t)relu_n;
+    clEnqueueNDRangeKernel(queue, k_relu, 1, nullptr, &gws_relu, nullptr, 0, nullptr,
+                           KernelProfiler::event_for("te.relu"));
+
+    // FFN conv1d_2: [FFN, T] → [H, T], kernel=3, pad=1
+    cl_mem w2 = weights.get_buffer(lkey(li, "feed_forward.conv_2.weight"));
+    cl_mem b2 = weights.get_buffer(lkey(li, "feed_forward.conv_2.bias"));
+    cl_mem ffn2 = conv1d_gpu(cl_ctx, queue, ffn1, w2, b2, FFN, H, T, 3, 1, 1, 1, true, "te.ffn2");
+    clReleaseMemObject(ffn1);
+    if (!ffn2) { NNOPT_ERROR("te: ffn conv2 failed"); return -10; }
+
+    // Transpose [H, T] → [T, H] back into x
+    int rows_ht = H, cols_ht = T;
+    set_arg(k_transpose, 0, sizeof(cl_mem), &ffn2);
+    set_arg(k_transpose, 1, sizeof(cl_mem), &x);
+    set_arg(k_transpose, 2, sizeof(int), &rows_ht);
+    set_arg(k_transpose, 3, sizeof(int), &cols_ht);
+    size_t gws_tr2[2] = {(size_t)H, (size_t)T};
+    clEnqueueNDRangeKernel(queue, k_transpose, 2, nullptr, gws_tr2, nullptr, 0, nullptr,
+                           KernelProfiler::event_for("te.transpose2"));
+    clReleaseMemObject(ffn2);
+
+    // LayerNorm(x + residual)
+    cl_mem fln_g = weights.get_buffer(lkey(li, "final_layer_norm.weight"));
+    cl_mem fln_b = weights.get_buffer(lkey(li, "final_layer_norm.bias"));
+    set_arg(k_ln_res, 0, sizeof(cl_mem), &x);
+    set_arg(k_ln_res, 1, sizeof(cl_mem), &residual);
+    set_arg(k_ln_res, 2, sizeof(cl_mem), &fln_g);
+    set_arg(k_ln_res, 3, sizeof(cl_mem), &fln_b);
+    set_arg(k_ln_res, 4, sizeof(int), &iT);
+    set_arg(k_ln_res, 5, sizeof(int), &iH);
+    set_arg(k_ln_res, 6, sizeof(float), &LN_EPS);
+    clEnqueueNDRangeKernel(queue, k_ln_res, 1, nullptr, &gws_ln, nullptr, 0, nullptr,
+                           KernelProfiler::event_for("te.ln2"));
   }
-  if (!encode_storage_upload(cl_ctx, queue, stats_host, stats_buf)) {
-    NNOPT_ERROR("op_text_encoder: stats upload failed");
-    clReleaseMemObject(stats_buf);
-    clReleaseMemObject(hidden);
-    return -7;
-  }
+
+  // 3) Project: linear [T, H] → [T, 2H] (conv1d k=1 = linear)
+  cl_mem proj_w = weights.get_buffer("text_encoder.project.weight");
+  cl_mem proj_b = weights.get_buffer("text_encoder.project.bias");
+  cl_mem stats = linear_gpu(cl_ctx, queue, x, proj_w, proj_b, T, H, 2*H, "te.project");
+  if (!stats) { NNOPT_ERROR("te: project failed"); return -11; }
+
+  // Clean up scratch
+  clReleaseMemObject(residual);
+  clReleaseMemObject(attn_ctx);
+  clReleaseMemObject(x_cf);
+  clReleaseMemObject(ffn_cf);
 
   if (out_padding_mask) *out_padding_mask = nullptr;
-  *out_hidden_states = hidden;
-  *out_stats = stats_buf;
+  *out_hidden_states = x;
+  *out_stats = stats;
 
-  NNOPT_CHECKPOINT_FMT("text_encoder: T=%d layers=%d emb_scale=%.3f", T, kNumLayers, (double)emb_scale);
+  auto t1 = std::chrono::steady_clock::now();
+  double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  NNOPT_CHECKPOINT_FMT("text_encoder: T=%d layers=%d emb_scale=%.3f (%.0f ms GPU)",
+                       T, NL, (double)emb_scale, ms);
   return 0;
 }

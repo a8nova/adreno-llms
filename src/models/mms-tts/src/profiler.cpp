@@ -13,6 +13,8 @@ namespace KernelProfiler {
 struct Profile {
     uint64_t total_ns = 0;   // START → END (pure kernel runtime)
     uint64_t queue_ns = 0;   // QUEUED → END (full pipeline including driver/queue wait)
+    uint64_t submit_ns = 0;  // QUEUED → SUBMIT (CPU overhead: cache flush + driver setup)
+    uint64_t wait_ns = 0;    // SUBMIT → START (GPU busy with prior work)
     int      count    = 0;
 };
 
@@ -39,8 +41,9 @@ void process_pending() {
     if (g_pending.empty()) return;
     for (auto& kv : g_pending) {
         if (kv.second == nullptr) continue;
-        cl_ulong t_queued = 0, t_start = 0, t_end = 0;
+        cl_ulong t_queued = 0, t_submit = 0, t_start = 0, t_end = 0;
         cl_int s0 = clGetEventProfilingInfo(kv.second, CL_PROFILING_COMMAND_QUEUED, sizeof(t_queued), &t_queued, nullptr);
+        cl_int s3 = clGetEventProfilingInfo(kv.second, CL_PROFILING_COMMAND_SUBMIT, sizeof(t_submit), &t_submit, nullptr);
         cl_int s1 = clGetEventProfilingInfo(kv.second, CL_PROFILING_COMMAND_START, sizeof(t_start), &t_start, nullptr);
         cl_int s2 = clGetEventProfilingInfo(kv.second, CL_PROFILING_COMMAND_END,   sizeof(t_end),   &t_end,   nullptr);
         if (s1 == CL_SUCCESS && s2 == CL_SUCCESS && t_end >= t_start) {
@@ -48,6 +51,12 @@ void process_pending() {
             p.total_ns += (t_end - t_start);
             if (s0 == CL_SUCCESS && t_end >= t_queued) {
                 p.queue_ns += (t_end - t_queued);
+            }
+            if (s0 == CL_SUCCESS && s3 == CL_SUCCESS && t_submit >= t_queued) {
+                p.submit_ns += (t_submit - t_queued);
+            }
+            if (s3 == CL_SUCCESS && s1 == CL_SUCCESS && t_start >= t_submit) {
+                p.wait_ns += (t_start - t_submit);
             }
             p.count    += 1;
             g_timeline.push_back(TimelineEntry{t_start, t_end, kv.first});
@@ -89,14 +98,24 @@ void dump_summary() {
         fprintf(stderr, "%-32s %10.3f %10.3f %8d %10.2f\n",
                 name.c_str(), kern_ms, queue_ms, p.count, diff_us);
     }
-    fprintf(stderr, "=== TOTAL kernel runtime (start->end):    %.3f ms ===\n",
-            grand_total_ns / 1.0e6);
-    fprintf(stderr, "=== TOTAL pipeline latency (queued->end): %.3f ms ===\n",
-            grand_queue_ns / 1.0e6);
-    fprintf(stderr, "=== Per-dispatch driver/queue overhead ≈ %.0f us ===\n",
-            grand_queue_ns > grand_total_ns
-                ? (grand_queue_ns - grand_total_ns) / 1000.0 / 280.0
-                : 0.0);
+    // Per-kernel QUEUED→SUBMIT→START→END breakdown (Qualcomm guide §4.5.2)
+    uint64_t grand_submit_ns = 0, grand_wait_ns = 0;
+    for (const auto& kv : sorted) { grand_submit_ns += kv.second.submit_ns; grand_wait_ns += kv.second.wait_ns; }
+    int total_dispatches = 0;
+    for (const auto& kv : sorted) total_dispatches += kv.second.count;
+
+    fprintf(stderr, "\n=== QUALCOMM §4.5 PROFILING BREAKDOWN ===\n");
+    fprintf(stderr, "  QUEUED→SUBMIT (CPU overhead):  %10.1f ms  (cache flush + driver setup)\n", grand_submit_ns / 1.0e6);
+    fprintf(stderr, "  SUBMIT→START  (GPU wait):      %10.1f ms  (GPU busy with prior work)\n", grand_wait_ns / 1.0e6);
+    fprintf(stderr, "  START→END     (GPU kernel):    %10.1f ms  (actual compute)\n", grand_total_ns / 1.0e6);
+    fprintf(stderr, "  QUEUED→END    (total):         %10.1f ms\n", grand_queue_ns / 1.0e6);
+    fprintf(stderr, "  Dispatches:                    %10d\n", total_dispatches);
+    fprintf(stderr, "  Avg QUEUED→SUBMIT per dispatch: %7.1f ms\n",
+            total_dispatches > 0 ? grand_submit_ns / 1.0e6 / total_dispatches : 0.0);
+    fprintf(stderr, "  Avg SUBMIT→START per dispatch:  %7.1f ms\n",
+            total_dispatches > 0 ? grand_wait_ns / 1.0e6 / total_dispatches : 0.0);
+    fprintf(stderr, "  Avg START→END per dispatch:     %7.1f ms\n",
+            total_dispatches > 0 ? grand_total_ns / 1.0e6 / total_dispatches : 0.0);
 
     // REAL inter-kernel gap analysis. Sort timeline by start_ns. The wall
     // span is (last_end - first_start), the actual kernel-busy fraction is

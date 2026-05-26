@@ -130,12 +130,41 @@ fun LanguagePickerScreen(
         }
 
         // Summary counts — gives the user a sense of scale.
-        val installed = entries.count { it.status is LanguageRegistry.LangEntry.Status.Installed
-                                       || it.status is LanguageRegistry.LangEntry.Status.Bundled }
+        val installed = entries.count { it.status is LanguageRegistry.LangEntry.Status.Installed }
+        var showWipeConfirm by remember { mutableStateOf(false) }
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "$installed installed · ${entries.size - installed} available",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f),
+            )
+            if (installed > 0) {
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = { showWipeConfirm = true }) {
+                    Text("Wipe all", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+        if (showWipeConfirm) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showWipeConfirm = false },
+                title = { Text("Wipe all languages?") },
+                text = { Text("This deletes all downloaded language packs. You'll need to re-download at least one to use TTS.") },
+                confirmButton = {
+                    TextButton(onClick = { showWipeConfirm = false; viewModel.wipeAllLanguages() }) {
+                        Text("Wipe", color = MaterialTheme.colorScheme.error)
+                    }
+                },
+                dismissButton = { TextButton(onClick = { showWipeConfirm = false }) { Text("Cancel") } },
+            )
+        }
         Text(
-            text = "$installed installed · ${entries.size - installed} available",
+            text = "~70 MB per language, downloaded from HuggingFace",
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f),
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.4f),
             modifier = Modifier.padding(start = 4.dp, bottom = 6.dp),
         )
 
@@ -157,7 +186,7 @@ fun LanguagePickerScreen(
             items(filtered, key = { it.code }) { e ->
                 LangRow(
                     entry = e,
-                    isActive = e.code == active.code,
+                    isActive = e.code == active?.code,
                     onDownload = { registry.download(e.code) },
                     onCancel = { registry.cancel(e.code) },
                     onRetry = { registry.download(e.code) },
@@ -194,7 +223,6 @@ private fun LangRow(
     onUse: () -> Unit,
 ) {
     val installedOrBundled = entry.status is LanguageRegistry.LangEntry.Status.Installed
-                          || entry.status is LanguageRegistry.LangEntry.Status.Bundled
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = if (isActive)
@@ -269,7 +297,6 @@ private fun StatusAction(
     onUse: () -> Unit,
 ) {
     when (val s = entry.status) {
-        is LanguageRegistry.LangEntry.Status.Bundled,
         is LanguageRegistry.LangEntry.Status.Installed -> {
             if (isActive) {
                 InstalledPill("In use")

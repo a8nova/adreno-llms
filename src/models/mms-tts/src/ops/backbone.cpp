@@ -12,12 +12,14 @@
 #include "utils.h"  // nnopt_storage_t, nnopt_f16_to_f32, nnopt_f32_to_f16
 
 #include <CL/cl.h>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -376,15 +378,12 @@ extern "C" int tts_forward_graph(OpenCLContext& cl_ctx,
   fprintf(stderr, "▶ duration_predictor\n"); fflush(stderr);
   auto t_dp_start = std::chrono::steady_clock::now();
   NNOPT_CHECKPOINT("forward_graph: about to call op_duration_predictor");
-  // Weight keys here must match what's actually in the on-disk weights file.
-  // We use the original HF "duration_predictor.*" dotted-path keys.
   cl_mem log_durations_dev = op_duration_predictor(cl_ctx,
                                                   weights,
                                                   queue,
                                                   enc_hidden,
                                                   /*T=*/T_chars,
                                                   /*C=*/H,
-                                                  // Original HF tensor keys (see weights/model.fp16.meta.json for the canonical list)
                                                   "duration_predictor.conv_pre.weight",
                                                   "duration_predictor.conv_pre.bias",
                                                   "duration_predictor.post_conv_pre.weight",

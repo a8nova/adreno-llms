@@ -57,6 +57,7 @@ fun ConfigurationsDialog(
     currentTts: TtsSettings,
     currentSystemPrompt: String,
     defaultSystemPrompt: String,
+    currentRtf: Double,
     onDismiss: () -> Unit,
     onConfirm: (SamplerSettings, TtsSettings, String) -> Unit,
 ) {
@@ -67,7 +68,6 @@ fun ConfigurationsDialog(
     var noiseScale by remember { mutableStateOf(currentTts.noiseScale) }
     var noiseScaleW by remember { mutableStateOf(currentTts.noiseScaleW) }
     var lengthScale by remember { mutableStateOf(currentTts.lengthScale) }
-    var prebufferAll by remember { mutableStateOf(currentTts.prebufferAll) }
     var systemPrompt by remember { mutableStateOf(currentSystemPrompt) }
     var imageSize by remember { mutableStateOf(current.imageSize) }
 
@@ -226,14 +226,11 @@ fun ConfigurationsDialog(
                     style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
-                PrebufferToggle(
-                    selected = prebufferAll,
-                    onSelect = { prebufferAll = it },
-                )
+                val prebufK = kotlin.math.ceil(currentRtf).toInt()
                 Text(
-                    text = "Buffer-all: synthesize every sentence first, then play continuously (no silence " +
-                           "gaps mid-utterance). Streaming: start sentence 1 the moment it's ready — " +
-                           "audible silence between sentences when RTF > 1 (typical on mobile).",
+                    text = "Adaptive prebuffer: RTF %.1f  →  prebuffer %d sentence%s before playback starts.".format(
+                        currentRtf, prebufK, if (prebufK != 1) "s" else "",
+                    ),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                 )
@@ -293,7 +290,6 @@ fun ConfigurationsDialog(
                             noiseScale = noiseScale.coerceIn(0f, 1.5f),
                             noiseScaleW = noiseScaleW.coerceIn(0f, 1.5f),
                             lengthScale = lengthScale.coerceIn(0.5f, 2.0f),
-                            prebufferAll = prebufferAll,
                         )
                         onConfirm(s, t, systemPrompt)
                     }) { Text("OK") }
@@ -349,47 +345,6 @@ private fun SliderRow(
                             textAlign = TextAlign.Center,
                         )
                     }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PrebufferToggle(selected: Boolean, onSelect: (Boolean) -> Unit) {
-    val options = listOf(
-        Triple(true,  "Buffer all", "no silence gaps"),
-        Triple(false, "Streaming",  "starts faster, gaps"),
-    )
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        options.forEach { (value, label, sub) ->
-            val isSelected = value == selected
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = if (isSelected) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.surfaceVariant,
-                tonalElevation = 0.dp,
-                modifier = Modifier
-                    .weight(1f)
-                    .clickable { onSelect(value) },
-            ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text(
-                        text = label,
-                        style = MaterialTheme.typography.labelLarge,
-                        color = if (isSelected) MaterialTheme.colorScheme.onPrimary
-                                else MaterialTheme.colorScheme.onSurface,
-                        fontWeight = FontWeight.Medium,
-                    )
-                    Text(
-                        text = sub,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (isSelected) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f)
-                                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                    )
                 }
             }
         }

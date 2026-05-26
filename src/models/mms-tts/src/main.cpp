@@ -820,7 +820,9 @@ int main(int argc, char** argv) {
 
     const bool have_fixtures =
         !fixture_ids.empty() && !fixture_dnoise.empty() && !fixture_pnoise.empty();
-    const bool use_fixtures = !token_ids_path.empty() || have_fixtures;
+    // Only use fixtures when explicitly requested via --token-ids.
+    // Otherwise tokenize the actual prompt so the user hears their text.
+    const bool use_fixtures = !token_ids_path.empty();
 
     if (use_fixtures) {
         // ── Deterministic-evaluation path (SxS / cosine compare vs reference) ──

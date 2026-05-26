@@ -46,7 +46,7 @@ fun SettingsScreen(viewModel: MainViewModel) {
         // Text-to-speech screen now (next to the input field) so the user
         // changes it where they actually use it.
         Text(
-            text = "Active: ${current.label}",
+            text = "Active: ${current?.label ?: "none"}",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onBackground,
         )
@@ -277,7 +277,7 @@ private fun ModelCompatibilityCard(info: DeviceInfo) {
             val amhOk = info.globalMemMb >= 1500
             ModelStatus(
                 name        = "MMS-TTS (text → speech)",
-                detail      = "~70 MB weights per language · English + Amharic packs bundled" +
+                detail      = "~70 MB per language · downloaded on demand from HuggingFace" +
                               (if (!amhOk) " · keep inputs short" else ""),
                 status      = if (amhOk) ModelRunStatus.OK else ModelRunStatus.MAY_OOM,
                 statusLabel = if (amhOk) "Runs" else "Short inputs",

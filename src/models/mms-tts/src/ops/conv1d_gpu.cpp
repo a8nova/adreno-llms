@@ -53,7 +53,7 @@ cl_mem conv1d_gpu(OpenCLContext& cl_ctx,
   static size_t g_im2col_ws_n = 0;
   if (im2col_n > g_im2col_ws_n) {
     if (g_im2col_ws) { clReleaseMemObject(g_im2col_ws); g_im2col_ws = nullptr; }
-    g_im2col_ws = clCreateBuffer(ctx, CL_MEM_READ_WRITE,
+    g_im2col_ws = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS,
                                  im2col_n * sizeof(nnopt_storage_t), nullptr, &err);
     if (err != CL_SUCCESS || !g_im2col_ws) {
       NNOPT_ERROR_FMT("conv1d_gpu(%s): im2col workspace (%d)", label, (int)err);

@@ -60,8 +60,10 @@ fun SpeakScreen(
 ) {
     val language by viewModel.language.collectAsStateWithLifecycle()
     val installed by viewModel.installedLanguages.collectAsStateWithLifecycle()
-    val examples = examplesFor(language)
-    var text by rememberSaveable(language.code) { mutableStateOf(examples.first()) }
+    val ttsLoading by viewModel.ttsLoading.collectAsStateWithLifecycle()
+    val langOrDefault = language ?: TtsLanguage("eng", "English", true)
+    val examples = examplesFor(langOrDefault)
+    var text by rememberSaveable(langOrDefault.code) { mutableStateOf(examples.first()) }
     val state by viewModel.speak.collectAsStateWithLifecycle()
     val sampler by viewModel.samplerSettings.collectAsStateWithLifecycle()
     val tts by viewModel.ttsSettings.collectAsStateWithLifecycle()
@@ -78,6 +80,19 @@ fun SpeakScreen(
     // 3-4 short sentences without OOM on the marginal devices.
     val maxChars = if ((device?.globalMemMb ?: 4096) < 2048) 350 else 800
 
+    if (language == null) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(32.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text("No TTS language installed", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(12.dp))
+            Button(onClick = onManageLanguages) { Text("Download a language") }
+        }
+        return
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
     Column(
         modifier = Modifier
@@ -86,7 +101,7 @@ fun SpeakScreen(
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.Top,
     ) {
-        // Language picker row: tap chip → dropdown of installed/bundled langs.
+        // Language picker row: tap chip → dropdown of installed langs.
         // Tap "+" → navigate to LanguagePickerScreen to download more.
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -98,7 +113,7 @@ fun SpeakScreen(
                     onClick = { showLangMenu = true },
                     label = {
                         Text(
-                            text = language.label,
+                            text = langOrDefault.label,
                             style = MaterialTheme.typography.labelLarge,
                         )
                     },
@@ -126,7 +141,7 @@ fun SpeakScreen(
                                 viewModel.setLanguage(lang)
                                 showLangMenu = false
                             },
-                            leadingIcon = if (lang.code == language.code) {
+                            leadingIcon = if (lang.code == langOrDefault.code) {
                                 { Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp)) }
                             } else null,
                         )
@@ -158,6 +173,24 @@ fun SpeakScreen(
                     MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
             )
         }
+        ttsLoading?.let { msg ->
+            Spacer(Modifier.height(4.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp),
+                    strokeWidth = 2.dp,
+                )
+                Text(
+                    text = msg,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
+                )
+            }
+        }
         Spacer(Modifier.height(8.dp))
         Text(
             text = "✏︎  Text to speak",
@@ -177,7 +210,7 @@ fun SpeakScreen(
             textStyle = MaterialTheme.typography.bodyMedium,
             placeholder = {
                 Text(
-                    text = if (language.code == "amh") "በዚህ ይተይቡ…" else "Type text here…",
+                    text = if (langOrDefault.code == "amh") "በዚህ ይተይቡ…" else "Type text here…",
                     style = MaterialTheme.typography.bodySmall,
                 )
             },
@@ -287,6 +320,7 @@ fun SpeakScreen(
                 currentTts = tts,
                 currentSystemPrompt = systemPrompt,
                 defaultSystemPrompt = com.adreno.seeandsay.DEFAULT_SYSTEM_PROMPT,
+                currentRtf = viewModel.currentRtf,
                 onDismiss = { showConfigs = false },
                 onConfirm = { newSampler, newTts, newSys ->
                     viewModel.updateSamplerSettings(newSampler)
@@ -378,8 +412,8 @@ private fun examplesFor(lang: TtsLanguage): List<String> = when (lang.code) {
         "This entire app, including the language model and the text-to-speech, runs without any internet connection.",
     )
     "amh" -> listOf(
+        "ዛሬ ጥሩ ቀን ነው! ይህ AI ሞዴል የ6 አመት እድሜ ባለው ስልክ ላይ እየሰራ ነው። ይህ ሰው ሊመስል ይችላል ነገር ግን ከእርስዎ ጋር ማውራት AI ነው።",
         "ሰላም! ስሜ አድሬኖ ነው። ይህን ስልክ ላይ የሚሰራ የንግግር ሞዴል ነኝ።",
-        "የአየር ሁኔታው ዛሬ በጣም ጥሩ ነው። ሙቀቱ ሃያ አምስት ዲግሪ ሴንቲግሬድ ነው።",
         "ይህ ሙሉ መተግበሪያ፣ የቋንቋ ሞዴል እና የጽሁፍ-ወደ-ንግግር ጨምሮ፣ ያለ ኢንተርኔት ግንኙነት ይሰራል።",
     )
     // For all the downloaded languages we have no curated examples; show a

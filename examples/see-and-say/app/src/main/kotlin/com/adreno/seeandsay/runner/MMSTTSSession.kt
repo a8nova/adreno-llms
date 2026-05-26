@@ -82,6 +82,7 @@ class MMSTTSSession(context: Context) {
     suspend fun start(
         langCode: String = "",
         tts: com.adreno.seeandsay.TtsSettings = com.adreno.seeandsay.TtsSettings(),
+        prewarm: Boolean = true,
     ) = withContext(Dispatchers.IO) {
         if (process?.isAlive == true) return@withContext
         require(cwd.isDirectory) { "mmstts cwd missing: $cwd" }
@@ -113,7 +114,7 @@ class MMSTTSSession(context: Context) {
         // itself no longer pays at runtime either way. Re-enabled because
         // users who run many queries per session save ~1.5 s × N at the cost
         // of one ~7 s launch wait; for a multi-utterance demo that's a win.
-        pb.environment()["NNOPT_PREWARM"] = "1"
+        pb.environment()["NNOPT_PREWARM"] = if (prewarm) "1" else "0"
         // Diagnostic: same as smolvlm — print [kernel_cache] HIT/MISS/SAVE lines
         // so logcat shows whether the binary cache is doing its job across app
         // restarts. Drop this once we've confirmed the cache is stable.

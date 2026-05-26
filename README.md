@@ -135,6 +135,16 @@ adreno-llms/
     └── weights/                  # tokenizer + meta (committed); model.bin (downloaded)
 ```
 
+## Model-specific kernel tuning
+
+The OpenCL kernels in this repo are **tuned for the exact model dimensions shipped** (hidden sizes, head counts, intermediate sizes, conv kernel widths, etc.). Tile sizes, workgroup layouts, shared-memory allocation, and vectorized load patterns are all calibrated to those specific tensor shapes and the Adreno 6xx wave architecture.
+
+**What this means in practice:** if you swap in a checkpoint with different dimensions (e.g., a 500M variant where we ship a 256M), the kernels may hit suboptimal tile boundaries, waste shared memory, or fail on hardcoded shape assertions. You won't get the same speedups — and in some cases it won't run at all.
+
+For MMS-TTS this isn't a concern — all ~1100 language checkpoints share the same VITS architecture and parameter count; only the weights differ.
+
+For decoder-only LMs and vision-language models, each model size needs its own kernel tuning pass. If you want optimized kernels for a model size not currently in the repo, reach out: **a8nova@gmail.com**.
+
 ## 🤝 Contributing
 
 ## 📜 License

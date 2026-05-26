@@ -127,16 +127,6 @@ data class TtsSettings(
     val noiseScale: Float = 0.667f,
     val noiseScaleW: Float = 0.8f,
     val lengthScale: Float = 1.0f,
-    /**
-     * Playback pacing for multi-sentence text.
-     *  true  — synthesize ALL sentences first, then play continuously (no
-     *          mid-utterance silence gaps). Costs an upfront wait roughly
-     *          equal to total_audio_seconds × RTF.
-     *  false — start playing sentence 1 the moment it's ready, while later
-     *          sentences are still synthesizing. With RTF > 1 (common on
-     *          mobile) you hear noticeable silence between sentences.
-     */
-    val prebufferAll: Boolean = true,
 )
 
 /**
@@ -200,6 +190,36 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val mmstts = MMSTTSSession(context)
     private val wavPlayer = WavPlayer()
 
+    /**
+     * Exponential moving average of the TTS real-time factor (synthesis_time /
+     * audio_duration). Updated after every `mmstts.speak()` call. Used to
+     * compute the adaptive prebuffer target: `ceil(measuredRtf)` sentences
+     * must be synthesized before playback starts so the playback runway
+     * always stays ahead of synthesis. Default 6.0 (conservative for Adreno
+     * 6xx) until the first measurement arrives.
+     */
+    @Volatile private var measuredRtf: Double = 6.0
+    private val rtfAlpha = 0.3  // EMA smoothing factor — recent calls weigh more
+
+    private fun updateRtf(result: MMSTTSSession.Result) {
+        if (result.rtf > 0 && result.rtf.isFinite()) {
+            measuredRtf = rtfAlpha * result.rtf + (1 - rtfAlpha) * measuredRtf
+        }
+    }
+
+    /** Measured RTF exposed for the Configurations dialog info line. */
+    val currentRtf: Double get() = measuredRtf
+
+    /**
+     * Adaptive prebuffer: synthesize this many sentences before starting
+     * playback. At RTF r, each chunk plays in d seconds but needs r*d to
+     * synthesize. Prebuffering ceil(r) chunks creates enough runway that
+     * subsequent chunks finish before the buffer drains. Capped to
+     * [sentenceCount] (when the text is short, prebuffer everything).
+     */
+    private fun adaptivePrebufferTarget(sentenceCount: Int): Int =
+        kotlin.math.ceil(measuredRtf).toInt().coerceIn(1, sentenceCount)
+
     private val _phase = MutableStateFlow<UiPhase>(UiPhase.Initial)
     val phase: StateFlow<UiPhase> = _phase.asStateFlow()
 
@@ -209,8 +229,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _speak = MutableStateFlow<SpeakFlow>(SpeakFlow.Idle)
     val speak: StateFlow<SpeakFlow> = _speak.asStateFlow()
 
-    private val _language = MutableStateFlow(TtsLanguage("eng", "English", true))
-    val language: StateFlow<TtsLanguage> = _language.asStateFlow()
+    private val _ttsLoading = MutableStateFlow<String?>(null)
+    val ttsLoading: StateFlow<String?> = _ttsLoading.asStateFlow()
+
+    private val _language = MutableStateFlow<TtsLanguage?>(null)
+    val language: StateFlow<TtsLanguage?> = _language.asStateFlow()
 
     // Language registry + downloader. Public so the Compose screen can wire
     // directly to its StateFlow; ViewModel doesn't need to mediate the UI.
@@ -222,14 +245,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * via download automatically expands this list.
      */
     val installedLanguages: StateFlow<List<TtsLanguage>> = run {
-        val flow = kotlinx.coroutines.flow.MutableStateFlow<List<TtsLanguage>>(
-            listOf(TtsLanguage("eng", "English", true), TtsLanguage("amh", "Amharic (አማርኛ)", true)),
-        )
+        val flow = kotlinx.coroutines.flow.MutableStateFlow<List<TtsLanguage>>(emptyList())
         viewModelScope.launch {
             languageRegistry.entries.collect { entries ->
                 flow.value = entries
                     .filter { e ->
-                        e.status is com.adreno.seeandsay.runner.LanguageRegistry.LangEntry.Status.Bundled ||
                         e.status is com.adreno.seeandsay.runner.LanguageRegistry.LangEntry.Status.Installed
                     }
                     .map { e ->
@@ -242,6 +262,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         TtsLanguage(e.code, pretty, true)
                     }
                     .sortedBy { it.label.lowercase() }
+
+                // Auto-select first installed language if none is selected.
+                val current = _language.value
+                if (current == null && flow.value.isNotEmpty()) {
+                    val first = flow.value.first()
+                    _language.value = first
+                    // Start TTS for the auto-selected language.
+                    ttsStartJob?.cancel()
+                    ttsStartJob = launch(Dispatchers.IO) {
+                        _ttsLoading.value = "Loading ${first.label}…"
+                        try { mmstts.start(first.code, _ttsSettings.value, prewarm = false) }
+                        catch (t: Throwable) { Log.w("MainViewModel", "auto-start TTS failed", t) }
+                        _ttsLoading.value = null
+                    }
+                }
+                // Clear selection if current language was uninstalled.
+                if (current != null && flow.value.none { it.code == current.code }) {
+                    mmstts.stop()
+                    _language.value = flow.value.firstOrNull()
+                }
             }
         }
         flow
@@ -328,15 +368,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun updateTtsSettings(new: TtsSettings) {
         if (_ttsSettings.value == new) return
         _ttsSettings.value = new
-        viewModelScope.launch(Dispatchers.IO) {
-            _phase.value = UiPhase.WarmingUp("Applying new TTS settings…")
+        val lang = _language.value ?: return
+        ttsStartJob?.cancel()
+        ttsStartJob = viewModelScope.launch(Dispatchers.IO) {
+            _ttsLoading.value = "Applying TTS settings…"
             try {
                 mmstts.stop()
-                mmstts.start(_language.value.code, new)
-                _phase.value = UiPhase.Ready
+                mmstts.start(lang.code, new, prewarm = false)
             } catch (t: Throwable) {
-                _phase.value = UiPhase.Error("MMS-TTS restart failed: ${t.message}")
+                Log.w("MainViewModel", "TTS settings restart failed: ${t.message}", t)
             }
+            _ttsLoading.value = null
         }
     }
 
@@ -359,29 +401,36 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // surface the error to the UI AND revert _language so the user can
         // pick a working option — otherwise the next Speak would fire
         // `mmstts session not running` with no explanation.
-        viewModelScope.launch(Dispatchers.IO) {
-            _phase.value = UiPhase.WarmingUp("Loading ${lang.label}…")
+        ttsStartJob?.cancel()
+        ttsStartJob = viewModelScope.launch(Dispatchers.IO) {
+            _ttsLoading.value = "Switching to ${lang.label}…"
             try {
                 mmstts.stop()
-                mmstts.start(lang.code, _ttsSettings.value)
-                _phase.value = UiPhase.Ready
+                mmstts.start(lang.code, _ttsSettings.value, prewarm = false)
             } catch (t: Throwable) {
                 Log.w("MainViewModel", "language switch to ${lang.code} failed", t)
                 _language.value = previous
-                // Best-effort: bring the previous language's session back so
-                // the rest of the app keeps working.
-                try { mmstts.stop(); mmstts.start(previous.code, _ttsSettings.value) }
-                catch (_: Throwable) { /* nothing more we can do here */ }
-                _phase.value = UiPhase.Error(
-                    "Failed to load ${lang.label} — weights/${lang.code}/ probably missing. " +
-                    "Reverted to ${previous.label}.",
-                )
+                if (previous != null) {
+                    try { mmstts.stop(); mmstts.start(previous.code, _ttsSettings.value, prewarm = false) }
+                    catch (_: Throwable) { /* nothing more we can do here */ }
+                }
+                _ttsLoading.value = "Failed to load ${lang.label}. Reverted to ${previous?.label ?: "none"}."
+                kotlinx.coroutines.delay(3000)
             }
+            _ttsLoading.value = null
         }
+    }
+
+    fun wipeAllLanguages() {
+        ttsStartJob?.cancel()
+        mmstts.stop()
+        _language.value = null
+        languageRegistry.wipeAll()
     }
 
     private var askJob: Job? = null
     private var speakJob: Job? = null
+    private var ttsStartJob: Job? = null
 
     init { kickoffExtraction() }
 
@@ -431,15 +480,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // way, and image preload — see onCaptured() — already overlaps it
         // with user think time). Net win: ~10 s off app launch.
 
-        _phase.value = UiPhase.WarmingUp("Loading MMS-TTS speech model…")
-        try {
-            withContext(Dispatchers.IO) { mmstts.start(_language.value.code, _ttsSettings.value) }
-        } catch (t: Throwable) {
-            _phase.value = UiPhase.Error("MMS-TTS start failed: ${t.message}")
-            return
-        }
-
         _phase.value = UiPhase.Ready
+
+        // Start MMS-TTS in the background if a language is already installed.
+        val lang = _language.value
+        if (lang != null) {
+            ttsStartJob = viewModelScope.launch(Dispatchers.IO) {
+                _ttsLoading.value = "Loading TTS…"
+                try {
+                    mmstts.start(lang.code, _ttsSettings.value, prewarm = false)
+                } catch (t: Throwable) {
+                    Log.w("MainViewModel", "background MMS-TTS start failed: ${t.message}", t)
+                }
+                _ttsLoading.value = null
+            }
+        }
     }
 
     /** Lightweight liveness signal for the persistent status pill in the UI. */
@@ -606,25 +661,38 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * synthesis's overwrite of output.wav doesn't corrupt queued playback.
      */
     private suspend fun speakStreamed(jpeg: File, text: String, askStart: Long) {
+        ensureTtsReady()
         val sentences = splitSentences(text)
         val cwd = File(context.filesDir, "mmstts")
         val audioDir = File(cwd, "audio_queue").also { it.mkdirs() }
 
-        // Clean any stale fragments from a prior ask so the directory doesn't grow.
         audioDir.listFiles()?.forEach { it.delete() }
 
         _camera.value = CameraFlow.Asking(jpeg, AskPhase.Synthesizing, text)
-        wavPlayer.stop()  // ensure queue is fresh
+        wavPlayer.stop()
 
-        var firstAudio = true
-        var lastResult: com.adreno.seeandsay.runner.MMSTTSSession.Result? = null
+        val prebufferTarget = adaptivePrebufferTarget(sentences.size)
+        val buffered = mutableListOf<com.adreno.seeandsay.runner.MMSTTSSession.Result>()
+
+        fun enqueueOne(res: com.adreno.seeandsay.runner.MMSTTSSession.Result, index: Int) {
+            val onDone: () -> Unit = {
+                if (index == sentences.lastIndex) {
+                    val cur = _camera.value
+                    if (cur is CameraFlow.Asking) _camera.value = cur.copy(phase = AskPhase.Done)
+                }
+            }
+            val pcm = res.pcm
+            if (pcm != null) wavPlayer.enqueuePcm(pcm, res.sampleRate, onComplete = onDone)
+            else             wavPlayer.enqueue(res.wav, onComplete = onDone)
+        }
+
+        var playbackStarted = false
         for ((index, sentence) in sentences.withIndex()) {
             val target = File(audioDir, "utt_${index.toString().padStart(3, '0')}.wav")
             val res = mmstts.speak(sentence, persistTo = target)
-            lastResult = res
+            updateRtf(res)
+            buffered.add(res)
 
-            // Update metrics with the latest sentence's numbers (cumulative
-            // numbers would be more accurate but live-overwrite is OK for v1).
             _metrics.value = _metrics.value.copy(
                 ttsAudioSec = res.audioSec,
                 ttsRtf = res.rtf,
@@ -634,40 +702,35 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 mmsttsPeakRssMb = res.peakRssMb,
             )
 
-            // Enqueue this sentence. PCM path (AudioTrack) when available —
-            // skips MediaPlayer.prepare()'s ~150-300 ms per sentence and
-            // starts audio in ~10-20 ms. The first sentence flips us into
-            // "Speaking" — subsequent ones queue behind it.
-            val pcm = res.pcm
-            val onDone: () -> Unit = {
-                if (index == sentences.lastIndex) {
-                    val cur = _camera.value
-                    if (cur is CameraFlow.Asking) _camera.value = cur.copy(phase = AskPhase.Done)
-                }
-            }
-            if (pcm != null) {
-                wavPlayer.enqueuePcm(pcm, res.sampleRate, onComplete = onDone)
-            } else {
-                wavPlayer.enqueue(res.wav, onComplete = onDone)
-            }
-            if (firstAudio) {
+            if (index < prebufferTarget) {
+                // Still building the playback runway.
+            } else if (!playbackStarted) {
+                // Runway built — drain all buffered sentences then stream.
+                for ((i, r) in buffered.withIndex()) enqueueOne(r, i)
                 _camera.value = CameraFlow.Asking(jpeg, AskPhase.Speaking, text)
-                firstAudio = false
+                playbackStarted = true
+            } else {
+                enqueueOne(res, index)
             }
         }
+
+        // Short text where sentences.size <= prebufferTarget: flush now.
+        if (!playbackStarted) {
+            for ((i, r) in buffered.withIndex()) enqueueOne(r, i)
+            _camera.value = CameraFlow.Asking(jpeg, AskPhase.Speaking, text)
+        }
+
         _metrics.value = _metrics.value.copy(
             e2eSec = (System.currentTimeMillis() - askStart) / 1000.0,
         )
     }
 
     private fun splitSentences(text: String): List<String> {
-        // Split only on sentence-ending punctuation. Sub-sentence (comma)
-        // splitting was tried and reverted: at RTF ≈ 1.45 the next chunk's
-        // synthesis (~1.5s of wall per ~1s of audio) always finishes AFTER
-        // the current chunk's playback, producing audible mid-clause silence.
-        // Sentence boundaries are natural prosodic pauses, so the same gap
-        // doesn't sound broken — it sounds like a breath.
-        val parts = text.split(Regex("""(?<=[.!?])\s+"""))
+        // Split on sentence-ending punctuation: ASCII (.!?) plus Ethiopic
+        // full stop ። (U+1362) and question mark ፧ (U+1367). Without the
+        // Ethiopic marks, Amharic text arrives as one giant sentence and
+        // streaming provides no latency benefit.
+        val parts = text.split(Regex("""(?<=[.!?።፧])\s+"""))
             .map { it.trim() }
             .filter { it.isNotEmpty() }
         if (parts.size <= 1) return parts
@@ -703,6 +766,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- Speak tab flow -----------------------------------------------
 
+    private suspend fun ensureTtsReady() {
+        val lang = _language.value
+            ?: throw IllegalStateException("No TTS language installed. Download one from Languages.")
+        if (mmstts.isAlive()) return
+        _ttsLoading.value = "Starting TTS…"
+        withContext(Dispatchers.IO) {
+            mmstts.start(lang.code, _ttsSettings.value)
+        }
+        _ttsLoading.value = null
+    }
+
     fun speak(text: String) {
         if (text.isBlank()) return
         speakJob?.cancel()
@@ -711,33 +785,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         speakJob = viewModelScope.launch(Dispatchers.Default) {
             val startMs = System.currentTimeMillis()
             try {
+                ensureTtsReady()
                 val sentences = splitSentences(text)
                 val cwd = File(context.filesDir, "mmstts")
                 val audioDir = File(cwd, "speak_queue").also { it.mkdirs() }
                 audioDir.listFiles()?.forEach { it.delete() }
 
-                // Pre-buffer policy: depends on tts.prebufferAll.
-                //   true  → buffer ALL sentences first, then play continuously
-                //           (no mid-utterance silence — recommended whenever
-                //           RTF > 1, which is the case on every Adreno 6xx).
-                //   false → drain sentence 1 the instant it's ready; later
-                //           sentences may not finish synthesizing in time and
-                //           you hear a gap before each one.
-                // Hard-coded "0" was the old default and is the source of the
-                // "huge silence gaps mid-output" complaint.
-                val prebufferTarget = if (_ttsSettings.value.prebufferAll)
-                    sentences.size  // never satisfies index < target → all sentences buffer
-                else
-                    0
-                var firstWav: com.adreno.seeandsay.runner.MMSTTSSession.Result? = null
+                // Adaptive prebuffer: synthesize ceil(RTF) sentences before
+                // starting playback so the playback runway stays ahead of
+                // synthesis. Short texts (fewer sentences than ceil(RTF))
+                // naturally prebuffer everything. Long texts start playing
+                // after the runway is built — up to 55% faster TTFS vs
+                // the old prebuffer-all approach.
+                val prebufferTarget = adaptivePrebufferTarget(sentences.size)
                 var lastRes: com.adreno.seeandsay.runner.MMSTTSSession.Result? = null
-                // Aggregate metrics across all sentences for the live perf panel.
                 var totalAudioSec = 0.0
                 var totalFwdSec = 0.0
                 var maxPeakMb: Int? = null
-                // Hold Results in order so we can drain them through the player
-                // after the pre-buffer window closes. PCM payloads live in
-                // memory (~80 KB per second of audio) so this is cheap.
                 val buffered = mutableListOf<com.adreno.seeandsay.runner.MMSTTSSession.Result>()
 
                 fun playOne(r: com.adreno.seeandsay.runner.MMSTTSSession.Result, idx: Int) {
@@ -751,12 +815,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 for ((index, sentence) in sentences.withIndex()) {
-                    // Surface per-sentence progress so the user knows the job
-                    // is alive during the multi-second synthesis windows.
                     _speak.value = SpeakFlow.Synthesizing(index + 1, sentences.size)
                     val target = File(audioDir, "speak_${index.toString().padStart(3, '0')}.wav")
                     val res = mmstts.speak(sentence, persistTo = target)
-                    if (firstWav == null) firstWav = res
+                    updateRtf(res)
                     lastRes = res
                     totalAudioSec += res.audioSec
                     totalFwdSec += res.fwdSec
@@ -764,17 +826,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     buffered.add(res)
 
                     if (index < prebufferTarget) {
-                        // Still pre-buffering. Don't enqueue yet.
+                        // Still pre-buffering.
                     } else if (index == prebufferTarget) {
-                        // First post-buffer sentence — drain everything we have.
                         for ((i, r) in buffered.withIndex()) playOne(r, i)
                     } else {
                         playOne(res, index)
                     }
                 }
 
-                // Edge case: sentences.size < prebufferTarget+1 meant we never
-                // hit the drain branch. Flush whatever we have now.
                 if (sentences.size <= prebufferTarget) {
                     for ((i, r) in buffered.withIndex()) playOne(r, i)
                 }
@@ -827,8 +886,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val t = text.trim()
         if (t.length <= maxChars) return t
         // Find the last sentence-ending punctuation within the cap window.
+        // Includes Ethiopic full stop ። (U+1362) and question mark ፧ (U+1367).
         val window = t.take(maxChars)
-        val lastBoundary = listOf('.', '!', '?', ';', '\n')
+        val lastBoundary = listOf('.', '!', '?', ';', '\n', '።', '፧')
             .map { window.lastIndexOf(it) }
             .max()
         return if (lastBoundary >= maxChars / 2) {

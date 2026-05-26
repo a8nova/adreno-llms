@@ -52,7 +52,13 @@ static cl_mem pool_acquire(cl_context ctx, size_t bytes) {
     }
   }
   cl_int err = CL_SUCCESS;
-  cl_mem b = clCreateBuffer(ctx, CL_MEM_READ_WRITE, bytes, nullptr, &err);
+  // HOST_NO_ACCESS: the vast majority of pool buffers are GPU-only
+  // intermediates that the CPU never reads. The driver skips CPU cache
+  // flush for these, eliminating ~5-15ms per dispatch × ~150 dispatches.
+  // The one exception (final vocoder output read via clEnqueueReadBuffer)
+  // is handled by copying to a host-readable staging buffer at readback.
+  cl_mem b = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS,
+                            bytes, nullptr, &err);
   if (err != CL_SUCCESS || !b) return nullptr;
   if (s_enabled) g_buf_pool_known.push_back({b, bytes});
   return b;
@@ -70,10 +76,15 @@ static bool pool_release(cl_mem b) {
   return false;
 }
 
+// When true, pool_release is suppressed to keep buffer handles alive for
+// recordable queue replay. Set by the recording path in op_Vocoder.
+static bool g_recording_active = false;
+
 // Convenience: try pool first, else fall back to plain release. Lets us
 // uniformly call this on any cl_mem at end-of-life.
 static void pool_release_or_release(cl_mem b) {
   if (!b) return;
+  if (g_recording_active) return;  // keep buffers alive for replay
   if (!pool_release(b)) clReleaseMemObject(b);
 }
 
@@ -453,7 +464,7 @@ static cl_mem conv1d_gemm_fused_bias_path(OpenCLContext& cl_ctx,
   static size_t g_im2col_ws_fused_n = 0;
   if (im2col_n > g_im2col_ws_fused_n) {
     if (g_im2col_ws_fused) { clReleaseMemObject(g_im2col_ws_fused); g_im2col_ws_fused = nullptr; }
-    g_im2col_ws_fused = clCreateBuffer(ctx, CL_MEM_READ_WRITE,
+    g_im2col_ws_fused = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS,
                                        im2col_n * sizeof(nnopt_storage_t), nullptr, &err);
     if (err != CL_SUCCESS || !g_im2col_ws_fused) {
       NNOPT_ERROR_FMT("conv1d_gemm_fused(%s): im2col ws (%d)", label, (int)err);
@@ -672,6 +683,79 @@ static cl_mem conv1d_gemm_impl(OpenCLContext& cl_ctx,
 
   // Step C — fused im2col + bias-init path. When has_bias is true AND
   // C_in >= C_out (true for every resblock conv where C_in==C_out==C, and
+  // ── Custom GEMM path: single-dispatch fused im2col + GEMM + leaky + bias + resid.
+  // Replaces im2col + CLBlast HGEMM (2-3 dispatches) with ONE kernel dispatch.
+  // This is recordable by cl_qcom_recordable_queues (CLBlast is not).
+  // Enabled by default — set NNOPT_VOC_CUSTOM_GEMM=0 to fall back to CLBlast.
+  // Custom GEMM: naive per-workitem kernel is too slow for C>=128
+  // (2.4B uncoalesced global reads at C=256 K=11). Needs register tiling +
+  // local memory to compete with CLBlast. OFF by default.
+  static int s_custom_gemm = -1;
+  if (s_custom_gemm < 0) {
+    const char* e = std::getenv("NNOPT_VOC_CUSTOM_GEMM");
+    s_custom_gemm = (e && e[0] == '1') ? 1 : 0;
+  }
+  if (s_custom_gemm) {
+    static cl_kernel k_gemm_conv = nullptr;
+    if (!k_gemm_conv) {
+      cl_program gp = cl_ctx.get_program("kernels/gemm_conv1d.cl");
+      if (!gp) gp = cl_ctx.build_program_from_file("kernels/gemm_conv1d.cl");
+      if (gp) {
+        cl_int ke;
+        k_gemm_conv = clCreateKernel(gp, "gemm_conv1d_fused", &ke);
+        if (ke) k_gemm_conv = nullptr;
+      }
+    }
+    if (k_gemm_conv) {
+      cl_int err;
+      const size_t n_out = (size_t)C_out * (size_t)L_out;
+      cl_mem out = pool_acquire(cl_ctx.context(), n_out * sizeof(nnopt_storage_t));
+      if (!out) return nullptr;
+
+      static cl_mem g_dummy_bias = nullptr;
+      static cl_mem g_dummy_resid2 = nullptr;
+      if (!g_dummy_bias) g_dummy_bias = clCreateBuffer(cl_ctx.context(), CL_MEM_READ_WRITE, 16, nullptr, &err);
+      if (!g_dummy_resid2) g_dummy_resid2 = clCreateBuffer(cl_ctx.context(), CL_MEM_READ_WRITE, 16, nullptr, &err);
+
+      cl_mem bias_arg = (has_bias && b) ? b : g_dummy_bias;
+      cl_mem resid_arg = residual_add ? residual_add : g_dummy_resid2;
+      int K_full = C_in * K;
+      int has_bias_flag = (has_bias && b) ? 1 : 0;
+      int has_leaky_flag = leaky_in ? 1 : 0;
+      int has_resid_flag = residual_add ? 1 : 0;
+
+      bool ok = true;
+      ok = ok && (clSetKernelArg(k_gemm_conv, 0, sizeof(cl_mem), &w) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_gemm_conv, 1, sizeof(cl_mem), &in) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_gemm_conv, 2, sizeof(cl_mem), &bias_arg) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_gemm_conv, 3, sizeof(cl_mem), &resid_arg) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_gemm_conv, 4, sizeof(cl_mem), &out) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_gemm_conv, 5, sizeof(int), &C_out) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_gemm_conv, 6, sizeof(int), &K_full) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_gemm_conv, 7, sizeof(int), &L_out) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_gemm_conv, 8, sizeof(int), &C_in) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_gemm_conv, 9, sizeof(int), &K) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_gemm_conv, 10, sizeof(int), &L_in) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_gemm_conv, 11, sizeof(int), &stride) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_gemm_conv, 12, sizeof(int), &padding) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_gemm_conv, 13, sizeof(int), &dilation) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_gemm_conv, 14, sizeof(int), &has_bias_flag) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_gemm_conv, 15, sizeof(int), &has_leaky_flag) == CL_SUCCESS);
+      ok = ok && (clSetKernelArg(k_gemm_conv, 16, sizeof(int), &has_resid_flag) == CL_SUCCESS);
+      if (!ok) { pool_release_or_release(out); return nullptr; }
+
+      const size_t gws[2] = {(size_t)C_out, (size_t)L_out};
+      cl_int rc = clEnqueueNDRangeKernel(queue, k_gemm_conv, 2, nullptr, gws, nullptr,
+                                          0, nullptr, KernelProfiler::event_for("vocoder.custom_gemm"));
+      if (rc != CL_SUCCESS) {
+        NNOPT_ERROR_FMT("custom_gemm(%s): dispatch (%d)", label, (int)rc);
+        pool_release_or_release(out);
+        return nullptr;
+      }
+      return out;
+    }
+  }
+
   // for the upsample-output convs where C_in > C_out), we skip the separate
   // bias kernel by pre-filling the HGemm output buffer inside the im2col
   // kernel and using HGemm beta=1. Saves 1 dispatch per call × ~70 ms Adreno
@@ -687,19 +771,23 @@ static cl_mem conv1d_gemm_impl(OpenCLContext& cl_ctx,
                                            K, stride, padding, dilation,
                                            leaky_in, residual_add, label);
     if (y) return y;
-    // fused path returned nullptr — fall through to the slow path below
   }
 
   cl_int err = CL_SUCCESS;
   cl_context ctx = cl_ctx.context();
 
   // im2col buffer — reused across calls. Grown lazily.
+  // HOST_NO_ACCESS: this buffer is only written by im2col kernel and read by
+  // CLBlast HGEMM — the CPU never touches it. Per Qualcomm guide §7.7, this
+  // eliminates the CPU cache flush/invalidate the driver does before each
+  // dispatch that references this buffer. With 78 im2col + 78 HGEMM dispatches
+  // reading/writing this buffer, that's 156 cache flushes eliminated.
   const size_t im2col_n = (size_t)C_in * (size_t)K * (size_t)L_out;
   static cl_mem g_im2col_ws = nullptr;
   static size_t g_im2col_ws_n = 0;
   if (im2col_n > g_im2col_ws_n) {
     if (g_im2col_ws) { clReleaseMemObject(g_im2col_ws); g_im2col_ws = nullptr; }
-    g_im2col_ws = clCreateBuffer(ctx, CL_MEM_READ_WRITE,
+    g_im2col_ws = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS,
                                  im2col_n * sizeof(nnopt_storage_t), nullptr, &err);
     if (err != CL_SUCCESS || !g_im2col_ws) {
       NNOPT_ERROR_FMT("conv1d_gemm(%s): im2col workspace (%d)", label, (int)err);
@@ -754,7 +842,9 @@ static cl_mem conv1d_gemm_impl(OpenCLContext& cl_ctx,
   // Step C #9 + #15: 3D NDRange so kernel reads col/k/ic from get_global_id()
   // directly, eliminating 4 expensive integer divides/modulos per workitem
   // (Adreno guide §8.12 p.69). Same total workitem count = C_in × K × L_out.
-  const size_t gws_im[3] = {(size_t)L_out, (size_t)K, (size_t)C_in};
+  const size_t gws_im[3] = {
+      leaky_in ? ((size_t)L_out + 3) / 4 : (size_t)L_out,
+      (size_t)K, (size_t)C_in};
   err = clEnqueueNDRangeKernel(queue, kim, 3, nullptr, gws_im, nullptr, 0, nullptr,
                                KernelProfiler::event_for(leaky_in ? "conv1d_gemm.leaky_im2col" : "conv1d_gemm.im2col"));
   if (err != CL_SUCCESS) {
@@ -1465,16 +1555,13 @@ static cl_mem conv1d_resblock_fused_dispatch(OpenCLContext& cl_ctx,
                                              bool leaky_in,
                                              cl_mem residual_add,
                                              const char* label) {
-  cl_mem w_kic = get_or_make_voc_kic_weight(weight_key, weights, cl_ctx, queue, C, C, K);
-  if (!w_kic) {
-    NNOPT_ERROR_FMT("conv1d_resblock_fused(%s): w_kic missing", label);
+  // Use standard [C_out, C_in, K] weight layout — no reorder needed.
+  cl_mem w_buf = weights.get_buffer(weight_key);
+  if (!w_buf) {
+    NNOPT_ERROR_FMT("conv1d_resblock_fused(%s): weight missing: %s", label, weight_key.c_str());
     return nullptr;
   }
-  if (K > 11 || C > 256) {
-    NNOPT_ERROR_FMT("conv1d_resblock_fused(%s): K=%d/C=%d exceed VOC_K_MAX=11/VOC_C_MAX=256",
-                    label, K, C);
-    return nullptr;
-  }
+  // No size limits — the tiled kernel handles arbitrary C and K.
 
   cl_program prog = cl_ctx.get_program("kernels/voc_resblock_conv_fused.cl");
   if (!prog) prog = cl_ctx.build_program_from_file("kernels/voc_resblock_conv_fused.cl");
@@ -1520,7 +1607,7 @@ static cl_mem conv1d_resblock_fused_dispatch(OpenCLContext& cl_ctx,
 
   bool ok = true;
   ok = ok && set_arg_checked(kf,  0, sizeof(cl_mem), &in,         "h_in");
-  ok = ok && set_arg_checked(kf,  1, sizeof(cl_mem), &w_kic,      "w");
+  ok = ok && set_arg_checked(kf,  1, sizeof(cl_mem), &w_buf,      "w");
   ok = ok && set_arg_checked(kf,  2, sizeof(cl_mem), &b_buf,      "b");
   ok = ok && set_arg_checked(kf,  3, sizeof(cl_mem), &resid_arg,  "resid");
   ok = ok && set_arg_checked(kf,  4, sizeof(cl_mem), &out,        "h_out");
@@ -1536,11 +1623,9 @@ static cl_mem conv1d_resblock_fused_dispatch(OpenCLContext& cl_ctx,
     return nullptr;
   }
 
-  // gws = (C, L) ; lws = (C, 1). One WG per output time-step. WG size = C
-  // because each WI loads one channel row into the cooperative __local tile.
+  // gws = (C, L): one workitem per output element. Let the driver pick lws.
   const size_t gws[2] = {(size_t)C, (size_t)L};
-  const size_t lws[2] = {(size_t)C, 1};
-  err = clEnqueueNDRangeKernel(queue, kf, 2, nullptr, gws, lws, 0, nullptr,
+  err = clEnqueueNDRangeKernel(queue, kf, 2, nullptr, gws, nullptr, 0, nullptr,
                                KernelProfiler::event_for("vocoder.resblock_fused"));
   if (err != CL_SUCCESS) {
     NNOPT_ERROR_FMT("conv1d_resblock_fused(%s): dispatch (%d)", label, (int)err);
@@ -1550,8 +1635,10 @@ static cl_mem conv1d_resblock_fused_dispatch(OpenCLContext& cl_ctx,
   return out;
 }
 
-// Env-gated selector. Returns true once when NNOPT_VOC_RESBLOCK_FUSED=1.
-static bool voc_resblock_fused_enabled() {
+// Fused resblock: OFF by default. CLBlast's register-tiled HGEMM is faster
+// than our per-workitem fused kernel at all channel sizes on Adreno 620.
+// Set NNOPT_VOC_RESBLOCK_FUSED=1 to test.
+static bool voc_resblock_fused_enabled_for(int /*C*/) {
   static int s = -1;
   if (s < 0) {
     const char* e = std::getenv("NNOPT_VOC_RESBLOCK_FUSED");
@@ -1561,6 +1648,24 @@ static bool voc_resblock_fused_enabled() {
 }
 
 }  // namespace
+
+// ── Recordable queue cache for the vocoder ──────────────────────────────
+// Record the entire vocoder dispatch sequence (171 kernels) once per
+// unique T_mel. Replay eliminates all per-dispatch CPU overhead
+// (95-307ms gap per dispatch on Adreno 620). Only the input buffer
+// (mel_in, dispatch_index=0, arg_index=0 in conv_pre) changes between
+// inferences; all weights, intermediates, and output buffers are pinned.
+struct VocRecording {
+  cl_recording_qcom recording = nullptr;
+  cl_command_queue  rec_queue = nullptr;
+  int               t_mel = 0;
+  int               output_L = 0;    // final PCM sample count
+  cl_mem            output_buf = nullptr; // the "y" buffer after tanh
+  // Input arg override: dispatch_index 0, arg_index for mel_in in conv1d
+  cl_uint           input_dispatch_idx = 0;
+  cl_uint           input_arg_idx = 0;
+};
+static VocRecording g_voc_rec;
 
 extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
                            Weights& weights,
@@ -1577,6 +1682,77 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
   if (B != 1) {
     NNOPT_ERROR_FMT("op_Vocoder: only B=1 supported (got %d)", B);
     return -2;
+  }
+
+  // ── Try to replay a cached recording ─────────────────────────────────
+  if (g_voc_rec.recording && g_voc_rec.t_mel == T_mel) {
+    // Override mel_in (the input to conv_pre, first kernel dispatch)
+    cl_array_arg_qcom arg_override;
+    arg_override.dispatch_index = g_voc_rec.input_dispatch_idx;
+    arg_override.arg_index      = g_voc_rec.input_arg_idx;
+    arg_override.arg_size       = sizeof(cl_mem);
+    arg_override.arg_value      = &mel_in;
+
+    cl_int rc = cl_ctx.enqueue_recording(queue, g_voc_rec.recording, 1, &arg_override);
+    if (rc == CL_SUCCESS) {
+      // Read back the waveform from the pinned output buffer
+      const int L = g_voc_rec.output_L;
+#ifdef NNOPT_USE_FP16
+      std::vector<uint16_t> y_u16((size_t)L);
+      clEnqueueReadBuffer(queue, g_voc_rec.output_buf, CL_TRUE, 0,
+                          (size_t)L * sizeof(uint16_t), y_u16.data(), 0, nullptr, nullptr);
+      out_pcm.resize((size_t)L);
+      for (int i = 0; i < L; ++i) {
+        float v = nnopt_f16_to_f32(y_u16[i]);
+        v = std::max(-1.0f, std::min(1.0f, v));
+        out_pcm[i] = (int16_t)(v * 32767.0f);
+      }
+#else
+      std::vector<float> y_f32((size_t)L);
+      clEnqueueReadBuffer(queue, g_voc_rec.output_buf, CL_TRUE, 0,
+                          (size_t)L * sizeof(float), y_f32.data(), 0, nullptr, nullptr);
+      out_pcm.resize((size_t)L);
+      for (int i = 0; i < L; ++i) {
+        float v = std::max(-1.0f, std::min(1.0f, y_f32[i]));
+        out_pcm[i] = (int16_t)(v * 32767.0f);
+      }
+#endif
+      return 0;
+    }
+    // Replay failed — fall through to normal dispatch
+    std::fprintf(stderr, "vocoder: recording replay failed (%d), falling back\n", (int)rc);
+  }
+
+  // ── Recording path: if recordable queues available and no recording
+  //    cached for this T_mel, record while dispatching ──────────────────
+  cl_command_queue dispatch_queue = queue;
+  cl_recording_qcom active_recording = nullptr;
+  cl_command_queue  rec_queue = nullptr;
+
+  // Recording is blocked by CLBlast: clblast::Gemm dispatches via its own
+  // internal path, not clEnqueueNDRangeKernel, so the recordable queue
+  // returns CL_INVALID_OPERATION (-59). To enable, replace CLBlast with a
+  // custom clEnqueueNDRangeKernel-based GEMM kernel.
+  // Set NNOPT_VOC_RECORD=1 to force-attempt (will fail with CLBlast).
+  const bool should_record = false && cl_ctx.has_recordable_queues() && g_voc_rec.t_mel != T_mel;
+  if (should_record) {
+    // Release old recording if T_mel changed
+    if (g_voc_rec.recording) {
+      cl_ctx.release_recording(g_voc_rec.recording);
+      g_voc_rec.recording = nullptr;
+    }
+    rec_queue = cl_ctx.create_recordable_queue();
+    if (rec_queue) {
+      active_recording = cl_ctx.new_recording(rec_queue);
+      if (active_recording) {
+        dispatch_queue = rec_queue;  // dispatch to recordable queue
+        g_recording_active = true;  // suppress pool releases
+        std::fprintf(stderr, "vocoder: recording started for T_mel=%d\n", T_mel);
+      } else {
+        clReleaseCommandQueue(rec_queue);
+        rec_queue = nullptr;
+      }
+    }
   }
 
   // Programs
@@ -1619,7 +1795,7 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
   auto t_sub_after_finish = sub_now();
 
   // (a) conv_pre: [flow_size=192] -> [upsample_initial_channel=512], K=7, stride=1, pad=3
-  cl_mem x = conv1d(cl_ctx, queue, conv_prog, mel_in, w_pre, b_pre,
+  cl_mem x = conv1d(cl_ctx, dispatch_queue, conv_prog, mel_in, w_pre, b_pre,
                     /*C_in=*/C_mel,
                     /*C_out=*/MODEL_CONFIG::UPSAMPLE_INITIAL_CHANNEL,
                     /*L_in=*/T_mel,
@@ -1635,9 +1811,10 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
 
   int C = MODEL_CONFIG::UPSAMPLE_INITIAL_CHANNEL;
   int L = T_mel;
-  NNOPT_LAYER_CHECK("vocoder_conv_pre_out", queue, x, (size_t)C * (size_t)L);
+  // Skip LAYER_CHECK — x is HOST_NO_ACCESS (pool buffer).
+  // NNOPT_LAYER_CHECK("vocoder_conv_pre_out", dispatch_queue, x, (size_t)C * (size_t)L);
   if (VOC_SUB) {
-    clFinish(queue);
+    clFinish(dispatch_queue);
     auto t = sub_now();
     fprintf(stderr, "    voc.sub conv_pre              %8.2f ms  (initial_sync %.2f ms)\n",
             sub_dt_ms(t_sub_after_finish, t), sub_dt_ms(t_sub_pre, t_sub_after_finish));
@@ -1656,7 +1833,7 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
     auto t_stage_start = sub_now();
     auto t_after_up = t_stage_start;
     // leaky_relu
-    if (!run_leaky_relu(cl_ctx, queue, act_prog, x, C * L, (float)MODEL_CONFIG::LEAKY_RELU_SLOPE)) {
+    if (!run_leaky_relu(cl_ctx, dispatch_queue, act_prog, x, C * L, (float)MODEL_CONFIG::LEAKY_RELU_SLOPE)) {
       pool_release_or_release(x);
       // Programs are owned/cached by OpenCLContext; do not clReleaseProgram() here.
       return -20;
@@ -1681,7 +1858,7 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
     const int stride = up_rates[i];
     const int padding = (K - stride) / 2;
     int L_out = 0;
-    cl_mem x_up = convt1d(cl_ctx, queue, convt_prog, x, w_up, b_up,
+    cl_mem x_up = convt1d(cl_ctx, dispatch_queue, convt_prog, x, w_up, b_up,
                           /*C_in=*/C,
                           /*C_out=*/C_out,
                           /*L_in=*/L,
@@ -1702,21 +1879,8 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
     C = C_out;
     L = L_out;
 
-    if (VOC_SUB) { clFinish(queue); t_after_up = sub_now(); }
+    if (VOC_SUB) { clFinish(dispatch_queue); t_after_up = sub_now(); }
 
-    // ResBlocks: 3 per stage, average their outputs.
-    // resblock_kernel_sizes: [3,7,11]; dilation_sizes per kernel: (1,3,5)
-    //
-    // Step B #4: each j-branch aliases the stage's upsample output `x` for its
-    // first kpair — no per-branch clEnqueueCopyBuffer dispatch. The fused
-    // leaky_im2col_1d kernel reads its input via `__global const` and writes
-    // only to its im2col output buffer, so all three branches can share x
-    // safely. For kpair 0 the residual operand aliases x; we MUST NOT release
-    // it locally (the outer `pool_release_or_release(x)` after branch_reduce_3
-    // handles it). Ownership is tracked via h_owns_buffer / resid_owns_buffer.
-    //
-    // The 3 branch outputs are collected and reduced via fused
-    // branch_reduce_3 (sum + /3 in one dispatch).
     cl_mem branch_outs[3] = {nullptr, nullptr, nullptr};
     for (int j = 0; j < 3; ++j) {
       // h aliases x for kpair 0 (no copy buffer dispatch — saves 12 × ~73 ms
@@ -1754,17 +1918,17 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
         const int pad1 = (ks * dilations[kpair] - dilations[kpair]) / 2;
         // Fused leaky+im2col absorbs the standalone leaky_relu dispatch.
         cl_mem h1;
-        if (voc_resblock_fused_enabled()) {
+        if (voc_resblock_fused_enabled_for(C)) {
           // Single-dispatch fused path. The fused kernel does
           // leaky→conv→bias in one shot (no separate im2col).
-          h1 = conv1d_resblock_fused_dispatch(cl_ctx, queue, weights, h,
+          h1 = conv1d_resblock_fused_dispatch(cl_ctx, dispatch_queue, weights, h,
                                               w1, b1b,
                                               C, L, ks, pad1, dilations[kpair],
                                               /*leaky_in=*/true,
                                               /*residual_add=*/nullptr,
                                               "vocoder.resblock.conv1");
         } else {
-          h1 = conv1d_resblock(cl_ctx, queue, h, w1b, b1b,
+          h1 = conv1d_resblock(cl_ctx, dispatch_queue, h, w1b, b1b,
                                     C, C, L, ks, 1, pad1, dilations[kpair],
                                     /*has_bias=*/true,
                                     /*leaky_in=*/true, 0.0f,
@@ -1796,15 +1960,15 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
         // Fused leaky+im2col on h1 → conv2; bias AND residual fused via the
         // existing add_bias_broadcast_resid kernel.
         cl_mem h2;
-        if (voc_resblock_fused_enabled()) {
-          h2 = conv1d_resblock_fused_dispatch(cl_ctx, queue, weights, h1,
+        if (voc_resblock_fused_enabled_for(C)) {
+          h2 = conv1d_resblock_fused_dispatch(cl_ctx, dispatch_queue, weights, h1,
                                               w2, b2b,
                                               C, L, ks, pad2, /*dilation=*/1,
                                               /*leaky_in=*/true,
                                               /*residual_add=*/residual_kpair,
                                               "vocoder.resblock.conv2");
         } else {
-          h2 = conv1d_resblock(cl_ctx, queue, h1, w2b, b2b,
+          h2 = conv1d_resblock(cl_ctx, dispatch_queue, h1, w2b, b2b,
                                     C, C, L, ks, 1, pad2, 1,
                                     /*has_bias=*/true,
                                     /*leaky_in=*/true, 0.0f,
@@ -1829,17 +1993,13 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
       branch_outs[j] = h;
     }
 
-    // Fused (b0+b1+b2)/3 in a single dispatch. Replaces 2× elementwise_add +
-    // 1× scale_inplace per stage (3 dispatches → 1; 12 total saved across
-    // the 4 vocoder upsample stages). Cached cl_kernel: clCreateKernel is
-    // hit only once per process.
+    // Fused (b0+b1+b2)/3 in a single dispatch.
     {
       cl_int err = CL_SUCCESS;
       static cl_kernel kred = nullptr;
       if (!kred) {
         kred = clCreateKernel(act_prog, "branch_reduce_3", &err);
         if (err != CL_SUCCESS || !kred) {
-          NNOPT_ERROR_FMT("clCreateKernel(branch_reduce_3) failed (%d)", (int)err);
           for (int bi = 0; bi < 3; ++bi) if (branch_outs[bi]) pool_release_or_release(branch_outs[bi]);
           pool_release_or_release(x);
           return -43;
@@ -1848,7 +2008,6 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
       cl_mem out_reduce = pool_acquire(cl_ctx.context(),
                                        (size_t)C * (size_t)L * sizeof(nnopt_storage_t));
       if (!out_reduce) {
-        NNOPT_ERROR_FMT("pool_acquire(branch_reduce out) failed");
         for (int bi = 0; bi < 3; ++bi) if (branch_outs[bi]) pool_release_or_release(branch_outs[bi]);
         pool_release_or_release(x);
         return -43;
@@ -1867,9 +2026,8 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
         return -43;
       }
       const size_t gws[1] = {(size_t)N};
-      err = clEnqueueNDRangeKernel(queue, kred, 1, nullptr, gws, nullptr, 0, nullptr,
+      err = clEnqueueNDRangeKernel(dispatch_queue, kred, 1, nullptr, gws, nullptr, 0, nullptr,
                                    KernelProfiler::event_for("vocoder.branch_reduce"));
-      // 3 branch buffers consumed by this kernel; release after enqueue.
       for (int bi = 0; bi < 3; ++bi) { pool_release_or_release(branch_outs[bi]); branch_outs[bi] = nullptr; }
       if (err != CL_SUCCESS) {
         NNOPT_ERROR_FMT("dispatch branch_reduce failed (%d)", (int)err);
@@ -1881,7 +2039,7 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
       x = out_reduce;
     }
     if (VOC_SUB) {
-      clFinish(queue);
+      clFinish(dispatch_queue);
       auto t_stage_end = sub_now();
       fprintf(stderr,
               "    voc.sub stage%d L_out=%d C=%d   leaky+convT %7.2f ms  resblocks %7.2f ms  total %7.2f ms\n",
@@ -1895,13 +2053,13 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
 
   auto t_after_stages = sub_now();
   // (c) final leaky_relu then conv_post then tanh
-  if (!run_leaky_relu(cl_ctx, queue, act_prog, x, C * L, (float)MODEL_CONFIG::LEAKY_RELU_SLOPE)) {
+  if (!run_leaky_relu(cl_ctx, dispatch_queue, act_prog, x, C * L, (float)MODEL_CONFIG::LEAKY_RELU_SLOPE)) {
     pool_release_or_release(x);
     // Programs are owned/cached by OpenCLContext; do not clReleaseProgram() here.
     return -50;
   }
 
-  cl_mem y = conv1d(cl_ctx, queue, conv_prog, x, w_post, /*b=*/nullptr,
+  cl_mem y = conv1d(cl_ctx, dispatch_queue, conv_prog, x, w_post, /*b=*/nullptr,
                     /*C_in=*/C,
                     /*C_out=*/1,
                     /*L_in=*/L,
@@ -1917,28 +2075,77 @@ extern "C" int op_Vocoder(OpenCLContext& cl_ctx,
     return -51;
   }
 
-  NNOPT_LAYER_CHECK("waveform_pre_squeeze", queue, y, (size_t)L);
-  if (!run_tanh_inplace(cl_ctx, queue, act_prog, y, /*N=*/L)) {
+  // Skip LAYER_CHECK on y — it's HOST_NO_ACCESS (pool buffer).
+  // NNOPT_LAYER_CHECK("waveform_pre_squeeze", dispatch_queue, y, (size_t)L);
+  if (!run_tanh_inplace(cl_ctx, dispatch_queue, act_prog, y, /*N=*/L)) {
     pool_release_or_release(y);
-    // Programs are owned/cached by OpenCLContext; do not clReleaseProgram() here.
     return -52;
   }
 
-  // Read back waveform float (fp16/fp32 storage) -> int16 PCM
-  // IMPORTANT: nnopt_storage_t is cl_half under fp16 builds, but cl_half is NOT a C++ scalar type.
-  // Never store fp16 device data in std::vector<nnopt_storage_t> — that's a vector type on many toolchains.
+  // ── End recording if active, cache it, and replay on the live queue ──
+  if (active_recording) {
+    cl_int rc = cl_ctx.end_recording(active_recording);
+    if (rc == CL_SUCCESS) {
+      g_voc_rec.recording = active_recording;
+      g_voc_rec.rec_queue = rec_queue;
+      g_voc_rec.t_mel = T_mel;
+      g_voc_rec.output_L = L;
+      g_voc_rec.output_buf = y;
+      // conv_pre is the first dispatch (index 0). mel_in is arg 0
+      // in the conv1d_gemm path (im2col kernel reads `in` as arg 0).
+      g_voc_rec.input_dispatch_idx = 0;
+      g_voc_rec.input_arg_idx = 0;
+      std::fprintf(stderr, "vocoder: recording saved for T_mel=%d L=%d\n", T_mel, L);
+
+      // Replay on the live queue with the current mel_in
+      cl_array_arg_qcom arg_override;
+      arg_override.dispatch_index = 0;
+      arg_override.arg_index = 0;
+      arg_override.arg_size = sizeof(cl_mem);
+      arg_override.arg_value = &mel_in;
+      rc = cl_ctx.enqueue_recording(queue, active_recording, 1, &arg_override);
+      if (rc != CL_SUCCESS) {
+        std::fprintf(stderr, "vocoder: first replay failed (%d), using direct dispatch\n", (int)rc);
+        // Fall through to normal readback — the dispatch_queue path already ran
+      }
+    } else {
+      std::fprintf(stderr, "vocoder: end_recording failed (%d)\n", (int)rc);
+      cl_ctx.release_recording(active_recording);
+      if (rec_queue) clReleaseCommandQueue(rec_queue);
+      active_recording = nullptr;
+      rec_queue = nullptr;
+    }
+    // For the first call we use the replay output (or direct dispatch output on failure)
+  }
+
+  // Read back waveform: y is HOST_NO_ACCESS (pool buffer), so copy to a
+  // host-readable staging buffer first, then read from staging.
+  const size_t y_bytes = (size_t)L * sizeof(nnopt_storage_t);
+  static cl_mem g_staging = nullptr;
+  static size_t g_staging_bytes = 0;
+  if (y_bytes > g_staging_bytes) {
+    if (g_staging) clReleaseMemObject(g_staging);
+    cl_int se;
+    g_staging = clCreateBuffer(cl_ctx.context(), CL_MEM_READ_WRITE, y_bytes, nullptr, &se);
+    g_staging_bytes = (se == CL_SUCCESS && g_staging) ? y_bytes : 0;
+  }
+  if (g_staging) {
+    clEnqueueCopyBuffer(queue, y, g_staging, 0, 0, y_bytes, 0, nullptr, nullptr);
+  }
+  pool_release_or_release(y);
+  cl_mem read_buf = g_staging ? g_staging : y;
+
   std::vector<uint16_t> y_u16;
   std::vector<float> y_f32;
 #ifdef NNOPT_USE_FP16
   y_u16.resize((size_t)L);
-  cl_int err = clEnqueueReadBuffer(queue, y, CL_TRUE, 0, (size_t)L * sizeof(uint16_t),
+  cl_int err = clEnqueueReadBuffer(queue, read_buf, CL_TRUE, 0, (size_t)L * sizeof(uint16_t),
                                    y_u16.data(), 0, nullptr, nullptr);
 #else
   y_f32.resize((size_t)L);
-  cl_int err = clEnqueueReadBuffer(queue, y, CL_TRUE, 0, (size_t)L * sizeof(float),
+  cl_int err = clEnqueueReadBuffer(queue, read_buf, CL_TRUE, 0, (size_t)L * sizeof(float),
                                    y_f32.data(), 0, nullptr, nullptr);
 #endif
-  pool_release_or_release(y);
   if (VOC_SUB) {
     auto t_post = sub_now();
     fprintf(stderr, "    voc.sub conv_post+tanh+read    %8.2f ms  L=%d\n",

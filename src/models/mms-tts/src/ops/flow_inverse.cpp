@@ -434,9 +434,10 @@ static bool coupling_inverse_stage_gpu(OpenCLContext& cl_ctx,
     return false;
   }
   {
-    std::vector<uint8_t> zeros((size_t)kFlowChannels * T * sizeof(nnopt_storage_t), 0);
-    if (clEnqueueWriteBuffer(queue, skip_sum, CL_TRUE, 0, zeros.size(), zeros.data(),
-                             0, nullptr, nullptr) != CL_SUCCESS) {
+    const nnopt_storage_t zero_pattern = 0;
+    if (clEnqueueFillBuffer(queue, skip_sum, &zero_pattern, sizeof(zero_pattern),
+                            0, (size_t)kFlowChannels * T * sizeof(nnopt_storage_t),
+                            0, nullptr, nullptr) != CL_SUCCESS) {
       clReleaseMemObject(h); clReleaseMemObject(y_a); clReleaseMemObject(y_b);
       clReleaseMemObject(skip_sum);
       return false;
@@ -458,7 +459,7 @@ static bool coupling_inverse_stage_gpu(OpenCLContext& cl_ctx,
   static int s_wn_fused = -1;
   if (s_wn_fused < 0) {
     const char* e = std::getenv("NNOPT_FLOW_WN_FUSED");
-    s_wn_fused = (e && e[0] == '1') ? 1 : 0;
+    s_wn_fused = (e && e[0] == '0') ? 0 : 1;
   }
 
   // Allocate the ping-pong h buffer up front when fused path is on.
@@ -744,15 +745,16 @@ extern "C" cl_mem op_FlowInverse(OpenCLContext& cl_ctx,
     return nullptr;
   }
 
-  // Default to HOST path: on Adreno 620 the GPU path has ~200 small kernel
-  // dispatches at ~50ms each (driver overhead dominates), while the host
-  // path's parallel-loop conv runs in ~0.75s for T=110 and ~5s for T=587.
-  // GPU only wins for very long T_frames (compute exceeds 10s) — set
-  // NNOPT_FLOW_GPU=1 for that case.
+  // Default to GPU path with fused WaveNet kernels. The old host fallback
+  // did all conv1d on the CPU (~21s for T=587). The GPU+fused path cuts
+  // the WaveNet inner loop from ~200 dispatches to ~52, and the actual
+  // kernel runtime is ~0.5s — the remaining wall time is per-dispatch
+  // driver overhead (~50ms × 52 ≈ 2.6s). Net: ~3-4s vs ~21s.
+  // Set NNOPT_FLOW_HOST=1 to force the old CPU path.
   static int s_host_path = -1;
   if (s_host_path < 0) {
-    const char* env = std::getenv("NNOPT_FLOW_GPU");
-    s_host_path = (env && env[0] == '1') ? 0 : 1;
+    const char* env = std::getenv("NNOPT_FLOW_HOST");
+    s_host_path = (env && env[0] == '1') ? 1 : 0;
   }
   if (s_host_path) {
     // Host-side fallback (slow but correctness-preserved).

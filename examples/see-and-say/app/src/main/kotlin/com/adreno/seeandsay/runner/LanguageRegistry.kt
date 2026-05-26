@@ -46,7 +46,6 @@ class LanguageRegistry(private val context: Context) {
         val status: Status,
     ) {
         sealed interface Status {
-            data object Bundled : Status
             data object Installed : Status
             data object Available : Status
             data class Downloading(val bytesDone: Long, val bytesTotal: Long) : Status {
@@ -99,18 +98,22 @@ class LanguageRegistry(private val context: Context) {
             }
         }
 
-        // Inject bundled defaults if not in registry.
         val byCode = available.associateBy { it.code }.toMutableMap()
-        for ((code, name, native) in BUNDLED) {
-            byCode[code] = LangEntry(
-                code = code, name = name, nativeName = native,
-                script = "", sizeBytes = 0L, status = LangEntry.Status.Bundled,
-            )
+
+        // Seed with suggested defaults so there's something to show even
+        // without a network fetch on first launch.
+        for ((code, name, native) in SUGGESTED_DEFAULTS) {
+            if (code !in byCode) {
+                byCode[code] = LangEntry(
+                    code = code, name = name, nativeName = native,
+                    script = "", sizeBytes = 75L * 1024 * 1024,
+                    status = LangEntry.Status.Available,
+                )
+            }
         }
 
-        // Promote any extracted-on-disk lang to Installed.
+        // Mark any on-disk lang as Installed.
         for ((code, e) in byCode) {
-            if (e.status == LangEntry.Status.Bundled) continue
             if (isOnDisk(code)) {
                 byCode[code] = e.copy(status = LangEntry.Status.Installed)
             }
@@ -182,7 +185,7 @@ class LanguageRegistry(private val context: Context) {
         // Skip if already on-disk to avoid clobbering during an accidental
         // double-tap.
         val current = _entries.value.firstOrNull { it.code == code }
-        if (current?.status == LangEntry.Status.Installed || current?.status == LangEntry.Status.Bundled) {
+        if (current?.status == LangEntry.Status.Installed) {
             return@withContext
         }
         val totalGuess = current?.sizeBytes ?: (75L * 1024 * 1024)
@@ -282,20 +285,41 @@ class LanguageRegistry(private val context: Context) {
 
     fun shutdown() { scope.cancel() }
 
-    /** Snapshot of installed-or-bundled codes only — fed into the Settings radio list. */
+    fun uninstall(code: String) {
+        File(mmsttsDir, "weights/$code").deleteRecursively()
+        File(mmsttsDir, "assets/$code").deleteRecursively()
+        updateOne(code) { it.copy(status = LangEntry.Status.Available) }
+    }
+
+    fun wipeAll() {
+        val installed = _entries.value.filter { it.status == LangEntry.Status.Installed }
+        for (e in installed) {
+            File(mmsttsDir, "weights/${e.code}").deleteRecursively()
+            File(mmsttsDir, "assets/${e.code}").deleteRecursively()
+        }
+        _entries.update { list ->
+            list.map {
+                if (it.status == LangEntry.Status.Installed)
+                    it.copy(status = LangEntry.Status.Available)
+                else it
+            }
+        }
+    }
+
+    /** Snapshot of installed codes only — fed into the Settings radio list. */
     fun installedCodes(): List<LangEntry> = _entries.value.filter {
-        it.status == LangEntry.Status.Installed || it.status == LangEntry.Status.Bundled
+        it.status == LangEntry.Status.Installed
     }
 
     companion object {
         private const val TAG = "LanguageRegistry"
         private const val HF_REPO = "a8nova/adreno-llms-weights"
 
-        // Bundled-in-APK languages (extracted by AssetExtractor). Keep this
-        // list in sync with what prepare_assets.sh actually ships.
-        private val BUNDLED = listOf(
+        // Suggested defaults shown when the registry hasn't been fetched yet.
+        private val SUGGESTED_DEFAULTS = listOf(
             Triple("eng", "English",  "English"),
             Triple("amh", "Amharic",  "አማርኛ"),
+            Triple("ara", "Arabic",   "العربية"),
         )
     }
 }
