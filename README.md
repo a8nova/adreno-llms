@@ -8,31 +8,42 @@
 https://github.com/user-attachments/assets/c5723e58-6bc7-4fbc-921b-59388e26f2c9
 
 
-## ✨ New: beyond text-only LLMs
-
-Two new ports extend the repo past plain decoder-only LMs:
-
-- **[MMS-TTS](src/models/mms-tts/)** — Facebook's VITS-based text-to-speech, end-to-end on-device. 36M params, **RTF 1.3** (long text), 686 MB peak memory. Verified on **English** and **Amharic** on the Razr 2020; the same binary handles any of the ~1100 MMS languages (per-language weights + vocab swap, non-Latin scripts go through uroman). Full graph — text encoder → stochastic duration predictor → residual coupling flow → HiFi-GAN vocoder — runs in C++/OpenCL with per-op cosine ≥ 0.996 vs the HuggingFace reference.
-- **[SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/)** — HuggingFace's smallest vision-language model (SigLIP vision tower → projector → 135M LLaMA-style LM with GQA). **10.20** decode tok/s, 14.0 s TTFT, 1227 MB peak memory.
-
 ## 📊 Models
 
-All ports run on the **Motorola Razr 2020** (Snapdragon 765G / **Adreno 620**, 3.9 GB GPU global memory). Decode tok/s = warm 3-run median, greedy (`--temperature 0`), 32-token generation unless noted. Peak CPU mem = highest `peak_cpu_memory_mb` reading across the run — the actual host-process working set during inference (weights + KV cache + activations + driver overhead). Measured 2026-05-18.
+All ports run on the **Motorola Razr 2020** (Snapdragon 765G / **Adreno 620**, 3.9 GB GPU global memory). Peak CPU mem = highest `peak_cpu_memory_mb` reading across the run — the actual host-process working set during inference (weights + KV cache + activations + driver overhead).
+
+### Language models
+
+Decode tok/s = warm 3-run median, greedy (`--temperature 0`), 32-token generation. Measured 2026-05-18.
 
 | Model | Precision | Params | Architecture | Decode tok/s | TTFT (s) | Peak CPU mem (MB) | Notes |
 |---|:-:|---:|---|---:|---:|---:|---|
-| [MMS-TTS](src/models/mms-tts/) | fp16 | 36M | VITS (enc + flow + HiFi-GAN) | — | — | 686 | Text-to-speech; RTF 1.3; ~1100 languages |
 | [Mamba2-130M](src/models/mamba2-130m/) | fp16 | 130M | SSD | **24.26** | 1.61 | 946 | State-space duality |
 | [Mamba-130M](src/models/mamba-130m/) | fp16 | 130M | SSM | 21.52 | 1.62 | 686 | No attention |
 | [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | fp16 | 135M | LLaMA + GQA | **24.40** | 1.67 | 923 | Instruct-tuned; 61% of ceiling |
 | [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | **int8** | 135M | LLaMA + GQA | 24.21 | **0.91** | **670** | Per-row symmetric int8; −27% memory at tied tok/s |
-| [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) | fp16 | 256M | SigLIP + LLaMA (GQA) | **10.20** | 14.0 | 1227 | Vision-language; 64 decode tokens |
 | [OpenELM-270M](src/models/openelm-270m/) | fp16 | 270M | LLaMA-style + tied lm_head | 14.65 | 2.00 | 1371 | 78.9% of 10 GB/s ceiling |
 | [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | fp16 | 350M | Hybrid conv+attn | 11.43 | 2.21 | 1666 | Liquid AI hybrid; 58% of texture ceiling |
 | [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | **int8** | 350M | Hybrid conv+attn | 13.67 | **0.81** | 1015 | +19.6% vs fp16 |
 | [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | **Q4** | 350M | Hybrid conv+attn | **14.54** | **0.79** | **719** | +27.2% vs fp16; ALU-bound nibble unpack |
 | [Granite-4.0-350M](src/models/granite-4-0-350m/) | fp16 | 350M | Dense decoder + GQA | 10.19 | 2.41 | 2580 | IBM Granite; 71% of 10 GB/s ceiling |
 | [Qwen2.5-0.5B](src/models/qwen2-5-0-5b/) | fp16 | 500M | LLaMA + GQA | 10.36 | 3.66 | 2720 | Largest in the repo; 70% of 14 GB/s ceiling |
+
+### Vision-language
+
+Workload: `"Describe this image."` + sample JPEG, 64 decoded tokens. TTFT includes image preprocessing, vision tower, projector, and weight loading (~513 MB). Measured 2026-05-19.
+
+| Model | Precision | Params | Architecture | Prefill tok/s | Decode tok/s | TTFT (s) | Peak CPU mem (MB) | Notes |
+|---|:-:|---:|---|---:|---:|---:|---:|---|
+| [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) | fp16 | 256M | SigLIP + LLaMA (GQA) | 82.5 | **10.20** | 14.0 | 1227 | 29% of realistic BW ceiling; REPL with prewarm: 13.3 tok/s |
+
+### Text-to-speech
+
+RTF = wall time / audio duration (lower is better; RTF ≤ 1.0 = real-time). Measured 2026-05-20.
+
+| Model | Precision | Params | Architecture | RTF | Audio | Wall (s) | Peak CPU mem (MB) | Notes |
+|---|:-:|---:|---|---:|---:|---:|---:|---|
+| [MMS-TTS](src/models/mms-tts/) | fp16 | 36M | VITS (enc + flow + HiFi-GAN) | **1.3** | 7.8 s | ~10.1 | 686 | ~1100 languages; per-op cosine ≥ 0.996 vs HF reference |
 
 
 State-of-the-art small language models running on **Adreno 6xx GPUs** — the GPU class found in mid-range Android phones. Pure C++/OpenCL inference, cross-compiled on macOS, deployed via `adb` to `/data/local/tmp/`.

@@ -32,6 +32,7 @@ import com.adreno.seeandsay.MainViewModel
 fun SettingsScreen(viewModel: MainViewModel) {
     val current by viewModel.language.collectAsStateWithLifecycle()
     val device by viewModel.deviceInfo.collectAsStateWithLifecycle()
+    val licenseAccepted by viewModel.licenseAccepted.collectAsStateWithLifecycle()
 
     Column(
         modifier = Modifier
@@ -115,6 +116,7 @@ fun SettingsScreen(viewModel: MainViewModel) {
             holder = "Meta / FAIR",
             license = "CC-BY-NC 4.0  (non-commercial)",
             url = "https://huggingface.co/facebook/mms-tts",
+            accepted = licenseAccepted,
         )
         Spacer(Modifier.height(10.dp))
         LicenseEntry(
@@ -173,12 +175,25 @@ private fun YourDeviceCard(info: DeviceInfo) {
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
             )
             Spacer(Modifier.height(4.dp))
-            // GPU name as the headline number — biggest text in the card.
+
+            // Phone model — pulled from android.os.Build. Most devices report
+            // manufacturer as lowercase ("motorola", "samsung"); title-case it
+            // so "Motorola razr (2020)" reads naturally.
             Text(
-                text = info.device.replace(Regex("""\s*\(TM\)|\s*\(R\)|QUALCOMM\s*""", RegexOption.IGNORE_CASE), "").trim(),
+                text = formatPhoneModel(),
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurface,
                 fontWeight = FontWeight.SemiBold,
+            )
+
+            // GPU name — Adreno 620 (number parsed from CL_DEVICE_VERSION;
+            // CL_DEVICE_NAME on Adreno 620 only reports "QUALCOMM Adreno(TM)"
+            // without the trailing model number, so we fish it out of the
+            // version string).
+            Text(
+                text = formatGpuName(info),
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
             )
             Text(
                 text = info.platform,
@@ -475,7 +490,13 @@ private fun ReqRow(label: String, ok: Boolean, rationale: String) {
 }
 
 @Composable
-private fun LicenseEntry(name: String, holder: String, license: String, url: String) {
+private fun LicenseEntry(
+    name: String,
+    holder: String,
+    license: String,
+    url: String,
+    accepted: Boolean = false,
+) {
     val uriHandler = LocalUriHandler.current
     Column(
         modifier = Modifier
@@ -483,12 +504,29 @@ private fun LicenseEntry(name: String, holder: String, license: String, url: Str
             .clickable { uriHandler.openUri(url) }
             .padding(vertical = 4.dp),
     ) {
-        Text(
-            text = name,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onBackground,
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onBackground,
+                modifier = Modifier.weight(1f),
+            )
+            if (accepted) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                ) {
+                    Text(
+                        text = "✓ Accepted",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                    )
+                }
+            }
+        }
         Spacer(Modifier.height(2.dp))
         Text(
             text = "$holder  ·  $license",
@@ -501,5 +539,38 @@ private fun LicenseEntry(name: String, holder: String, license: String, url: Str
             color = MaterialTheme.colorScheme.primary,
         )
     }
+}
+
+/**
+ * "motorola razr (2020)" → "Motorola razr (2020)". Build.MANUFACTURER comes
+ * in lowercase on most OEMs; Build.MODEL may or may not redundantly include
+ * the manufacturer string (Motorola, Samsung both do; Pixel doesn't). We
+ * dedupe by checking if MODEL already starts with MANUFACTURER.
+ */
+private fun formatPhoneModel(): String {
+    val mfg = android.os.Build.MANUFACTURER.orEmpty()
+    val model = android.os.Build.MODEL.orEmpty()
+    val mfgTitle = mfg.replaceFirstChar { it.uppercase() }
+    return when {
+        model.isEmpty() -> mfgTitle
+        model.startsWith(mfg, ignoreCase = true) -> model.replaceFirstChar { it.uppercase() }
+        else -> "$mfgTitle $model"
+    }
+}
+
+/**
+ * Extracts a clean GPU label like "Adreno 620" from the OpenCL device info.
+ * CL_DEVICE_NAME on Adreno 620 ICDs is just "QUALCOMM Adreno(TM)" (no number);
+ * the actual GPU number lives in CL_DEVICE_VERSION ("OpenCL 2.0 Adreno(TM) 620").
+ * We grab the model number from the version string when device-name lacks it.
+ */
+private fun formatGpuName(info: DeviceInfo): String {
+    val cleanedDeviceName = info.device
+        .replace(Regex("""\s*\(TM\)|\s*\(R\)|QUALCOMM\s*""", RegexOption.IGNORE_CASE), "")
+        .trim()
+    if (Regex("""\d""").containsMatchIn(cleanedDeviceName)) return cleanedDeviceName
+    val match = Regex("""Adreno(?:\(TM\))?\s+(\d+)""", RegexOption.IGNORE_CASE).find(info.openclVersion)
+    val number = match?.groupValues?.get(1)
+    return if (number != null) "$cleanedDeviceName $number" else cleanedDeviceName
 }
 

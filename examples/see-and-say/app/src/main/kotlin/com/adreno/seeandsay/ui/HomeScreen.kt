@@ -14,7 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.PhotoCamera
@@ -94,10 +94,10 @@ fun HomeScreen(
             Spacer(Modifier.height(36.dp))
 
             ModeCard(
-                icon = Icons.Filled.PhotoCamera,
-                title = "Chat about images",
-                subtitle = "Snap a photo or upload one, then ask. " +
-                           "SmolVLM answers; MMS-TTS speaks the reply.",
+                icon = Icons.AutoMirrored.Filled.Chat,
+                title = "Chat",
+                subtitle = "Send a message — text only, or attach a photo with +. " +
+                           "SmolVLM runs the chat; toggle the speaker for spoken replies.",
                 accent = MaterialTheme.colorScheme.primary,
                 onClick = onChat,
             )

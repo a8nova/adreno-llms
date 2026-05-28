@@ -407,14 +407,31 @@ private fun ExampleChip(text: String, onClick: () -> Unit) {
  */
 private fun examplesFor(lang: TtsLanguage): List<String> = when (lang.code) {
     "eng" -> listOf(
-        "Hello! My name is Adreno. I'm an on-device speech model running entirely on this phone.",
-        "The quick brown fox jumps over the lazy dog. Speech synthesis is harder than it looks.",
-        "This entire app, including the language model and the text-to-speech, runs without any internet connection.",
+        "Hello, my name is Sarah and I live in New York.",
+        "The weather today is absolutely beautiful.",
+        "Can you please tell me how to get to the train station?",
+        "I would like to order a large coffee with milk please.",
+        "The quick brown fox jumps over the lazy dog.",
+        "Technology has changed the way we communicate with each other.",
+        "Mathematics is the language of the universe.",
     )
     "amh" -> listOf(
-        "ዛሬ ጥሩ ቀን ነው! ይህ AI ሞዴል የ6 አመት እድሜ ባለው ስልክ ላይ እየሰራ ነው። ይህ ሰው ሊመስል ይችላል ነገር ግን ከእርስዎ ጋር ማውራት AI ነው።",
-        "ሰላም! ስሜ አድሬኖ ነው። ይህን ስልክ ላይ የሚሰራ የንግግር ሞዴል ነኝ።",
-        "ይህ ሙሉ መተግበሪያ፣ የቋንቋ ሞዴል እና የጽሁፍ-ወደ-ንግግር ጨምሮ፣ ያለ ኢንተርኔት ግንኙነት ይሰራል።",
+        "ሰላም፣ እንደምን አደርክ?",
+        "ኢትዮጵያ ውብ ሀገር ናት።",
+        "ዛሬ የአየር ሁኔታው በጣም ጥሩ ነው።",
+        "ቡና ማግኘት እፈልጋለሁ።",
+        "አዲስ አበባ የኢትዮጵያ ዋና ከተማ ናት።",
+        "መጽሐፍ ማንበብ በጣም ጠቃሚ ነው።",
+        "ሙዚቃ ማዳመጥ ደስ ይለኛል።",
+    )
+    "ara" -> listOf(
+        "مرحبا، كيف حالك اليوم؟",
+        "الطقس جميل جدا في هذا اليوم.",
+        "أريد أن أطلب فنجان قهوة كبير من فضلك.",
+        "كان يا ما كان في قديم الزمان.",
+        "العلم نور والجهل ظلام.",
+        "صباح الخير، أتمنى لكم يوما سعيدا.",
+        "الرياضيات هي لغة الكون.",
     )
     // For all the downloaded languages we have no curated examples; show a
     // generic placeholder so the chip strip isn't empty.

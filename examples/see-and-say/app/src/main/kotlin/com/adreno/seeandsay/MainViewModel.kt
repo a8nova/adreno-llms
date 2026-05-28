@@ -47,6 +47,32 @@ sealed interface CameraFlow {
     ) : CameraFlow
 }
 
+/**
+ * Unified chat: one screen, text + optional image attachment. Each turn is a
+ * [ChatTurn] in [chatHistory]. Mid-conversation image attachment triggers a
+ * silent /reset on the binary and pushes a SYSTEM divider into history so the
+ * UI can render "— new conversation —".
+ */
+sealed interface ChatFlow {
+    data object Idle : ChatFlow
+    /** SmolVLM is prefilling (image pass + image-token expansion). No tokens yet. */
+    data object Thinking : ChatFlow
+    /** SmolVLM is decoding into the current assistant turn (history.last). */
+    data object Streaming : ChatFlow
+    /** Generation done; optional TTS in progress for the last assistant turn. */
+    data object Speaking : ChatFlow
+    data class Failed(val message: String) : ChatFlow
+}
+
+enum class ChatRole { USER, ASSISTANT, SYSTEM }
+
+data class ChatTurn(
+    val role: ChatRole,
+    val text: String,
+    /** Set on USER turns that attached an image. Path to local JPEG. */
+    val imagePath: String? = null,
+)
+
 sealed interface SpeakFlow {
     data object Idle : SpeakFlow
     /**
@@ -191,6 +217,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val wavPlayer = WavPlayer()
 
     /**
+     * One-time CC-BY-NC 4.0 license acceptance for Facebook's MMS-TTS weights
+     * (both bundled and downloaded language packs). SmolVLM is Apache 2.0 —
+     * no acceptance needed. Stored in SharedPreferences, sticky across app
+     * updates. Increment LICENSE_KEY's version suffix to force re-acceptance
+     * if the license text materially changes.
+     */
+    private val prefs = context.getSharedPreferences("license_prefs", android.content.Context.MODE_PRIVATE)
+    private val _licenseAccepted = MutableStateFlow(prefs.getBoolean(LICENSE_KEY, false))
+    val licenseAccepted: StateFlow<Boolean> = _licenseAccepted.asStateFlow()
+
+    fun acceptLicense() {
+        prefs.edit().putBoolean(LICENSE_KEY, true).apply()
+        _licenseAccepted.value = true
+    }
+
+    companion object {
+        private const val LICENSE_KEY = "mms_tts_cc_by_nc_4_0_accepted_v1"
+    }
+
+    /**
      * Exponential moving average of the TTS real-time factor (synthesis_time /
      * audio_duration). Updated after every `mmstts.speak()` call. Used to
      * compute the adaptive prebuffer target: `ceil(measuredRtf)` sentences
@@ -225,6 +271,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _camera = MutableStateFlow<CameraFlow>(CameraFlow.Preview)
     val camera: StateFlow<CameraFlow> = _camera.asStateFlow()
+
+    // ---- Unified chat state -------------------------------------------
+    private val _chat = MutableStateFlow<ChatFlow>(ChatFlow.Idle)
+    val chat: StateFlow<ChatFlow> = _chat.asStateFlow()
+
+    private val _chatHistory = MutableStateFlow<List<ChatTurn>>(emptyList())
+    val chatHistory: StateFlow<List<ChatTurn>> = _chatHistory.asStateFlow()
+
+    /** Auto-TTS the assistant response in chat. Off by default — text chat is iterative. */
+    private val _chatTtsEnabled = MutableStateFlow(false)
+    val chatTtsEnabled: StateFlow<Boolean> = _chatTtsEnabled.asStateFlow()
+
+    /** Pending image attachment composed via the "+" button. Cleared on send or cancel. */
+    private val _pendingAttachment = MutableStateFlow<File?>(null)
+    val pendingAttachment: StateFlow<File?> = _pendingAttachment.asStateFlow()
+
+    private var chatJob: Job? = null
 
     private val _speak = MutableStateFlow<SpeakFlow>(SpeakFlow.Idle)
     val speak: StateFlow<SpeakFlow> = _speak.asStateFlow()
@@ -764,6 +827,204 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ---- Unified chat flow --------------------------------------------
+
+    fun setPendingAttachment(jpeg: File) { _pendingAttachment.value = jpeg }
+    fun clearPendingAttachment() { _pendingAttachment.value = null }
+    fun toggleChatTts() { _chatTtsEnabled.value = !_chatTtsEnabled.value }
+
+    /**
+     * Start a fresh chat: clear history + binary KV cache. Cheap — sends a
+     * `/reset` to the SmolVLM session and zeroes the in-memory turn list.
+     */
+    fun newChat() {
+        chatJob?.cancel()
+        wavPlayer.stop()
+        _chatHistory.value = emptyList()
+        _pendingAttachment.value = null
+        _chat.value = ChatFlow.Idle
+        // Wipe last-turn perf so the top-bar metrics strip disappears with
+        // the conversation. Without this, "decode 14.3 tok/s" from the
+        // previous chat would linger until the first new reply lands.
+        _metrics.value = AskMetrics()
+        viewModelScope.launch(Dispatchers.IO) {
+            // Issue /reset through a no-op query path. Simplest: rely on the
+            // next askChat() call to do the /reset itself (askWithImage and
+            // askTextOnly both send /reset).
+        }
+    }
+
+    /**
+     * Send a chat message. Routes to:
+     *   - askWithImage if [imagePath] is set (silent reset if mid-conversation)
+     *   - askTextOnly  if this is turn 1 and no image
+     *   - ask          if this is a follow-up text-only turn
+     *
+     * The assistant's response streams into a placeholder ASSISTANT turn at
+     * the end of [_chatHistory]. On completion, optionally pipes the final
+     * text through MMS-TTS if [_chatTtsEnabled] is true.
+     */
+    fun askChat(prompt: String, imagePath: String? = null) {
+        if (prompt.isBlank() && imagePath == null) return
+        chatJob?.cancel()
+        wavPlayer.stop()
+
+        val history = _chatHistory.value
+        val hasPriorTurns = history.any { it.role != ChatRole.SYSTEM }
+
+        // Mid-conversation image attachment → silent /reset + system divider.
+        val withDivider = if (imagePath != null && hasPriorTurns) {
+            _chatHistory.value + ChatTurn(ChatRole.SYSTEM, "— new conversation —")
+        } else {
+            _chatHistory.value
+        }
+
+        val userTurn = ChatTurn(ChatRole.USER, prompt.trim(), imagePath = imagePath)
+        val placeholder = ChatTurn(ChatRole.ASSISTANT, "")
+        _chatHistory.value = withDivider + userTurn + placeholder
+        _pendingAttachment.value = null
+        _chat.value = ChatFlow.Thinking
+
+        // After a divider, we're starting fresh — no prior turns from the
+        // binary's perspective either (askWithImage sends /reset internally).
+        val isFollowUp = imagePath == null && hasPriorTurns
+
+        val askStart = System.currentTimeMillis()
+        _metrics.value = AskMetrics()
+
+        chatJob = viewModelScope.launch(Dispatchers.Default) {
+            val sb = StringBuilder()
+            var finalText: String? = null
+            var lastEmitMs = 0L
+            val streamThrottleMs = 200L
+
+            // No system-prompt prepend in chat. SmolVLM-256M is small enough
+            // that prepending a verbose system instruction to a terse user
+            // message ("what do u see") makes the model echo the instructions
+            // back as if they were the answer. Camera mode dodges this by
+            // preloading the image before the user types (so the first user
+            // turn is treated as a follow-up and the system prompt is skipped);
+            // chat has no such window. Send the user's message verbatim and
+            // let SmolVLM's image-grounded prefill handle description.
+            try {
+                val flow = when {
+                    imagePath != null -> smolvlm.askWithImage(imagePath, prompt)
+                    isFollowUp        -> smolvlm.ask(prompt)
+                    else              -> smolvlm.askTextOnly(prompt)
+                }
+                flow.collect { out ->
+                    when (out) {
+                        is SmolVLMSession.Output.Token -> {
+                            sb.append(out.text)
+                            val now = System.currentTimeMillis()
+                            val natural = out.text.contains('.') || out.text.contains('\n')
+                            if (natural || now - lastEmitMs >= streamThrottleMs) {
+                                updateLastAssistantTurn(sb.toString())
+                                _chat.value = ChatFlow.Streaming
+                                lastEmitMs = now
+                            }
+                        }
+                        is SmolVLMSession.Output.Final -> {
+                            finalText = out.text
+                            updateLastAssistantTurn(out.text)
+                        }
+                        is SmolVLMSession.Output.Stats -> {
+                            _metrics.value = _metrics.value.copy(
+                                prefillTokens = out.prefillTokens,
+                                prefillSec = out.prefillSec,
+                                prefillTps = out.prefillTps,
+                                decodeTokens = out.decodeTokens,
+                                decodeSec = out.decodeSec,
+                                decodeTps = out.decodeTps,
+                                smolvlmTtfsSec = out.ttfsSec,
+                                ctxPos = out.ctxPos,
+                                smolvlmRssMb = out.rssMb,
+                                smolvlmPeakRssMb = out.peakRssMb,
+                            )
+                        }
+                        is SmolVLMSession.Output.Failed -> {
+                            _chat.value = ChatFlow.Failed(out.message)
+                            return@collect
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                _chat.value = ChatFlow.Failed(t.message ?: t.javaClass.simpleName)
+                return@launch
+            }
+
+            val finalShown = finalText ?: sb.toString().trim()
+            updateLastAssistantTurn(finalShown)
+            _lastAnswer.value = finalShown
+            _metrics.value = _metrics.value.copy(
+                e2eSec = (System.currentTimeMillis() - askStart) / 1000.0,
+            )
+
+            // Optional TTS — only if a language is installed AND user toggled it on.
+            if (_chatTtsEnabled.value && _language.value != null && finalShown.isNotBlank()) {
+                _chat.value = ChatFlow.Speaking
+                try {
+                    speakStreamedNoUi(finalShown)
+                } catch (t: Throwable) {
+                    Log.w("MainViewModel", "chat TTS failed", t)
+                }
+            }
+            _chat.value = ChatFlow.Idle
+        }
+    }
+
+    private fun updateLastAssistantTurn(text: String) {
+        val list = _chatHistory.value.toMutableList()
+        val lastIdx = list.indexOfLast { it.role == ChatRole.ASSISTANT }
+        if (lastIdx >= 0) {
+            list[lastIdx] = list[lastIdx].copy(text = text)
+            _chatHistory.value = list
+        }
+    }
+
+    /**
+     * Synthesize+play [text] through MMS-TTS without touching SpeakFlow state.
+     * Used by chat auto-TTS so the Speak-tab UI doesn't show in-progress state
+     * while the user is on the chat screen.
+     */
+    private suspend fun speakStreamedNoUi(text: String) {
+        ensureTtsReady()
+        val sentences = splitSentences(text)
+        val cwd = File(context.filesDir, "mmstts")
+        val audioDir = File(cwd, "chat_audio_queue").also { it.mkdirs() }
+        audioDir.listFiles()?.forEach { it.delete() }
+        wavPlayer.stop()
+
+        val prebufferTarget = adaptivePrebufferTarget(sentences.size)
+        val buffered = mutableListOf<com.adreno.seeandsay.runner.MMSTTSSession.Result>()
+        var playbackStarted = false
+
+        fun enqueueOne(r: com.adreno.seeandsay.runner.MMSTTSSession.Result) {
+            val pcm = r.pcm
+            if (pcm != null) wavPlayer.enqueuePcm(pcm, r.sampleRate)
+            else             wavPlayer.enqueue(r.wav)
+        }
+
+        for ((index, sentence) in sentences.withIndex()) {
+            val target = File(audioDir, "chat_${index.toString().padStart(3, '0')}.wav")
+            val res = mmstts.speak(sentence, persistTo = target)
+            updateRtf(res)
+            buffered.add(res)
+
+            if (index < prebufferTarget) {
+                // building runway
+            } else if (!playbackStarted) {
+                for (r in buffered) enqueueOne(r)
+                playbackStarted = true
+            } else {
+                enqueueOne(res)
+            }
+        }
+        if (!playbackStarted) {
+            for (r in buffered) enqueueOne(r)
+        }
+    }
+
     // ---- Speak tab flow -----------------------------------------------
 
     private suspend fun ensureTtsReady() {
@@ -901,6 +1162,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         askJob?.cancel()
         speakJob?.cancel()
+        chatJob?.cancel()
         wavPlayer.stop()
         smolvlm.stop()
         mmstts.stop()
