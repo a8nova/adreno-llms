@@ -7,6 +7,12 @@ via hand-written OpenCL kernels (no NNAPI, no LiteRT, no cloud).
 > Point the camera, snap, ask a question, hear the answer spoken aloud.
 > Plus a dedicated text-to-speech tab with ~1140 downloadable languages.
 
+<!-- Drag-drop a demo .mp4 into a GitHub PR/issue, copy the resulting
+     https://github.com/user-attachments/assets/<uuid> URL, and replace
+     the placeholder line below. GitHub renders it as an inline player. -->
+
+https://github.com/user-attachments/assets/REPLACE-WITH-VIDEO-UUID
+
 ## Prerequisites
 
 - Android NDK (r25+) with aarch64 toolchain
