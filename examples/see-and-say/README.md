@@ -11,7 +11,11 @@ via hand-written OpenCL kernels (no NNAPI, no LiteRT, no cloud).
      https://github.com/user-attachments/assets/<uuid> URL, and replace
      the placeholder line below. GitHub renders it as an inline player. -->
 
-https://github.com/user-attachments/assets/REPLACE-WITH-VIDEO-UUID
+
+
+https://github.com/user-attachments/assets/37c1d2a9-e2ed-43e4-9ecc-61b819463454
+
+
 
 ## Prerequisites
 
