@@ -10,7 +10,7 @@ https://github.com/user-attachments/assets/c5723e58-6bc7-4fbc-921b-59388e26f2c9
 
 ## ✨ NEW: See & Say — sideloadable Android app
 
-**[examples/see-and-say/](examples/see-and-say/)** wires SmolVLM-256M + MMS-TTS together into a single APK. Unified chat (text-only or with an attached photo), an optional speaker toggle that speaks the reply through MMS-TTS in any of ~1100 languages, live per-turn perf strip (decode tok/s, TTFT, RTF), and a license gate for the CC-BY-NC MMS-TTS weights. The Kotlin/Compose layer is ~3,000 lines that does zero ML — both models run as long-lived `--interactive` C++ subprocesses driven over stdin/stdout, so the same binaries we benchmark on desktop ship into the APK unchanged. No NNAPI, no LiteRT, no cloud.
+**[examples/see-and-say/](examples/see-and-say/)** wires SmolVLM-256M + MMS-TTS together into a single APK.
 
 <!-- Drop your demo .mp4 into a GitHub PR/issue, copy the resulting
      https://github.com/user-attachments/assets/<uuid> URL, and replace
