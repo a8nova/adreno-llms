@@ -244,7 +244,16 @@ class SmolVLMSession(context: Context) {
     fun ask(prompt: String): Flow<Output> =
         runQuery(loadImage = null, prompt = prompt)
 
-    private fun runQuery(loadImage: String?, prompt: String): Flow<Output> = channelFlow {
+    /**
+     * Start a fresh text-only conversation. Sends `/reset` (clearing any image
+     * + KV cache from a prior turn) then the prompt. The binary's
+     * build_vlm_prompt(image_present=false, …) path handles the rest — no
+     * image tokens, no vision tower pass.
+     */
+    fun askTextOnly(prompt: String): Flow<Output> =
+        runQuery(loadImage = null, prompt = prompt, resetFirst = true)
+
+    private fun runQuery(loadImage: String?, prompt: String, resetFirst: Boolean = false): Flow<Output> = channelFlow {
         if (process?.isAlive != true) {
             send(Output.Failed("smolvlm session not running"))
             return@channelFlow
@@ -277,6 +286,9 @@ class SmolVLMSession(context: Context) {
                         Log.d(TAG, "askWithImage: /reset + /image $loadImage")
                         w.println("/reset")
                         w.println("/image $loadImage")
+                    } else if (resetFirst) {
+                        Log.d(TAG, "askTextOnly: /reset (no image, fresh conversation)")
+                        w.println("/reset")
                     } else {
                         Log.d(TAG, "ask (follow-up, no /image, KV cache reused)")
                     }

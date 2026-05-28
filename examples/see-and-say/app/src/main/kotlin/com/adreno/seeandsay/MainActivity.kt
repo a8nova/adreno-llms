@@ -40,8 +40,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.adreno.seeandsay.ui.CameraScreen
+import com.adreno.seeandsay.ui.CameraCaptureScreen
+import com.adreno.seeandsay.ui.ChatScreen
 import com.adreno.seeandsay.ui.HomeScreen
+import com.adreno.seeandsay.ui.LicenseAgreementScreen
 import com.adreno.seeandsay.ui.LanguagePickerScreen
 import com.adreno.seeandsay.ui.LoaderScreen
 import com.adreno.seeandsay.ui.SettingsScreen
@@ -86,8 +88,14 @@ class MainActivity : ComponentActivity() {
             SeeAndSayTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     val phase by viewModel.phase.collectAsStateWithLifecycle()
-                    when (phase) {
-                        UiPhase.Ready -> AppNavigator(viewModel, onExit = { finish() })
+                    val licenseAccepted by viewModel.licenseAccepted.collectAsStateWithLifecycle()
+                    when {
+                        // License gate runs in parallel with model warmup —
+                        // user reads/agrees while binaries load in the
+                        // background. As soon as both are satisfied (license
+                        // accepted AND phase == Ready), we drop into the app.
+                        !licenseAccepted -> LicenseAgreementScreen(onAccept = { viewModel.acceptLicense() })
+                        phase == UiPhase.Ready -> AppNavigator(viewModel, onExit = { finish() })
                         else -> LoaderScreen(phase)
                     }
                 }
@@ -97,7 +105,7 @@ class MainActivity : ComponentActivity() {
 }
 
 /** Single screen the app currently displays. */
-private enum class Route { HOME, CHAT, TTS, LANGUAGES, SETTINGS }
+private enum class Route { HOME, CHAT, CHAT_CAMERA, TTS, LANGUAGES, SETTINGS }
 
 @Composable
 private fun AppNavigator(viewModel: MainViewModel, onExit: () -> Unit) {
@@ -109,7 +117,11 @@ private fun AppNavigator(viewModel: MainViewModel, onExit: () -> Unit) {
     DisposableEffect(route, activity) {
         val cb = object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (route == Route.HOME) onExit() else route = Route.HOME
+                route = when (route) {
+                    Route.HOME -> { onExit(); Route.HOME }
+                    Route.CHAT_CAMERA -> Route.CHAT       // back from capture goes to chat
+                    else -> Route.HOME
+                }
             }
         }
         activity?.onBackPressedDispatcher?.addCallback(cb)
@@ -139,7 +151,9 @@ private fun AppNavigator(viewModel: MainViewModel, onExit: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     FilledIconButton(
-                        onClick = { route = Route.HOME },
+                        onClick = {
+                            route = if (route == Route.CHAT_CAMERA) Route.CHAT else Route.HOME
+                        },
                         modifier = Modifier.size(40.dp),
                         colors = IconButtonDefaults.filledIconButtonColors(
                             containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
@@ -148,14 +162,15 @@ private fun AppNavigator(viewModel: MainViewModel, onExit: () -> Unit) {
                     ) {
                         Icon(
                             Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back to home",
+                            contentDescription = "Back",
                             modifier = Modifier.size(20.dp),
                         )
                     }
                     Spacer(Modifier.width(10.dp))
                     Text(
                         text = when (route) {
-                            Route.CHAT -> "Chat about images"
+                            Route.CHAT -> "Chat"
+                            Route.CHAT_CAMERA -> "Take photo"
                             Route.TTS -> "Text to speech"
                             Route.LANGUAGES -> "Languages"
                             Route.SETTINGS -> "Settings"
@@ -164,6 +179,12 @@ private fun AppNavigator(viewModel: MainViewModel, onExit: () -> Unit) {
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onBackground,
                         modifier = Modifier.weight(1f),
+                        // Hard guard against the wider ModelStatusPill (with
+                        // model names) squeezing this title to zero width and
+                        // making it render one character per line vertically.
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                     )
                     ModelStatusPill(viewModel)
                 }
@@ -184,7 +205,17 @@ private fun AppNavigator(viewModel: MainViewModel, onExit: () -> Unit) {
                     onLanguages = { route = Route.LANGUAGES },
                     onSettings = { route = Route.SETTINGS },
                 )
-                Route.CHAT -> CameraScreen(viewModel)
+                Route.CHAT -> ChatScreen(
+                    viewModel = viewModel,
+                    onOpenCameraCapture = { route = Route.CHAT_CAMERA },
+                )
+                Route.CHAT_CAMERA -> CameraCaptureScreen(
+                    onCaptured = { file ->
+                        viewModel.setPendingAttachment(file)
+                        route = Route.CHAT
+                    },
+                    onCancel = { route = Route.CHAT },
+                )
                 Route.TTS -> SpeakScreen(
                     viewModel = viewModel,
                     onManageLanguages = { route = Route.LANGUAGES },
@@ -206,12 +237,17 @@ private fun ModelStatusPill(viewModel: MainViewModel) {
     val voiceColor = if (voiceAlive) androidx.compose.ui.graphics.Color(0xFF22C55E) else MaterialTheme.colorScheme.error
     val dim = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f)
     val live by viewModel.liveRss.collectAsStateWithLifecycle()
+    val language by viewModel.language.collectAsStateWithLifecycle()
     // NO fillMaxWidth — this pill is placed in a Row alongside a weight(1f)
     // Text title. fillMaxWidth on the pill collides with the title's weight,
     // and on Android 16 Samsung the resulting measurement explosion makes
     // the outer topBar Row report ~50% of screen height, pushing the entire
     // body content into the bottom half. wrapContentWidth keeps the pill at
     // its natural size.
+    //
+    // Names model identity explicitly (SmolVLM / MMS-TTS) so the user can see
+    // what's running on every screen, not just chat. Sizes are dimmed to keep
+    // the names readable.
     Row(
         modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -219,17 +255,29 @@ private fun ModelStatusPill(viewModel: MainViewModel) {
         Text("●", color = visionColor, style = MaterialTheme.typography.labelSmall)
         Spacer(Modifier.width(4.dp))
         Text(
-            text = "vision" + (live.smolvlmMb?.let { " ${it} MB" } ?: ""),
-            color = dim,
+            text = "SmolVLM",
+            color = MaterialTheme.colorScheme.onBackground,
             style = MaterialTheme.typography.labelSmall,
         )
+        live.smolvlmMb?.let {
+            Spacer(Modifier.width(4.dp))
+            Text(text = "${it} MB", color = dim, style = MaterialTheme.typography.labelSmall)
+        }
         Spacer(Modifier.width(12.dp))
         Text("●", color = voiceColor, style = MaterialTheme.typography.labelSmall)
         Spacer(Modifier.width(4.dp))
         Text(
-            text = "voice" + (live.mmsttsMb?.let { " ${it} MB" } ?: ""),
-            color = dim,
+            text = "MMS-TTS",
+            color = MaterialTheme.colorScheme.onBackground,
             style = MaterialTheme.typography.labelSmall,
         )
+        language?.let { l ->
+            Spacer(Modifier.width(3.dp))
+            Text(text = l.code, color = dim, style = MaterialTheme.typography.labelSmall)
+        }
+        live.mmsttsMb?.let {
+            Spacer(Modifier.width(4.dp))
+            Text(text = "${it} MB", color = dim, style = MaterialTheme.typography.labelSmall)
+        }
     }
 }

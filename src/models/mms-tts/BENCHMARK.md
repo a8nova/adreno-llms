@@ -15,6 +15,16 @@ Numbers below come straight from the `=== KERNEL PROFILE ===` / `=== GPU TIMELIN
 
 ---
 
+## 2026-05-20 — Current state: GPU text encoder + fused-WaveNet flow + NEON duration predictor + prewarm
+
+- **commit:** 3e1c40b  _"mms-tts: GPU optimizations (RTF 6.5→1.3) + unbundle language weights from APK"_
+- **RTF:** **1.3** (long text, 7.8 s audio)
+- **wall total:** ~10.1 s  (audio 7.808 s)
+- **peak CPU memory:** 686 MB
+- **notes:** GPU text encoder (fused QKV + vectorized attention + native_exp softmax), GPU flow inverse (fused WaveNet path), NEON duration predictor with weight caching, branchless leaky_relu, `__constant` bias, `mul24`/`mad24` index math, `-cl-fast-relaxed-math`, `HOST_NO_ACCESS` pool buffers. Short text ("Hello, my name is", 1.81 s audio): RTF 7.96 with prewarm, 297 MB peak — dispatch-overhead-bound at this audio length.
+
+---
+
 ## 2026-05-18 — Step C.c — __constant biases + #pragma unroll on conv_1d K loop
 
 - **commit:** 7f8b41ea6  _"Stub scanner: embed actual weight keys + modality scaffold graph-mode fallback"_
@@ -26,8 +36,6 @@ Numbers below come straight from the `=== KERNEL PROFILE ===` / `=== GPU TIMELIN
 - **inter-kernel idle:** 13630.326 ms across 151 gaps · avg gap 90.267 ms
 - **top kernels:** conv1d_gemm.leaky_im2col 302.288 ms · conv1d_gemm.hgemm 74.791 ms · conv1d_gemm.im2col 44.018 ms
 - **peak CPU memory:** 276.20 MB
-
-(raw logs: `.bench/2026-05-18T19-14-16Z-Step C.c — __constant biases + #pragma unroll on conv_1d K loop/`)
 
 ---
 
@@ -45,8 +53,6 @@ Numbers below come straight from the `=== KERNEL PROFILE ===` / `=== GPU TIMELIN
 - **peak CPU memory:** 275.68 MB
 - **notes:** Cos similarity 0.999999 between host and GPU outputs confirmed. GPU flow path is correctness-clean; perf still ~8% slower than host, blocked on dispatch-graph density. Default stays host.
 
-(raw logs: `.bench/2026-05-18T17-13-52Z-Step D GPU flow_inverse — split_rs_fold + sub_then_concat fusions (run with NNOPT_FLOW_GPU=1 default off; this run is host baseline post-fusion code)/`)
-
 ---
 
 
@@ -63,8 +69,6 @@ Numbers below come straight from the `=== KERNEL PROFILE ===` / `=== GPU TIMELIN
 - **peak CPU memory:** 273.22 MB
 - **notes:** GPU flow_inverse still blocked on correctness bug (HANDOFF §2). conv1d_gpu rewrite ready for when that's fixed.
 
-(raw logs: `.bench/2026-05-18T16-40-58Z-Step D verify — conv1d_gpu Step C parity (default flow_inverse=host; no behavior change expected)/`)
-
 ---
 
 
@@ -79,8 +83,6 @@ Numbers below come straight from the `=== KERNEL PROFILE ===` / `=== GPU TIMELIN
 - **inter-kernel idle:** 13493.276 ms across 162 gaps · avg gap 83.292 ms
 - **top kernels:** conv1d_gemm.leaky_im2col 314.235 ms · conv1d_gemm.hgemm 74.757 ms · conv1d_gemm.im2col 45.201 ms
 - **peak CPU memory:** 272.86 MB
-
-(raw logs: `.bench/2026-05-18T16-26-35Z-Step C — fused im2col+bias-init (HGemm beta=1; eliminates 77 bias dispatches)/`)
 
 ---
 
@@ -97,8 +99,6 @@ Numbers below come straight from the `=== KERNEL PROFILE ===` / `=== GPU TIMELIN
 - **top kernels:** conv1d_gemm.leaky_im2col 208.677 ms · conv1d_gemm.hgemm 74.664 ms · conv1d_gemm.bias_resid 32.342 ms
 - **peak CPU memory:** 264.50 MB
 
-(raw logs: `.bench/2026-05-18T16-17-12Z-Step C #9+#15 — 3D NDRange in im2col kernels (eliminate 4 div/mod per workitem; mad24 indices)/`)
-
 ---
 
 
@@ -113,8 +113,6 @@ Numbers below come straight from the `=== KERNEL PROFILE ===` / `=== GPU TIMELIN
 - **inter-kernel idle:** 14764.569 ms across 211 gaps · avg gap 69.974 ms
 - **top kernels:** conv1d_gemm.leaky_im2col 502.560 ms · conv1d_gemm.im2col 75.743 ms · conv1d_gemm.hgemm 74.621 ms
 - **peak CPU memory:** 265.61 MB
-
-(raw logs: `.bench/2026-05-18T16-13-03Z-Step B #4 — alias h to x for kpair 0 (eliminate per-branch clEnqueueCopyBuffer; 12 dispatches removed)/`)
 
 ---
 
@@ -156,8 +154,6 @@ Top kernels by total kernel ms (kern_ms):
 - `cl_qcom_onchip_global_memory` (§9.1.6, p.76) — depends on recordable_queues per the guide; deferred with it.
 - OOO command queue — Adreno guide §5.7.5 (p.40) explicitly recommends in-order; OOO carries dependency-management overhead.
 - `adb shell echo performance > .../gpu/governor` — §A.3 (p.109) needs root, not production-shippable.
-
-**See also:** `baseline_profile_phase0.log` (raw stderr capture), `clever-hopping-dawn.md` plan file at `~/.claude/plans/`.
 
 ---
 

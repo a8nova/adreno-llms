@@ -166,10 +166,13 @@ fun ConfigurationsDialog(
                 )
 
                 SliderRow(
-                    label = "Max tokens (16-256)",
+                    label = "Max tokens (16-512)",
                     value = maxTokens,
-                    range = 16f..256f,
-                    steps = (256 - 16) - 1,
+                    // 512 keeps decode under ~60 s at Adreno 620's ~10 tok/s.
+                    // Binary KV cache (2048 tokens, llama_sdpa_attention.cpp:43)
+                    // could handle more, but UX gets painful past this.
+                    range = 16f..512f,
+                    steps = (512 - 16) - 1,
                     valueText = maxTokens.roundToInt().toString(),
                     onValueChange = { maxTokens = it },
                 )
@@ -280,7 +283,7 @@ fun ConfigurationsDialog(
                     Spacer(Modifier.width(8.dp))
                     TextButton(onClick = {
                         val s = SamplerSettings(
-                            maxNewTokens = maxTokens.roundToInt().coerceIn(16, 256),
+                            maxNewTokens = maxTokens.roundToInt().coerceIn(16, 512),
                             topK = topK.roundToInt().coerceIn(1, 100),
                             topP = topP.coerceIn(0f, 1f),
                             temperature = temperature.coerceIn(0f, 2f),
