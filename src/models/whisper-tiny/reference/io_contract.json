@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "model_class": "WhisperForConditionalGeneration",
+  "sample_rate_hz": null,
+  "input_fixtures": [
+    {
+      "name": "test_input_ids",
+      "shape": [
+        1,
+        1
+      ],
+      "dtype": "int32",
+      "source": "audio model: forced decoder prefix (decoder_start_token_id + forced_decoder_ids)",
+      "deploy_path": "assets/test_input_ids.bin"
+    },
+    {
+      "name": "test_input_features",
+      "shape": [
+        1,
+        80,
+        3000
+      ],
+      "dtype": "float32",
+      "source": "AutoProcessor(librispeech_sample, padding='max_length').input_features",
+      "deploy_path": "assets/test_input_features.bin",
+      "consumer": "encoder",
+      "note": "MUST be loaded by main.cpp and passed via ForwardDispatch::set_input_features. Do NOT zero-fill; the deployed binary at the deploy_path contains the real mel spectrogram."
+    }
+  ],
+  "output_artifact": {
+    "kind": "text",
+    "sample_rate_hz": null
+  },
+  "rng_seeds": {
+    "deterministic": true
+  },
+  "exact_input_sequence": [
+    50258
+  ],
+  "_nnport_capture_version": "2026-05-28-forward-graph-v1"
+}

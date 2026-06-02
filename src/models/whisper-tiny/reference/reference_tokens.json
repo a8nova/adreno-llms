@@ -1,0 +1,164 @@
+{
+  "produced_by": "_run_reference.py",
+  "script_version": "2026-05-28-forward-graph-v1",
+  "transformers_version": "4.44.0",
+  "pytorch_version": "2.2.2",
+  "python_version": "3.12.9",
+  "input_ids": [
+    50258
+  ],
+  "generated_ids": [
+    50258,
+    50259,
+    50359,
+    50363,
+    291
+  ],
+  "prompt": "Transcribe this audio.",
+  "reference_text": " you",
+  "generated_text": " you",
+  "max_new_tokens": 7,
+  "model_id": "openai/whisper-tiny",
+  "test_prompts": [
+    {
+      "prompt": "Transcribe this audio.",
+      "input_ids": [
+        50258,
+        50363,
+        33339,
+        8056,
+        341,
+        6278,
+        13,
+        50257
+      ]
+    },
+    {
+      "prompt": "Hello",
+      "input_ids": [
+        50258,
+        50363,
+        15947,
+        50257
+      ]
+    },
+    {
+      "prompt": "Hello, world!",
+      "input_ids": [
+        50258,
+        50363,
+        15947,
+        11,
+        1002,
+        0,
+        50257
+      ]
+    },
+    {
+      "prompt": "The quick brown fox jumps over the lazy dog.",
+      "input_ids": [
+        50258,
+        50363,
+        2278,
+        1702,
+        6292,
+        21026,
+        16704,
+        670,
+        264,
+        14847,
+        3000,
+        13,
+        50257
+      ]
+    },
+    {
+      "prompt": "  leading and   multiple   whitespace  ",
+      "input_ids": [
+        50258,
+        50363,
+        220,
+        5775,
+        293,
+        220,
+        220,
+        3866,
+        220,
+        220,
+        21909,
+        17940,
+        220,
+        220,
+        50257
+      ]
+    },
+    {
+      "prompt": "Numbers 0 1 2 3 and code def f(x): return x**2",
+      "input_ids": [
+        50258,
+        50363,
+        45,
+        36353,
+        1958,
+        502,
+        568,
+        805,
+        293,
+        3089,
+        1060,
+        283,
+        7,
+        87,
+        4507,
+        2736,
+        2031,
+        4852,
+        17,
+        50257
+      ]
+    },
+    {
+      "prompt": "Email: user@example.com (2024-01-01)",
+      "input_ids": [
+        50258,
+        50363,
+        36,
+        11799,
+        25,
+        4195,
+        31,
+        3121,
+        335,
+        781,
+        13,
+        1112,
+        522,
+        2009,
+        7911,
+        12,
+        10607,
+        12,
+        10607,
+        8,
+        50257
+      ]
+    },
+    {
+      "prompt": "\n\tnewlines and\ttabs\n",
+      "input_ids": [
+        50258,
+        50363,
+        198,
+        197,
+        7686,
+        11045,
+        293,
+        197,
+        83,
+        17243,
+        198,
+        50257
+      ]
+    }
+  ]
+}
