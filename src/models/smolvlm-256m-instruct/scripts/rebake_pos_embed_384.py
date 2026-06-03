@@ -1,23 +1,33 @@
 #!/usr/bin/env python3
 """
-Rebake the SigLIP vision-tower position embedding for IMAGE_SIZE=384.
+Bake the SigLIP vision-tower position embedding for IMAGE_SIZE=384 (Fast mode).
 
 Background
 ----------
 SmolVLM's vision encoder ships with a learned [1024, 768] position-embedding
 table corresponding to a 32x32 patch grid at IMAGE_SIZE=512 / PATCH_SIZE=16.
-At IMAGE_SIZE=384 the grid is 24x24=576, so we bilinearly resize the table
-to match. This is exactly what HF Idefics3 does at runtime; we just do it
-once, offline, so the runtime stays a plain Embedding lookup.
+At IMAGE_SIZE=384 the grid is 24x24=576, so we bicubically resize the table
+to match. This is exactly what HF Idefics3 does at runtime; we do it once,
+offline, so the runtime stays a plain Embedding lookup.
 
-We keep the on-disk slot at [1024, 768] (1,572,864 bytes) — only the first
-576 rows are ever indexed at runtime, the trailing 448 rows are zero-padded
-dead space. This avoids rewriting offsets for every tensor after it.
+The runtime (vision_pipeline.cpp) keeps BOTH variants and picks by --image-size:
+    model.vision_model.embeddings.position_embedding.weight       (32x32, 512-mode)
+    model.vision_model.embeddings.position_embedding.weight_384   (24x24 padded, 384-mode)
+
+So this script APPENDS `weight_384` as a new tensor at the end of the .bin
+(leaving every existing tensor + its offset untouched) and adds the matching
+meta entry. The new tensor uses the same [1024, 768] slot: the first 576 rows
+are the interpolated 24x24 grid, the trailing 448 rows are zero padding (never
+indexed at runtime — the 24x24 patchify only emits position_ids 0..575).
+
+NOTE: an earlier version of this script overwrote `.weight` in place, which
+matched an older runtime that swapped the single table per mode. The current
+runtime needs both tables present simultaneously, hence the append.
 
 Run once:
     python3 scripts/rebake_pos_embed_384.py
-Re-run is idempotent w.r.t. a fresh copy; we back up to .bak the first time
-and refuse to clobber a backup. Pass --restore to undo.
+Idempotent: re-running replaces an existing weight_384 instead of appending a
+second one. Backs up the .bin and .meta.json once. Pass --restore to undo.
 """
 import argparse, json, os, shutil, struct, sys
 from pathlib import Path
@@ -28,8 +38,10 @@ ROOT = Path(__file__).resolve().parent.parent
 META = ROOT / "weights" / "model.fp16.meta.json"
 BIN  = ROOT / "weights" / "model.fp16.bin"
 BAK  = BIN.with_suffix(".bin.bak")
+META_BAK = Path(str(META) + ".bak")
 
-POS_KEY = "model.vision_model.embeddings.position_embedding.weight"
+POS_KEY  = "model.vision_model.embeddings.position_embedding.weight"
+POS384_KEY = "model.vision_model.embeddings.position_embedding.weight_384"
 
 def _cubic_kernel(x: np.ndarray, a: float = -0.5) -> np.ndarray:
     """Catmull-Rom (a=-0.5) bicubic convolution kernel — matches
@@ -94,6 +106,9 @@ def main():
         if not BAK.exists():
             sys.exit(f"no backup at {BAK}")
         shutil.copy2(BAK, BIN)
+        if META_BAK.exists():
+            shutil.copy2(META_BAK, META)
+            print(f"restored {META} from {META_BAK}")
         print(f"restored {BIN} from {BAK}")
         return
 
@@ -113,14 +128,16 @@ def main():
     C = shape[1]
     nbytes = H * W * C * 2
 
+    # Back up the pristine .bin + meta ONCE so --restore works.
     if not BAK.exists():
         print(f"backing up {BIN} -> {BAK}")
-        shutil.copy2(BIN, BAK)
-    else:
-        print(f"backup exists at {BAK} — reading from BACKUP to stay idempotent")
+        shutil.copy2(BIN, BAK)   # copy2 follows the symlink → real bytes
+    if not META_BAK.exists():
+        shutil.copy2(META, META_BAK)
 
-    src_path = BAK if BAK.exists() else BIN
-    with open(src_path, "rb") as f:
+    # Read the source 32x32 table from the CURRENT bin (the .weight tensor is
+    # never modified, so reading from BIN is safe and idempotent).
+    with open(BIN, "rb") as f:
         f.seek(offset)
         raw = f.read(nbytes)
     src_f16 = np.frombuffer(raw, dtype=np.float16).reshape(H, W, C).astype(np.float32)
@@ -134,16 +151,59 @@ def main():
     print(f"  stats new: min={dst_f32.min():.4f} max={dst_f32.max():.4f} mean={dst_f32.mean():.4f}")
     print(f"  stats old: min={src_f16.min():.4f} max={src_f16.max():.4f} mean={src_f16.mean():.4f}")
 
-    # Pack into [1024, 768] slot: first 576 rows are the new interpolated
-    # values, trailing 448 rows are zeros (never indexed at runtime — the
-    # patchify pipeline only emits position_ids 0..575 for a 24x24 grid).
+    # Pack into a [1024, 768] slot: first 576 rows are the interpolated 24x24
+    # grid, trailing 448 rows are zeros (never indexed —24x24 emits ids 0..575).
     padded = np.zeros((H * W, C), dtype=np.float16)
     padded[: new_H * new_W] = dst_f16
+    new_bytes = padded.tobytes()
 
-    with open(BIN, "r+b") as f:
-        f.seek(offset)
-        f.write(padded.tobytes())
-    print(f"wrote {padded.nbytes} bytes back to {BIN} at offset {offset}")
+    # ── Append weight_384 as a NEW tensor at EOF (idempotent) ──────────────
+    # model.fp16.bin may be a symlink into an archive (e.g. v2/) — never mutate
+    # the target in place. Materialize a private real file, then append.
+    if BIN.is_symlink():
+        real = BIN.resolve()
+        print(f"{BIN.name} is a symlink -> {real}; materializing a private copy")
+        tmp = BIN.with_suffix(".bin.real")
+        shutil.copy2(real, tmp)     # 512MB copy of resolved bytes
+        BIN.unlink()
+        tmp.rename(BIN)
+
+    cur_size = BIN.stat().st_size
+    if POS384_KEY in tensors:
+        # Idempotent re-run: overwrite the existing weight_384 in place.
+        new_off = int(tensors[POS384_KEY]["offset"])
+        if int(tensors[POS384_KEY]["size_bytes"]) != len(new_bytes):
+            sys.exit("existing weight_384 has unexpected size; restore + re-run")
+        with open(BIN, "r+b") as f:
+            f.seek(new_off)
+            f.write(new_bytes)
+        print(f"overwrote existing {POS384_KEY} ({len(new_bytes)} B) at offset {new_off}")
+    else:
+        new_off = cur_size
+        with open(BIN, "ab") as f:
+            f.write(new_bytes)
+        tensors[POS384_KEY] = {
+            "offset": new_off,
+            "shape": [H * W, C],
+            "dtype": "float16",
+            "num_elements": H * W * C,
+            "size_bytes": len(new_bytes),
+        }
+        print(f"appended {POS384_KEY} ({len(new_bytes)} B) at offset {new_off}")
+
+    # Keep top-level size fields consistent (loader ignores them, but tools read them).
+    final_size = BIN.stat().st_size
+    if "bin_size_bytes" in meta: meta["bin_size_bytes"] = final_size
+    if "total_bytes" in meta:    meta["total_bytes"] = final_size
+    if "bin_sha256" in meta:
+        import hashlib
+        h = hashlib.sha256()
+        with open(BIN, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        meta["bin_sha256"] = h.hexdigest()
+    META.write_text(json.dumps(meta, indent=2))
+    print(f"updated {META} (bin now {final_size} bytes)")
     print("done.")
 
 if __name__ == "__main__":

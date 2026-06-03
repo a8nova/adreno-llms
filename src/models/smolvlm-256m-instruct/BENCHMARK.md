@@ -465,3 +465,40 @@ Round 7 surfaced the new bottleneck: **`vis_scores` (4.7 s) + `vis_mha_out` (2.4
 - image2d-aliased K and V (texture-cache for re-read across tq's) — adds complexity but unlike Flash doesn't change WG structure.
 - Vision-encoder caching: per-image one-shot run, reused across multi-turn (REPL already covers this for turns 2+).
 
+## Mode-split measurement (2026-06-03) — Fast/384 vs Quality/512
+
+The headline TTFT numbers in earlier rounds were measured under shifting
+conditions (Round 5 used the 874-token reference input; Round 6+ used 79 tokens;
+the default image size also moved to 384). That made the single published TTFT
+ambiguous. This is a clean A/B of the two `--image-size` modes on the SAME
+release build, same device, same workload.
+
+Device: Motorola Razr 2020 (Adreno 620v2 / Snapdragon 765G).
+Build: `NNOPT_DTYPE=fp16 ./scripts/build.sh --release`, run with
+`NNOPT_DEBUG_LAYERS=0`. Workload: `"Describe this image."` + `fixtures/sample.jpg`,
+64 decoded tokens, single-shot (no REPL/prewarm). 3-run warm median.
+
+| mode | image tokens | n_prompt | prefill tok/s | decode tok/s | TTFT s | peak MB |
+|---|---:|---:|---:|---:|---:|---:|
+| Fast (`--image-size 384`, default) | 36 | 51 | 57.0 | 10.9 | **6.0** | 721 |
+| Quality (`--image-size 512`)       | 64 | 79 | 82.2 | 11.2 | 13.2 | 733 |
+
+Takeaways:
+- **TTFT is the mode-sensitive metric** — Fast nearly halves it (13.2 → 6.0 s)
+  by running the SigLIP tower at 24×24 instead of 32×32 (~44% less vision compute).
+- **Decode is mode-independent** (~11 tok/s single-shot) — image size only changes
+  prompt length / KV, not per-token decode work. Warm REPL with prewarm reaches
+  ~13–15 tok/s (Round 6).
+- Prefill tok/s is higher at 512 only because more tokens amortize fixed
+  per-launch cost; absolute prefill *time* is still larger at 512.
+
+### Tooling note: `weight_384`
+
+Fast/384 needs a 24×24-interpolated copy of the SigLIP position embedding stored
+as a separate tensor `model.vision_model.embeddings.position_embedding.weight_384`
+(vision_pipeline.cpp picks `.weight` vs `.weight_384` by `runtime_image_size()`).
+`scripts/rebake_pos_embed_384.py` now **appends** that tensor (bicubic resize,
+padded to the [1024,768] slot) instead of overwriting `.weight` in place, so both
+the 512 and 384 tables coexist. Run once after fetching/converting weights:
+`python3 scripts/rebake_pos_embed_384.py` (idempotent; `--restore` to undo).
+
