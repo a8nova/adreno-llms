@@ -6,21 +6,26 @@ Facebook's [MMS-TTS](https://huggingface.co/facebook/mms-tts) family ported to C
 - **Architecture:** VITS — text encoder (6 transformer layers, hidden=192) + stochastic duration predictor + residual coupling flow + HiFi-GAN decoder
 - **Precision:** fp16
 
-Inference is **100% on-device C++**. The Python script in `scripts/prep_lang.py` only runs once on your laptop to convert HuggingFace weights into the on-device `model.fp16.bin` / `tokenizer_vocab.bin` format. Same role `scripts/fetch_weights.sh` plays for other models in this repo.
+Inference is **100% on-device C++**. All ~1140 MMS languages are already converted and published on HuggingFace, so you just download the per-language pack you want:
+
+- **In the [See & Say](../../../examples/see-and-say/) app** — languages download **in-app**: the picker fetches each pack on demand from HuggingFace, so the user never touches a terminal.
+- **For the standalone CLI here** — you fetch the packs yourself with `scripts/fetch_lang.sh` (Quickstart below).
+
+`scripts/prep_lang.py` is only needed to *add* a language that isn't published yet — see [Adding a language](#adding-a-language-not-yet-in-the-dataset).
 
 ## Quickstart
 
-From this directory, with an Android device connected over `adb`:
+This is for the **standalone CLI** on a device connected over `adb`. (In the See &
+Say app you don't do any of this — languages download in-app from the picker.)
+
+From this directory:
 
 ```bash
-# 0. One-time Python deps for the offline weight conversion step
-pip install huggingface_hub transformers safetensors torch numpy
-
-# 1. One-time per language: download from HF and convert to the on-device
-#    format. Writes weights/<lang>/{model.fp16.bin, model.fp16.meta.json,
-#    tokenizer_vocab.bin} and assets/<lang>/{test_input_ids, *_noise}.bin.
-python3 scripts/prep_lang.py eng "Hello, my name is."
-python3 scripts/prep_lang.py amh "ሰላም፣ እንደምን አደርክ?"
+# 1. Download the pre-built pack(s) you want from HuggingFace into weights/<lang>/.
+#    All ~1140 MMS languages are published — swap eng/amh for any code. No Python:
+#    the on-device binary tokenizes your text and samples the VITS noise itself,
+#    so these weights are all the CLI needs.
+./scripts/fetch_lang.sh eng amh
 
 # 1b. ONLY for non-Latin scripts (amh, ara, khm, tha, …): fetch the uroman
 #     romanization tables into assets/uroman/. Latin-script langs skip this.
@@ -31,8 +36,8 @@ python3 scripts/prep_lang.py amh "ሰላም፣ እንደምን አደርክ?"
 #    Single binary handles all languages at runtime via --lang.
 NNOPT_DTYPE=fp16 ./scripts/build.sh
 
-# 3. Deploy. Pushes the binary + every weights/<lang>/ subdir that
-#    prep_lang.py has populated + assets/<lang>/ + assets/uroman/.
+# 3. Deploy. Pushes the binary + every weights/<lang>/ subdir you've fetched
+#    + any assets/<lang>/ + assets/uroman/.
 NNOPT_DTYPE=fp16 ./scripts/deploy_android.sh
 
 # 4. Run — text goes in, /tmp/tts_out.wav comes out, plays automatically
@@ -113,13 +118,14 @@ Element-wise cosine vs HuggingFace Python reference (`NNOPT_REF_TEST=1`, capture
 
 Any [MMS-TTS language code](https://dl.fbaipublicfiles.com/mms/tts/all-tts-languages.html) — Latin-script (eng, deu, fra, spa, ...) and non-Latin (amh, ara, khm, tha, ...) both work. Non-Latin scripts go through uroman romanization before the on-device char tokenizer; uroman tables ship in `assets/uroman/` (loaded once at process start).
 
-### Pre-built packs (used by the see-and-say example)
+### Pre-built packs (HuggingFace)
 
-Ready-to-download packs (~69 MB each: `model.fp16.bin` + `tokenizer_vocab.bin` + metadata) live under the `mms-tts/` prefix of the project's weights repo:
+Ready-to-download packs (~69 MB each: `model.fp16.bin` + `tokenizer_vocab.bin` + metadata) for all ~1140 MMS languages live under the `mms-tts/` prefix of the project's weights repo:
 
   https://huggingface.co/a8nova/adreno-llms-weights/tree/main/mms-tts
 
-The see-and-say Android picker lists every language with a pack present there. Languages without a pack stay greyed out until one is uploaded.
+- **See & Say app:** the language picker downloads packs **in-app, on demand** — the user never touches HuggingFace. Languages without a pack stay greyed out until one is uploaded.
+- **CLI here:** fetch packs yourself with `./scripts/fetch_lang.sh <code…>` — it pulls each zip from the repo above and unzips it into `weights/<lang>/`.
 
 ### Adding a language not yet in the dataset
 
@@ -149,11 +155,12 @@ mms-tts/
 │   ├── build.sh          NDK cross-compile
 │   ├── deploy_android.sh adb push binary + weights/<lang>/ + assets/<lang>/
 │   ├── run_android.sh    adb shell run + pull output.wav
-│   ├── prep_lang.py      one-time HF → on-device weight converter
+│   ├── fetch_lang.sh     download pre-built language pack(s) from HF → weights/<lang>/
+│   ├── prep_lang.py      one-time HF → on-device weight converter (to ADD a new language)
 │   ├── bench.sh          locked perf harness
 │   └── cos_check.py      offline layer-by-layer comparison vs reference dumps
 ├── reference/            small ground-truth fixtures for NNOPT_REF_TEST
-└── weights/              fetched per-language by prep_lang.py (gitignored)
+└── weights/              per-language packs from scripts/fetch_lang.sh (gitignored)
     └── <lang>/           model.fp16.bin, tokenizer_vocab.bin, model.fp16.meta.json
 ```
 
