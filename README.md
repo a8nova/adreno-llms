@@ -8,9 +8,15 @@
 https://github.com/user-attachments/assets/c5723e58-6bc7-4fbc-921b-59388e26f2c9
 
 
-## ✨ NEW: See & Say — sideloadable Android app
+## ✨ NEW: three new modalities on-device — Vision, Speech & Listening
 
-**[examples/see-and-say/](examples/see-and-say/)** wires SmolVLM-256M + MMS-TTS together into a single APK.
+Beyond text generation, three new model types now run **fully on-device** on Adreno 6xx:
+
+- **👁️ Vision (VLM)** — [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/): image + text in, text out (SigLIP vision tower + LLaMA decoder).
+- **🗣️ Speech (TTS)** — [MMS-TTS](src/models/mms-tts/): text in, speech out, across ~1100 languages (VITS + HiFi-GAN).
+- **🎧 Listening (ASR)** — [Whisper-tiny](src/models/whisper-tiny/): speech in, text out, with real-time streaming transcription.
+
+The **[See & Say](examples/see-and-say/)** example app ties the vision and speech models together into a single sideloadable APK.
 
 <!-- Drop your demo .mp4 into a GitHub PR/issue, copy the resulting
      https://github.com/user-attachments/assets/<uuid> URL, and replace
@@ -50,7 +56,7 @@ Workload: `"Describe this image."` + sample JPEG, 64 decoded tokens. TTFT includ
 
 | Model | Precision | Params | Architecture | Prefill tok/s | Decode tok/s | TTFT (s) | Peak CPU mem (MB) | Notes |
 |---|:-:|---:|---|---:|---:|---:|---:|---|
-| [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) | fp16 | 256M | SigLIP + LLaMA (GQA) | 82.5 | **10.20** | 14.0 | 1227 | 29% of realistic BW ceiling; REPL with prewarm: 13.3 tok/s |
+| [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) | fp16 | 256M | SigLIP + LLaMA (GQA) | 82.5 | **10.20** | 11.3 | 1227 | 29% of realistic BW ceiling; REPL with prewarm: 13.3 tok/s |
 
 ### Text-to-speech
 
