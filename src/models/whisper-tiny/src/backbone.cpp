@@ -122,11 +122,24 @@ static std::vector<float> _asr_forward_graph(
     // No-op on the first clip. Enables one process to transcribe many clips
     // (amortizing the per-process JIT compile across them). (lever #1)
     WhisperSdpaAttention_reset_caches();
-    // Encoder frontend (Conv1d×2 + GELU + permute + pos add) → [1500, 384]
+    // Encoder sequence length, derived from the input_features buffer so the
+    // encoder runs on the ACTUAL audio length (streaming short windows) instead of
+    // the padded 30s. Batch/eval feeds a 3000-frame mel → enc_T = 1500 → every
+    // size/seq below is byte-identical to before. Mirrors the frontend's formula.
+    int enc_T = MODEL_CONFIG::MAX_SOURCE_POSITIONS;  // 1500 (full 30s) by default
+    {
+        const int srcCapFrames = MODEL_CONFIG::MAX_SOURCE_POSITIONS * 2;  // 3000
+        size_t _fb = 0;
+        if (clGetMemObjectInfo(input_features, CL_MEM_SIZE, sizeof(_fb), &_fb, nullptr) == CL_SUCCESS && _fb > 0) {
+            int frames = (int)(_fb / ((size_t)MODEL_CONFIG::NUM_MEL_BINS * sizeof(nnopt_storage_t)));
+            if (frames > 0 && frames <= srcCapFrames) enc_T = (frames & ~1) / 2;
+        }
+    }
+    // Encoder frontend (Conv1d×2 + GELU + permute + pos add) → [enc_T, 384]
     x = WhisperEncoderFrontend_forward(
         cl_ctx, weights, queue,
         input_features,
-        /*seq_len=*/MODEL_CONFIG::MAX_SOURCE_POSITIONS * 2,
+        /*seq_len=*/enc_T * 2,
         /*layer_idx=*/-1, /*start_pos=*/0,
         nullptr, nullptr,
         nullptr,
@@ -148,7 +161,7 @@ static std::vector<float> _asr_forward_graph(
             return std::vector<float>(MODEL_CONFIG::VOCAB_SIZE, 0.0f);
         }
     }
-    const size_t enc_n = (size_t)MODEL_CONFIG::MAX_SOURCE_POSITIONS * (size_t)MODEL_CONFIG::HIDDEN_SIZE;
+    const size_t enc_n = (size_t)enc_T * (size_t)MODEL_CONFIG::HIDDEN_SIZE;
 
     // Encoder layers — emit per-node dumps matching reference/forward_graph.json dump_name.
     // This is required for SxSDebug alignment.
@@ -163,7 +176,7 @@ static std::vector<float> _asr_forward_graph(
             std::snprintf(wp_ln, sizeof(wp_ln), "model.encoder.layers.%d.self_attn_layer_norm", layer_idx);
             cl_mem out = LayerNorm_forward(
                 cl_ctx, weights, queue,
-                x, (int)MODEL_CONFIG::MAX_SOURCE_POSITIONS, layer_idx, /*start_pos=*/0,
+                x, (int)enc_T, layer_idx, /*start_pos=*/0,
                 nullptr, nullptr,
                 nullptr,
                 wp_ln);
@@ -175,7 +188,7 @@ static std::vector<float> _asr_forward_graph(
             }
             if (out != x) { clReleaseMemObject(x); x = out; }
             NNOPT_LAYER_CHECK_FMT("self_attn_layer_norm_%d", layer_idx, queue, x,
-                                  (size_t)MODEL_CONFIG::MAX_SOURCE_POSITIONS * (size_t)MODEL_CONFIG::HIDDEN_SIZE);
+                                  (size_t)enc_T * (size_t)MODEL_CONFIG::HIDDEN_SIZE);
         }
 
         // 2) self_attn_{i}
@@ -185,7 +198,7 @@ static std::vector<float> _asr_forward_graph(
             std::snprintf(wp_attn, sizeof(wp_attn), "model.encoder.layers.%d.self_attn", layer_idx);
             cl_mem out = WhisperSdpaAttention_forward(
                 cl_ctx, weights, queue,
-                x, (int)MODEL_CONFIG::MAX_SOURCE_POSITIONS, layer_idx, /*start_pos=*/0,
+                x, (int)enc_T, layer_idx, /*start_pos=*/0,
                 nullptr, nullptr,
                 nullptr,
                 wp_attn);
@@ -197,7 +210,7 @@ static std::vector<float> _asr_forward_graph(
             }
             if (out != x) { clReleaseMemObject(x); x = out; }
             NNOPT_LAYER_CHECK_FMT("self_attn_%d", layer_idx, queue, x,
-                                  (size_t)MODEL_CONFIG::MAX_SOURCE_POSITIONS * (size_t)MODEL_CONFIG::HIDDEN_SIZE);
+                                  (size_t)enc_T * (size_t)MODEL_CONFIG::HIDDEN_SIZE);
         }
 
         // residual add 1: x = residual + self_attn_out  (this is final_layer_norm's input)
@@ -221,7 +234,7 @@ static std::vector<float> _asr_forward_graph(
             std::snprintf(wp_ln, sizeof(wp_ln), "model.encoder.layers.%d.final_layer_norm", layer_idx);
             cl_mem out = LayerNorm_forward(
                 cl_ctx, weights, queue,
-                x, (int)MODEL_CONFIG::MAX_SOURCE_POSITIONS, layer_idx, /*start_pos=*/0,
+                x, (int)enc_T, layer_idx, /*start_pos=*/0,
                 nullptr, nullptr,
                 nullptr,
                 wp_ln);
@@ -233,7 +246,7 @@ static std::vector<float> _asr_forward_graph(
             }
             if (out != x) { clReleaseMemObject(x); x = out; }
             NNOPT_LAYER_CHECK_FMT("final_layer_norm_%d", layer_idx, queue, x,
-                                  (size_t)MODEL_CONFIG::MAX_SOURCE_POSITIONS * (size_t)MODEL_CONFIG::HIDDEN_SIZE);
+                                  (size_t)enc_T * (size_t)MODEL_CONFIG::HIDDEN_SIZE);
         }
 
         // 4) fc1_{i}
@@ -242,7 +255,7 @@ static std::vector<float> _asr_forward_graph(
             std::snprintf(wp_fc1, sizeof(wp_fc1), "model.encoder.layers.%d.fc1", layer_idx);
             cl_mem out = Linear_forward(
                 cl_ctx, weights, queue,
-                x, (int)MODEL_CONFIG::MAX_SOURCE_POSITIONS, layer_idx, /*start_pos=*/0,
+                x, (int)enc_T, layer_idx, /*start_pos=*/0,
                 nullptr, nullptr,
                 nullptr,
                 wp_fc1);
@@ -254,14 +267,14 @@ static std::vector<float> _asr_forward_graph(
             }
             if (out != x) { clReleaseMemObject(x); x = out; }
             NNOPT_LAYER_CHECK_FMT("fc1_%d", layer_idx, queue, x,
-                                  (size_t)MODEL_CONFIG::MAX_SOURCE_POSITIONS * (size_t)MODEL_CONFIG::ENCODER_FFN_DIM);
+                                  (size_t)enc_T * (size_t)MODEL_CONFIG::ENCODER_FFN_DIM);
         }
 
         // 5) activation_fn_{i}
         {
             cl_mem out = GELUActivation_forward(
                 cl_ctx, weights, queue,
-                x, (int)MODEL_CONFIG::MAX_SOURCE_POSITIONS, layer_idx, /*start_pos=*/0,
+                x, (int)enc_T, layer_idx, /*start_pos=*/0,
                 nullptr, nullptr,
                 nullptr,
                 "");
@@ -273,7 +286,7 @@ static std::vector<float> _asr_forward_graph(
             }
             if (out != x) { clReleaseMemObject(x); x = out; }
             NNOPT_LAYER_CHECK_FMT("activation_fn_%d", layer_idx, queue, x,
-                                  (size_t)MODEL_CONFIG::MAX_SOURCE_POSITIONS * (size_t)MODEL_CONFIG::ENCODER_FFN_DIM);
+                                  (size_t)enc_T * (size_t)MODEL_CONFIG::ENCODER_FFN_DIM);
         }
 
         // 6) fc2_{i}
@@ -282,7 +295,7 @@ static std::vector<float> _asr_forward_graph(
             std::snprintf(wp_fc2, sizeof(wp_fc2), "model.encoder.layers.%d.fc2", layer_idx);
             cl_mem out = Linear_forward(
                 cl_ctx, weights, queue,
-                x, (int)MODEL_CONFIG::MAX_SOURCE_POSITIONS, layer_idx, /*start_pos=*/0,
+                x, (int)enc_T, layer_idx, /*start_pos=*/0,
                 nullptr, nullptr,
                 nullptr,
                 wp_fc2);
@@ -294,7 +307,7 @@ static std::vector<float> _asr_forward_graph(
             }
             if (out != x) { clReleaseMemObject(x); x = out; }
             NNOPT_LAYER_CHECK_FMT("fc2_%d", layer_idx, queue, x,
-                                  (size_t)MODEL_CONFIG::MAX_SOURCE_POSITIONS * (size_t)MODEL_CONFIG::HIDDEN_SIZE);
+                                  (size_t)enc_T * (size_t)MODEL_CONFIG::HIDDEN_SIZE);
         }
 
         // residual add 2: x = residual + fc2_out  → encoder layer output.
@@ -310,7 +323,7 @@ static std::vector<float> _asr_forward_graph(
             x = r;
         }
         NNOPT_LAYER_CHECK_FMT("layer_%d", layer_idx, queue, x,
-                              (size_t)MODEL_CONFIG::MAX_SOURCE_POSITIONS * (size_t)MODEL_CONFIG::HIDDEN_SIZE);
+                              (size_t)enc_T * (size_t)MODEL_CONFIG::HIDDEN_SIZE);
     }
 
     // Final encoder LayerNorm (model.encoder.layer_norm) — applied AFTER all
@@ -320,7 +333,7 @@ static std::vector<float> _asr_forward_graph(
     {
         cl_mem out = LayerNorm_forward(
             cl_ctx, weights, queue,
-            x, (int)MODEL_CONFIG::MAX_SOURCE_POSITIONS, /*layer_idx=*/-1, /*start_pos=*/0,
+            x, (int)enc_T, /*layer_idx=*/-1, /*start_pos=*/0,
             nullptr, nullptr, nullptr,
             "model.encoder.layer_norm");
         if (!out) {

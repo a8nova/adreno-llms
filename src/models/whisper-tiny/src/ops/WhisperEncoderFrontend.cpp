@@ -57,8 +57,20 @@ cl_mem WhisperEncoderFrontend_forward(
 
     const int n_mels = MODEL_CONFIG::NUM_MEL_BINS;
     const int hidden = MODEL_CONFIG::HIDDEN_SIZE;
-    const int T_in = (int)MODEL_CONFIG::MAX_SOURCE_POSITIONS * 2;  // 3000 for Whisper
-    const int T_out = (int)MODEL_CONFIG::MAX_SOURCE_POSITIONS;     // 1500
+    // T_in = mel frame count, inferred from the input_features buffer SIZE so the
+    // encoder runs on the ACTUAL audio length. Batch/eval feeds a full 3000-frame
+    // mel → T_in=3000 → byte-identical to before; streaming feeds a short window.
+    const int T_in_max = (int)MODEL_CONFIG::MAX_SOURCE_POSITIONS * 2;  // 3000
+    int T_in = T_in_max;
+    {
+        size_t feat_bytes = 0;
+        if (clGetMemObjectInfo(input_features, CL_MEM_SIZE, sizeof(feat_bytes), &feat_bytes, nullptr) == CL_SUCCESS
+            && feat_bytes > 0) {
+            const int derived = (int)(feat_bytes / ((size_t)n_mels * sizeof(nnopt_storage_t)));
+            if (derived > 0 && derived <= T_in_max) T_in = derived & ~1;  // even → integer T_out
+        }
+    }
+    const int T_out = T_in / 2;  // conv2 stride-2
 
     cl_int err = CL_SUCCESS;
     cl_mem conv1_out = nullptr;

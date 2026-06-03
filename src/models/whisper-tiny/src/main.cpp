@@ -66,6 +66,11 @@
 #include <chrono>
 #include <cmath>     // std::sqrt — streaming VAD frame energy
 #include <cstdio>    // std::fread / stdin — streaming PCM input
+#include <thread>    // streaming: non-blocking stdin reader thread
+#include <mutex>     // streaming: guard the shared phrase buffer/queue
+#include <atomic>    // streaming: eof flag
+#include <deque>     // streaming: queue of completed phrases
+#include <algorithm> // std::min — streaming partial token cap
 
 // Read prompt input ids from a binary file (int32 little-endian) when the
 // caller passes \`--token-ids /path/to/test_input_ids.bin\`. This path is
@@ -100,14 +105,53 @@ extern "C" void WhisperBackbone_invalidate_encoder_cache();
 
 namespace {
 
+// No-repeat n-gram blocking (HF `no_repeat_ngram_size`). Bans any token that would
+// complete an n-gram already seen in `gen`, by setting its logit to -inf. This breaks
+// the greedy repetition loops ("X. X. X. …") that the fast variable-length encode
+// induces on short/live windows. Applied ONLY to PARTIALs — finals use the padded
+// encode (which doesn't loop) and stay byte-exact with the benchmark.
+static void ban_repeat_ngrams(std::vector<float>& logits,
+                              const std::vector<int32_t>& gen, int n) {
+    const int g = (int)gen.size();
+    if (n < 2 || g < n) return;
+    // Prefix = the last (n-1) generated tokens; ban whatever token followed any
+    // earlier occurrence of that same prefix.
+    for (int i = 0; i + n <= g; ++i) {
+        bool match = true;
+        for (int j = 0; j < n - 1; ++j) {
+            if (gen[i + j] != gen[g - (n - 1) + j]) { match = false; break; }
+        }
+        if (match) {
+            const int banned = gen[i + n - 1];
+            if (banned >= 0 && banned < (int)logits.size()) logits[banned] = -INFINITY;
+        }
+    }
+}
+
 // Transcribe one window of 16kHz mono float audio -> text.
 std::string nnopt_transcribe_window(OpenCLContext& cl_ctx, Model& model, Tokenizer& tok,
                                     bool tokenizer_ok, Sampler& sampler,
                                     const SamplerConfig& scfg, int max_new_tokens,
                                     const std::vector<float>& wav,
-                                    const std::vector<float>& mel_filters) {
+                                    const std::vector<float>& mel_filters,
+                                    bool full_quality) {
     if (wav.empty()) return std::string();
-    std::vector<float> mel = whisper_log_mel(wav, mel_filters);
+    const auto _t0 = std::chrono::high_resolution_clock::now();
+    const double _win_s = (double)wav.size() / 16000.0;
+    // Both PARTIAL and FINAL use the variable-length encode (encode only the actual
+    // window, not a padded 30s) — the key to real-time. The difference is the context
+    // floor: FINALs pad up to FINAL_FLOOR_FRAMES (~12s) so the committed decode has
+    // enough zero-padded context that tiny doesn't loop; PARTIALs use no floor for the
+    // cheapest possible live preview (and lean on no-repeat-ngram below). Padding only
+    // to a ~12s floor — vs the old fixed 30s — removes most of the per-sentence FINAL
+    // freeze while keeping greedy quality. A long FINAL (>12s) still encodes its full
+    // length up to the 30s cap. (Batch/eval still uses the fixed 30s whisper_log_mel.)
+    constexpr int FINAL_FLOOR_FRAMES = 1200;  // 12 s of context for committed phrases
+    constexpr int WHISPER_MAX_FRAMES = 3000;  // 30 s @ hop 160 — encoder hard cap
+    std::vector<float> mel =
+        full_quality ? whisper_log_mel_n(wav, mel_filters, /*max_frames=*/WHISPER_MAX_FRAMES,
+                                         /*min_frames=*/FINAL_FLOOR_FRAMES)
+                     : whisper_log_mel_n(wav, mel_filters);
     if (mel.empty()) return std::string();
 
     std::vector<nnopt_storage_t> mel_storage(mel.size());
@@ -130,8 +174,13 @@ std::string nnopt_transcribe_window(OpenCLContext& cl_ctx, Model& model, Tokeniz
     std::vector<float> logits = model.forward(prompt_ids, /*start_pos=*/0);
     int kv_pos = (int)prompt_ids.size();
 
+    // Partials (variable encode) are loop-prone on short live windows → block repeated
+    // 3-grams so the live preview self-corrects instead of spamming "X. X. X.". Finals
+    // (full_quality, padded encode) don't loop, so they keep the unmodified greedy path.
+    const bool suppress_repeats = !full_quality;
     for (int step = 0; step < max_new_tokens; ++step) {
         std::vector<int32_t> gen_so_far(prompt_ids.begin() + prompt_len, prompt_ids.end());
+        if (suppress_repeats) ban_repeat_ngrams(logits, gen_so_far, 3);
         int next = sampler.sample(logits, gen_so_far);
         { static const int kForced[3] = {50259, 50359, 50363};   // <|en|><|transcribe|><|notimestamps|>
           const int gp = (int)prompt_ids.size() - (int)prompt_len;
@@ -152,6 +201,18 @@ std::string nnopt_transcribe_window(OpenCLContext& cl_ctx, Model& model, Tokeniz
         const std::vector<int32_t> gen(prompt_ids.begin() + prompt_len, prompt_ids.end());
         text = tok.decode(gen);
     }
+
+    // Per-window timing: proc time vs the audio it covered. rtf = proc/win. With the
+    // variable-length encode (full_quality=false) the encoder runs on the ACTUAL
+    // window, so a short window is cheap and proc scales with the window — partials
+    // are bounded to a rolling slice (see nnopt_run_stream) to keep this near-constant.
+    // Only full_quality=true pays the fixed 30s padded encode. Surfaced on stderr.
+    const double _proc_s = std::chrono::duration<double>(
+        std::chrono::high_resolution_clock::now() - _t0).count();
+    const int _ntok = (int)(prompt_ids.size() - prompt_len);
+    fprintf(stderr, "STREAM_TIMING win=%.2f proc=%.2f rtf=%.2f ntok=%d\n",
+            _win_s, _proc_s, (_win_s > 0 ? _proc_s / _win_s : 0.0), _ntok);
+    fflush(stderr);
     return text;
 }
 
@@ -165,69 +226,176 @@ int nnopt_run_stream(OpenCLContext& cl_ctx, Model& model, Tokenizer& tok, bool t
         return 4;
     }
 
-    const int   SR              = 16000;
-    const int   frame           = SR * 30 / 1000;             // 30ms VAD frame = 480 samples
-    const size_t step_samples   = (size_t)SR * step_ms / 1000;
-    const int   hangover_frames = (hangover_ms > 0 ? hangover_ms : 1) / 30;
-    const int   trigger_frames  = 3;                          // consecutive voiced frames to start a phrase
-    const float min_phrase_s    = 0.30f;                      // ignore sub-300ms blips
-    const float max_phrase_s    = 28.0f;                      // force-commit before Whisper's 30s window
-    const int   cap             = max_new_tokens > 16 ? max_new_tokens : 96;  // per-phrase token cap
+    const int    SR               = 16000;
+    const int    frame            = SR * 30 / 1000;            // 30ms VAD frame = 480 samples
+    const size_t step_samples     = (size_t)SR * step_ms / 1000;
+    const int    hangover_frames  = (hangover_ms > 0 ? hangover_ms : 1) / 30;
+    const int    trigger_frames   = 3;                         // consecutive voiced frames to start a phrase
+    const size_t min_phrase_samps = (size_t)(0.30f * SR);      // ignore sub-300ms blips
+    const float  max_phrase_s     = 28.0f;                     // hard force-commit before Whisper's 30s window
+    const int    cap              = max_new_tokens > 16 ? max_new_tokens : 96;  // per-phrase token cap
+    // Long-speech segmentation, two-stage so a continuous talker never breaks:
+    //   (a) soft_seg_s: once a phrase passes this, the FIRST short clause/breath pause
+    //       (soft_silence_frames) commits it — the natural, clean cut point.
+    //   (b) seg_force_s: if NO such pause appears (someone reciting without breaks), force
+    //       a commit purely on duration so the open phrase can't outgrow the partial
+    //       window. Without this the phrase grows toward the 28s hard cap, the window
+    //       reverts to a rolling tail, and earlier words get deleted again (observed: a
+    //       19s pause-less phrase). A forced cut may land mid-word, but tiny stitches the
+    //       next segment fine and that's far better than losing 10s+ of visible text.
+    // partial_window_s MUST be >= seg_force_s so the open phrase is always fully covered.
+    const float  soft_seg_s          = 8.0f;
+    const float  seg_force_s         = 12.0f;                  // commit by here even with no pause
+    const int    soft_silence_frames = 420 / 30;               // ~0.42s clause-level pause
+    // PARTIAL window. CRITICAL: this MUST be >= soft_seg_s. The on-screen transcript is
+    // (committed finals) + (live partial); the partial re-transcribes only the last
+    // partial_window_s of voiced audio. If that window is SHORTER than the open phrase,
+    // words spoken earlier in the phrase are neither committed yet NOR in the window, so
+    // they get overwritten/DELETED as the window slides — the "it eats my transcript"
+    // bug. By keeping the window >= the soft-segment length, the partial always spans the
+    // ENTIRE open phrase: it becomes a growing prefix (text accumulates / refines, never
+    // deletes) and the phrase locks in every ~soft_seg_s. The cost is that a late partial
+    // re-decodes the whole phrase from scratch (no decode-KV reuse across partials), so
+    // partials refresh a bit slower — an acceptable trade vs. losing text. Measured decode
+    // is ~0.05-0.06s/token (much cheaper than the old 0.24s estimate), so a full ~13s
+    // window is only ~2-3s of proc. seg_force_s guarantees the open phrase never exceeds
+    // this window, so partials never revert to a deleting rolling tail in practice.
+    const float  partial_window_s     = 13.0f;  // >= seg_force_s (12s) + margin
+    const size_t partial_window_samps = (size_t)(partial_window_s * SR);
 
-    std::vector<float> window;     // accumulated samples of the in-progress phrase
-    std::vector<float> framebuf;   // leftover samples between stdin reads (sub-frame)
-    bool   in_speech = false;
-    int    speech_run = 0, silence_run = 0;
-    size_t samples_since_partial = 0;
+    // Producer/consumer so transcription (slow) never blocks mic intake (real-time).
+    // Reader thread: drains stdin continuously, runs VAD, appends to `cur`; on
+    // end-of-speech it moves `cur` into the `finals` queue and starts fresh.
+    // Consumer (this thread): transcribes completed phrases as FINAL, and the
+    // latest `cur` snapshot as PARTIAL — always the most recent audio, so it
+    // never falls behind (stale partials are simply skipped, not queued).
+    std::mutex mtx;
+    std::vector<float> cur;                  // in-progress phrase (guarded)
+    size_t cur_voiced = 0;                   // samples in `cur` up to & incl. the last VOICED frame (guarded).
+                                             // Partials anchor here, NOT cur.size(): trailing silence (the
+                                             // hangover gap, background noise) must not enter the rolling
+                                             // window or Whisper loops/repeats on near-silent context, and
+                                             // partials must stop firing the instant speech stops.
+    std::deque<std::vector<float>> finals;   // completed phrases awaiting transcription (guarded)
+    std::atomic<bool> eof{false};
 
-    auto commit = [&](bool final_) {
-        const float dur = (float)window.size() / (float)SR;
-        if (window.empty() || dur < min_phrase_s) { if (final_) window.clear(); return; }
-        const std::string txt = nnopt_transcribe_window(cl_ctx, model, tok, tokenizer_ok,
-                                                         sampler, scfg, cap, window, mel_filters);
-        std::cout << (final_ ? "FINAL: " : "PARTIAL: ") << txt << std::endl;
-        if (final_) window.clear();
-    };
+    std::thread reader([&]() {
+        std::vector<float> rd(4096), framebuf;
+        bool in_speech = false;
+        int speech_run = 0, silence_run = 0;
+        while (true) {
+            const size_t got = std::fread(rd.data(), sizeof(float), rd.size(), stdin);
+            if (got == 0) { eof.store(true); break; }
+            framebuf.insert(framebuf.end(), rd.begin(), rd.begin() + got);
+            size_t off = 0;
+            while (framebuf.size() - off >= (size_t)frame) {
+                double e = 0.0;
+                for (int i = 0; i < frame; ++i) { const float s = framebuf[off + i]; e += (double)s * s; }
+                const float rms = (float)std::sqrt(e / (double)frame);
+                const bool voiced = rms >= vad_threshold;
+                if (voiced) { ++speech_run; silence_run = 0; }
+                else        { ++silence_run; speech_run = 0; }
+                if (!in_speech && speech_run >= trigger_frames) in_speech = true;
+                if (in_speech) {
+                    std::lock_guard<std::mutex> lk(mtx);
+                    cur.insert(cur.end(), framebuf.begin() + off, framebuf.begin() + off + frame);
+                    if (voiced) cur_voiced = cur.size();   // advance voiced extent ONLY on voiced frames
+                    const float phrase_s = (float)cur.size() / (float)SR;
+                    const bool hang_end  = silence_run >= hangover_frames;                            // real end-of-speech pause
+                    const bool soft_end  = phrase_s >= soft_seg_s && silence_run >= soft_silence_frames; // long speech: clause pause
+                    const bool force_end = phrase_s >= seg_force_s;                                   // long speech: no pause came → cut on duration
+                    const bool hard_end  = phrase_s >= max_phrase_s;                                  // hard backstop
+                    if (hang_end || soft_end || force_end || hard_end) {
+                        if (cur.size() >= min_phrase_samps) {
+                            // Surface long-speech segmentation so the host can SEE that a
+                            // continuous talker is being chunked (not stalling/breaking).
+                            if (!hang_end && soft_end)
+                                fprintf(stderr, "STREAM_SEG soft phrase=%.1fs (long speech: clause cut)\n", phrase_s);
+                            else if (!hang_end && !soft_end && (force_end || hard_end))
+                                fprintf(stderr, "STREAM_SEG force phrase=%.1fs (long speech: duration cut)\n", phrase_s);
+                            fflush(stderr);
+                            finals.push_back(std::move(cur));
+                        }
+                        cur.clear(); cur_voiced = 0;
+                        in_speech = false; speech_run = 0; silence_run = 0;
+                    }
+                }
+                off += frame;
+            }
+            framebuf.erase(framebuf.begin(), framebuf.begin() + off);
+        }
+    });
 
     fprintf(stderr, "STREAM: ready — feed 16kHz mono float32 PCM on stdin "
                     "(vad_threshold=%.4f step=%dms hangover=%dms cap=%d tok)\n",
             vad_threshold, step_ms, hangover_ms, cap);
     fflush(stderr);
 
-    std::vector<float> rd(4096);
+    auto emit = [&](const char* tag, const std::vector<float>& pcm, int tok_cap, bool full_quality) {
+        // PARTIALs (full_quality=false) use the cheapest variable-length encode for a
+        // snappy live preview, guarded by no-repeat-ngram so short-context loops can't
+        // run away. FINALs (full_quality=true) use the SAME variable encode but padded
+        // up to a ~12s context floor (see nnopt_transcribe_window) and run greedy — enough
+        // context for stable, correct committed text without paying the old fixed 30s
+        // encode on every sentence boundary. Long finals encode their full length (≤30s).
+        const std::string txt = nnopt_transcribe_window(cl_ctx, model, tok, tokenizer_ok,
+                                                        sampler, scfg, tok_cap, pcm, mel_filters,
+                                                        full_quality);
+        std::cout << tag << txt << std::endl;
+    };
+
+    size_t last_partial_n = 0;
     while (true) {
-        const size_t got = std::fread(rd.data(), sizeof(float), rd.size(), stdin);
-        if (got == 0) break;   // EOF / closed pipe
-        framebuf.insert(framebuf.end(), rd.begin(), rd.begin() + got);
-
-        size_t off = 0;
-        while (framebuf.size() - off >= (size_t)frame) {
-            double e = 0.0;
-            for (int i = 0; i < frame; ++i) { const float s = framebuf[off + i]; e += (double)s * s; }
-            const float rms = (float)std::sqrt(e / (double)frame);
-            const bool voiced = rms >= vad_threshold;
-            if (voiced) { ++speech_run; silence_run = 0; }
-            else        { ++silence_run; speech_run = 0; }
-
-            if (!in_speech && speech_run >= trigger_frames) in_speech = true;
-
-            if (in_speech) {
-                window.insert(window.end(), framebuf.begin() + off, framebuf.begin() + off + frame);
-                samples_since_partial += frame;
-                if (silence_run >= hangover_frames || (float)window.size() / (float)SR >= max_phrase_s) {
-                    commit(/*final_=*/true);
-                    in_speech = false; speech_run = silence_run = 0; samples_since_partial = 0;
-                } else if (samples_since_partial >= step_samples) {
-                    commit(/*final_=*/false);
-                    samples_since_partial = 0;
-                }
-            }
-            off += frame;
+        // 1. A completed phrase takes priority — commit it as FINAL. Finals encode the
+        //    WHOLE phrase padded only to a ~12s floor (not a fixed 30s), so a short
+        //    sentence commits in a fraction of the old cost while staying stable.
+        std::vector<float> fin;
+        bool have_final = false;
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            if (!finals.empty()) { fin.swap(finals.front()); finals.pop_front(); have_final = true; }
         }
-        framebuf.erase(framebuf.begin(), framebuf.begin() + off);
+        if (have_final) {
+            if (fin.size() >= min_phrase_samps) emit("FINAL: ", fin, cap, /*full_quality=*/true);
+            last_partial_n = 0;
+            continue;
+        }
+        // 2. Stream closed with nothing queued → flush the in-progress tail (FULL
+        //    phrase, not the rolling window) as a closing FINAL.
+        if (eof.load()) {
+            std::vector<float> tail;
+            { std::lock_guard<std::mutex> lk(mtx); tail.swap(cur); }
+            if (tail.size() >= min_phrase_samps) emit("FINAL: ", tail, cap, /*full_quality=*/true);
+            break;
+        }
+        // 3. PARTIAL: re-transcribe the most recent ~partial_window_s of VOICED audio.
+        //    The slice ends at cur_voiced (the last voiced sample), so trailing silence
+        //    — the hangover gap or background noise — never enters the window (which
+        //    would make Whisper loop/repeat on near-silent context). Cadence is tracked
+        //    on cur_voiced too, so partials STOP the instant speech stops and resume
+        //    only when real speech grows the phrase.
+        std::vector<float> snap;
+        size_t voiced_len = 0;
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            voiced_len = cur_voiced;
+            const size_t from = voiced_len > partial_window_samps ? voiced_len - partial_window_samps : 0;
+            snap.assign(cur.begin() + from, cur.begin() + voiced_len);
+        }
+        if (voiced_len >= last_partial_n + step_samples && snap.size() >= min_phrase_samps) {
+            // Fast variable encode → live preview; no-repeat-ngram (inside the transcribe)
+            // keeps it from looping. The clean text lands on the FINAL. The window now
+            // spans the whole open phrase (~8-9s ≈ up to ~30 tokens of speech), so the cap
+            // must be high enough to decode all of it — otherwise the partial would itself
+            // truncate the phrase tail it's meant to show.
+            emit("PARTIAL: ", snap, std::min(cap, 56), /*full_quality=*/false);
+            last_partial_n = voiced_len;   // cadence on voiced extent — no partials during silence
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
     }
 
-    if (in_speech && !window.empty()) commit(/*final_=*/true);   // flush trailing phrase on EOF
+    reader.join();
     fprintf(stderr, "STREAM: end (stdin EOF)\n");
     fflush(stderr);
     KernelProfiler::dump_summary();   // dormant unless NNOPT_PROFILE=1
