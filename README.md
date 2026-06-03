@@ -52,11 +52,14 @@ Decode tok/s = warm 3-run median, greedy (`--temperature 0`), 32-token generatio
 
 ### Vision-language
 
-Workload: `"Describe this image."` + sample JPEG, 64 decoded tokens, single-shot greedy. TTFT includes image preprocessing, vision tower, projector, and weight loading (~513 MB). 3-run warm median, fp16 release build (`NNOPT_DEBUG_LAYERS=0`). Measured 2026-06-03. Default Fast mode (`--image-size 384`); see the [model README](src/models/smolvlm-256m-instruct/) for the Quality (512) mode.
+Workload: `"Describe this image."` + sample JPEG. TTFT includes image preprocessing, vision tower, projector, and weight loading. Measured 2026-05-19 (SmolVLM) / 2026-06-02 (LFM2-VL).
 
 | Model | Precision | Params | Architecture | Prefill tok/s | Decode tok/s | TTFT (s) | Peak CPU mem (MB) | Notes |
 |---|:-:|---:|---|---:|---:|---:|---:|---|
-| [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) | fp16 | 256M | SigLIP + LLaMA (GQA) | 57.0 | **10.9** | **6.0** | 721 | Fast/384 default; 36 image tokens |
+| [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) | fp16 | 256M | SigLIP + LLaMA (GQA) | 82.5 | **10.20** | 14.0 | 1227 | 29% of realistic BW ceiling; REPL with prewarm: 13.3 tok/s |
+| [LFM2.5-VL-450M](src/models/lfm2-5-vl-450m/) | fp16 | 450M | SigLIP-2 (12L bidir) + LFM2 hybrid (conv+attn) | 47.6 | **10.00** | 128.6 | 2197 | Multi-tile (up to 10× 512² + thumb); 1797-token prompt; bidir attn dominates TTFT |
+| [LFM2.5-VL-450M](src/models/lfm2-5-vl-450m/) | **int8** | 450M | SigLIP-2 (12L bidir) + LFM2 hybrid (conv+attn) | 46.4 | 9.7 | 130.4 | **2071** | Per-row symmetric; -50% disk; matches PyTorch fp32 ref byte-for-byte (first 7 tokens) |
+
 
 ### Text-to-speech
 

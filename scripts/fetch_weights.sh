@@ -18,7 +18,7 @@
 #   weights/tokenizer_vocab.bin
 #
 # Optional `--quant int8` also fetches model.int8.bin + model.int8.meta.json
-# (currently available for lfm2-5-350m and smollm2-135m-instruct).
+# (currently available for lfm2-5-350m, lfm2-5-vl-450m, and smollm2-135m-instruct).
 #
 # Optional `--quant q4` also fetches model.q4.bin + model.q4.meta.json
 # (currently available for lfm2-5-350m only).
@@ -37,7 +37,8 @@ HF_REPO="${HF_REPO:-a8nova/adreno-llms-weights}"
 HF_BRANCH="${HF_BRANCH:-main}"
 HF_BASE="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}"
 
-MODELS=(granite-4-0-350m lfm2-5-350m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny)
+
+MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct)
 BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
 # whisper-tiny is ASR (encoder-decoder): its runtime loads tokenizer_vocab.bin
 # directly and has no tokenizer.json, so its base set is 3 files.
@@ -45,7 +46,7 @@ WHISPER_BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer_vocab.bin)
 
 # Which models currently have which quant variants published on HF. Update when
 # new quant bundles are uploaded.
-MODELS_WITH_INT8=(lfm2-5-350m smollm2-135m-instruct)
+MODELS_WITH_INT8=(lfm2-5-350m lfm2-5-vl-450m smollm2-135m-instruct)
 MODELS_WITH_Q4=(lfm2-5-350m)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
