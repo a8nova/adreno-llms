@@ -52,11 +52,14 @@ Decode tok/s = warm 3-run median, greedy (`--temperature 0`), 32-token generatio
 
 ### Vision-language
 
-Workload: `"Describe this image."` + sample JPEG, 64 decoded tokens. TTFT includes image preprocessing, vision tower, projector, and weight loading (~513 MB). Measured 2026-05-19.
+Workload: `"Describe this image."` + sample JPEG, 64 decoded tokens, single-shot greedy. TTFT includes image preprocessing, vision tower, projector, and weight loading (~513 MB). 3-run warm median, fp16 release build (`NNOPT_DEBUG_LAYERS=0`). Measured 2026-06-03.
+
+SmolVLM has two image-resolution modes (`--image-size`) that trade vision-tower cost for detail — TTFT in particular nearly halves in Fast mode. Decode is mode-independent (~11 tok/s single-shot; warm REPL with prewarm is higher — see [BENCHMARK.md](src/models/smolvlm-256m-instruct/BENCHMARK.md)).
 
 | Model | Precision | Params | Architecture | Prefill tok/s | Decode tok/s | TTFT (s) | Peak CPU mem (MB) | Notes |
 |---|:-:|---:|---|---:|---:|---:|---:|---|
-| [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) | fp16 | 256M | SigLIP + LLaMA (GQA) | 82.5 | **10.20** | 11.3 | 1227 | 29% of realistic BW ceiling; REPL with prewarm: 13.3 tok/s |
+| [SmolVLM-256M](src/models/smolvlm-256m-instruct/) **Fast** (`--image-size 384`) | fp16 | 256M | SigLIP + LLaMA (GQA) | 57.0 | **10.9** | **6.0** | 721 | default; 24×24 grid → 36 image tokens |
+| [SmolVLM-256M](src/models/smolvlm-256m-instruct/) **Quality** (`--image-size 512`) | fp16 | 256M | SigLIP + LLaMA (GQA) | 82.2 | **11.2** | 13.2 | 733 | 32×32 grid → 64 image tokens (upstream training res) |
 
 ### Text-to-speech
 
