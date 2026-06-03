@@ -119,8 +119,20 @@ cl_mem WhisperSdpaAttention_forward(
     const int D = hidden / H;                                  // 64
     const int Tq = seq_len;
     // For self-attention, K/V come from the same input sequence.
-    // For cross-attention, K/V come from the ENCODER sequence length (typically 1500 for Whisper).
-    const int Tk = is_cross ? (int)MODEL_CONFIG::MAX_SOURCE_POSITIONS : Tq;
+    // For cross-attention, K/V come from the ENCODER sequence length — derive it
+    // from the encoder_hidden_states buffer SIZE rather than assuming a fixed 1500,
+    // so variable-length (streaming) encoder outputs work. Batch's full 30s encode
+    // → 1500 → unchanged.
+    int Tk;
+    if (is_cross) {
+        size_t _eb = 0;
+        if (clGetMemObjectInfo(encoder_hidden_states, CL_MEM_SIZE, sizeof(_eb), &_eb, nullptr) == CL_SUCCESS && _eb > 0)
+            Tk = (int)(_eb / ((size_t)hidden * sizeof(nnopt_storage_t)));
+        else
+            Tk = (int)MODEL_CONFIG::MAX_SOURCE_POSITIONS;
+    } else {
+        Tk = Tq;
+    }
 
     // HF WhisperAttention.forward pre-scales Q by head_dim**-0.5 then calls attention with scaling=1.0.
     // Do the same (Q *= 1/sqrt(D)); do NOT also scale scores.
