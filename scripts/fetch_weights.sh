@@ -8,12 +8,13 @@
 #   ./scripts/fetch_weights.sh all          [--quant fp16|int8|q4]
 #
 # Models:
-#   granite-4-0-350m  lfm2-5-350m  mamba-130m  mamba2-130m  qwen2-5-0-5b  smollm2-135m-instruct
+#   granite-4-0-350m  lfm2-5-350m  mamba-130m  mamba2-130m  qwen2-5-0-5b
+#   smollm2-135m-instruct  whisper-tiny
 #
 # Per model, this fetches the base set the runtime needs:
 #   weights/model.fp16.bin
 #   weights/model.fp16.meta.json
-#   weights/tokenizer.json
+#   weights/tokenizer.json          (not for whisper-tiny — ASR has no tokenizer.json)
 #   weights/tokenizer_vocab.bin
 #
 # Optional `--quant int8` also fetches model.int8.bin + model.int8.meta.json
@@ -36,8 +37,11 @@ HF_REPO="${HF_REPO:-a8nova/adreno-llms-weights}"
 HF_BRANCH="${HF_BRANCH:-main}"
 HF_BASE="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}"
 
-MODELS=(granite-4-0-350m lfm2-5-350m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct)
+MODELS=(granite-4-0-350m lfm2-5-350m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny)
 BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
+# whisper-tiny is ASR (encoder-decoder): its runtime loads tokenizer_vocab.bin
+# directly and has no tokenizer.json, so its base set is 3 files.
+WHISPER_BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer_vocab.bin)
 
 # Which models currently have which quant variants published on HF. Update when
 # new quant bundles are uploaded.
@@ -108,7 +112,12 @@ _in_array() {
 # Build the per-model file list based on --quant.
 file_list_for() {
   local model="$1"
-  local files=("${BASE_FILES[@]}")
+  local files
+  if [ "${model}" = "whisper-tiny" ]; then
+    files=("${WHISPER_BASE_FILES[@]}")
+  else
+    files=("${BASE_FILES[@]}")
+  fi
   if [ "${QUANT}" = "int8" ]; then
     if _in_array "${model}" "${MODELS_WITH_INT8[@]}"; then
       files+=(model.int8.bin model.int8.meta.json)

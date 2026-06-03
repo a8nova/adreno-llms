@@ -4,32 +4,39 @@
 # Prerequisites:
 #   1. Run `hf auth login` (or legacy `huggingface-cli login`) FIRST and paste
 #      a write-scoped token. This script will NOT attempt to log in itself.
-#   2. The 5 model directories under src/models/<m>/weights/ must contain all
-#      4 files (model.fp16.bin, model.fp16.meta.json, tokenizer.json,
+#   2. Each model directory under src/models/<m>/weights/ must contain its
+#      expected files. Most models use the 4-file set (model.fp16.bin,
+#      model.fp16.meta.json, tokenizer.json, tokenizer_vocab.bin); whisper-tiny
+#      uses a 3-file set (no tokenizer.json — its runtime reads only
 #      tokenizer_vocab.bin). The script validates this before touching HF.
 #
 # What it uploads (to HF repo a8nova/adreno-llms-weights by default):
 #   <model>/model.fp16.bin
 #   <model>/model.fp16.meta.json
-#   <model>/tokenizer.json
+#   <model>/tokenizer.json          (not for whisper-tiny)
 #   <model>/tokenizer_vocab.bin
 #   for each of: granite-4-0-350m, lfm2-5-350m, mamba-130m, mamba2-130m,
-#                qwen2-5-0-5b, smollm2-135m-instruct
+#                qwen2-5-0-5b, smollm2-135m-instruct, whisper-tiny
 #   plus a top-level README.md sourced from scripts/hf_repo_README.md
 #
-# OpenELM is intentionally skipped — Apple's ASCL forbids redistribution.
+# OpenELM's model.fp16.bin is intentionally skipped — Apple's ASCL forbids
+# redistribution (only its companion files are uploaded).
 #
 # Override: set HF_REPO to upload elsewhere (e.g. for a fork).
 
 set -euo pipefail
 
 HF_REPO="${HF_REPO:-a8nova/adreno-llms-weights}"
-MODELS=(granite-4-0-350m lfm2-5-350m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct openelm-270m)
+MODELS=(granite-4-0-350m lfm2-5-350m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny openelm-270m)
 WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
 # OpenELM weights are NOT redistributable (Apple ASCL). For openelm-270m we
 # upload only the 3 small files (meta + tokenizer); fetch_openelm_weights.sh
 # pulls the actual weights from apple/OpenELM-270M on demand and converts.
 OPENELM_WEIGHT_FILES=(model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
+# whisper-tiny is ASR (encoder-decoder), not a causal LM. Its runtime loads
+# tokenizer_vocab.bin directly and never reads a tokenizer.json, so its weight
+# set is 3 files — the full model.fp16.bin IS redistributable (Apache 2.0).
+WHISPER_WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json tokenizer_vocab.bin)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -70,6 +77,8 @@ expected=0
 for m in "${MODELS[@]}"; do
   if [ "$m" = "openelm-270m" ]; then
     files=("${OPENELM_WEIGHT_FILES[@]}")
+  elif [ "$m" = "whisper-tiny" ]; then
+    files=("${WHISPER_WEIGHT_FILES[@]}")
   else
     files=("${WEIGHT_FILES[@]}")
   fi
