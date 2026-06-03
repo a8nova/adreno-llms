@@ -15,8 +15,8 @@
 #   <model>/model.fp16.meta.json
 #   <model>/tokenizer.json          (not for whisper-tiny)
 #   <model>/tokenizer_vocab.bin
-#   for each of: granite-4-0-350m, lfm2-5-350m, mamba-130m, mamba2-130m,
-#                qwen2-5-0-5b, smollm2-135m-instruct, whisper-tiny
+#   for each of: granite-4-0-350m, lfm2-5-350m, lfm2-5-vl-450m, mamba-130m,
+#                mamba2-130m, qwen2-5-0-5b, smollm2-135m-instruct
 #   plus a top-level README.md sourced from scripts/hf_repo_README.md
 #
 # OpenELM's model.fp16.bin is intentionally skipped — Apple's ASCL forbids
@@ -27,7 +27,7 @@
 set -euo pipefail
 
 HF_REPO="${HF_REPO:-a8nova/adreno-llms-weights}"
-MODELS=(granite-4-0-350m lfm2-5-350m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny openelm-270m)
+MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct openelm-270m)
 WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
 # OpenELM weights are NOT redistributable (Apple ASCL). For openelm-270m we
 # upload only the 3 small files (meta + tokenizer); fetch_openelm_weights.sh
