@@ -8,14 +8,15 @@
 https://github.com/user-attachments/assets/c5723e58-6bc7-4fbc-921b-59388e26f2c9
 
 
-## ✨ NEW: four new modalities on-device — Vision, Speech, Listening & Music
+## ✨ NEW: five new modalities on-device — Vision, Speech, Listening, Music & Translation
 
-Beyond text generation, four new model types now run **fully on-device** on Adreno 6xx:
+Beyond text generation, five new model types now run **fully on-device** on Adreno 6xx:
 
 - **👁️ Vision (VLM)** — [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) and [LFM2.5-VL-450M](src/models/lfm2-5-vl-450m/): image + text in, text out.
 - **🗣️ Speech (TTS)** — [MMS-TTS](src/models/mms-tts/) and [Kokoro-82M](src/models/kokoro-82m/): text in, speech out.
 - **🎧 Listening (ASR)** — [Whisper-tiny](src/models/whisper-tiny/): speech in, text out, with real-time streaming transcription.
 - **🎵 Music (text→music)** — [MusicGen-small](src/models/musicgen-small/): text prompt in, music out.
+- **🌐 Translation (S2ST/S2TT)** — [SeamlessM4T UnitY-small](src/models/seamless-m4t-unity-small/): speech in → translated speech or text out (English/Spanish/Portuguese/Hindi/Russian).
 
 The **[See & Say](examples/see-and-say/)** example app ties the vision and speech models together into a single sideloadable APK.
 
@@ -86,6 +87,14 @@ RTF = processing time / audio duration (lower is better; < 1.0 = faster than rea
 | Model | Precision | Params | Architecture | Decode tok/s | Output | Notes |
 |---|:-:|---:|---|---:|---|---|
 | [MusicGen-small](src/models/musicgen-small/) | fp16 | ~590M | T5 enc + 24-layer token LM + EnCodec | **11.0** | 32 kHz mono | RTF ~6.9× (a 5 s clip ≈ 34 s wall); peak ~2.7 GB; mega-fused decode + fp16 texture path |
+
+### Speech translation (S2ST / S2TT)
+
+> A multi-stage **cascade**, not a single forward pass: fbank → Conformer encoder → text decoder (beam-5) → T2U synthesizer → unit decoder (greedy) → CodeHiFiGAN vocoder. Speech in → translated speech (S2ST) or text (S2TT / ASR) out. KV cache across both autoregressive decoders cuts a 1 s clip from RTF 271 → **53** warm. Correctness held fixed: units exact (53/53), waveform cos ≥ 0.999999 vs HF reference.
+
+| Model | Precision | Params | Architecture | RTF (warm) | Modes | Notes |
+|---|:-:|---:|---|---:|---|---|
+| [SeamlessM4T UnitY-small](src/models/seamless-m4t-unity-small/) | fp16 | ~323M | Conformer enc + text dec (beam-5) + T2U + unit dec + CodeHiFiGAN | **53** | s2s / s2tt / asr | 1 s input; encoder + decoders dominate; eng/spa/por/hin/rus output |
 
 
 State-of-the-art small language models running on **Adreno 6xx GPUs** — the GPU class found in mid-range Android phones. Pure C++/OpenCL inference, cross-compiled on macOS, deployed via `adb` to `/data/local/tmp/`.
@@ -208,5 +217,5 @@ For decoder-only LMs and vision-language models, each model size needs its own k
 - **Weights:** carry their own upstream licenses, listed per-model:
   - mamba / mamba2 / Qwen2.5 / SmolLM2 / SmolVLM / Granite — Apache 2.0
   - LFM2.5 — Liquid AI's open license
-  - MMS-TTS — CC-BY-NC 4.0 (Facebook)
+  - MMS-TTS / SeamlessM4T — CC-BY-NC 4.0 (Meta; non-commercial)
   - **OpenELM — Apple Sample Code License (NOT redistributed in this repo; fetch script pulls from Apple's HF repo)**

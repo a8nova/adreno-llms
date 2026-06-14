@@ -9,7 +9,8 @@
 #
 # Models:
 #   granite-4-0-350m  lfm2-5-350m  lfm2-5-vl-450m  mamba-130m  mamba2-130m
-#   qwen2-5-0-5b  smollm2-135m-instruct  whisper-tiny
+#   qwen2-5-0-5b  smollm2-135m-instruct  whisper-tiny  kokoro-82m
+#   musicgen-small  seamless-m4t-unity-small
 #
 # Per model, this fetches the base set the runtime needs:
 #   weights/model.fp16.bin
@@ -38,10 +39,11 @@ HF_BRANCH="${HF_BRANCH:-main}"
 HF_BASE="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}"
 
 
-MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m musicgen-small)
+MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m musicgen-small seamless-m4t-unity-small)
 BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
-# whisper-tiny (ASR) and musicgen-small (text→music) load tokenizer_vocab.bin
-# directly and have no tokenizer.json, so their base set is 3 files.
+# whisper-tiny (ASR), musicgen-small (text→music) and seamless-m4t-unity-small
+# (speech translation) load tokenizer_vocab.bin directly and have no
+# tokenizer.json, so their base set is 3 files.
 WHISPER_BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer_vocab.bin)
 # kokoro-82m (TTS) phonemizes via espeak (assets), so it needs no tokenizer at
 # all — just the model + meta.
@@ -119,7 +121,7 @@ file_list_for() {
   local files
   if [ "${model}" = "kokoro-82m" ]; then
     files=("${KOKORO_BASE_FILES[@]}")
-  elif [ "${model}" = "whisper-tiny" ] || [ "${model}" = "musicgen-small" ]; then
+  elif [ "${model}" = "whisper-tiny" ] || [ "${model}" = "musicgen-small" ] || [ "${model}" = "seamless-m4t-unity-small" ]; then
     files=("${WHISPER_BASE_FILES[@]}")
   else
     files=("${BASE_FILES[@]}")
