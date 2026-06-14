@@ -12,7 +12,7 @@ https://github.com/user-attachments/assets/c5723e58-6bc7-4fbc-921b-59388e26f2c9
 
 Beyond text generation, three new model types now run **fully on-device** on Adreno 6xx:
 
-- **👁️ Vision (VLM)** — [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/): image + text in, text out (SigLIP vision tower + LLaMA decoder).
+- **👁️ Vision (VLM)** — [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) and [LFM2.5-VL-450M](src/models/lfm2-5-vl-450m/): image + text in, text out.
 - **🗣️ Speech (TTS)** — [MMS-TTS](src/models/mms-tts/): text in, speech out, across ~1100 languages (VITS + HiFi-GAN).
 - **🎧 Listening (ASR)** — [Whisper-tiny](src/models/whisper-tiny/): speech in, text out, with real-time streaming transcription.
 
