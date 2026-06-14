@@ -8,8 +8,8 @@ cd "$(dirname "$0")/.."
 ADB="${ADB:-adb}"
 REMOTE_DIR="${REMOTE_DIR:-/data/local/tmp/LFM2.5_350M_Base_inference}"
 
-# Dtype: NNOPT_DTYPE=fp16 picks the fp16 binary + fp16 weights, fp32 default.
-NNOPT_DTYPE="${NNOPT_DTYPE:-fp32}"
+# Dtype: NNOPT_DTYPE=fp16 (the default) picks the fp16 binary + fp16 weights.
+NNOPT_DTYPE="${NNOPT_DTYPE:-fp16}"
 case "$NNOPT_DTYPE" in
     fp16) NNOPT_BIN_SUFFIX="_fp16"; NNOPT_WEIGHTS_BIN="weights/model.fp16.bin"; NNOPT_WEIGHTS_META="weights/model.fp16.meta.json"; NNOPT_BUILD_DIR="build/fp16" ;;
     fp32|"") NNOPT_BIN_SUFFIX=""; NNOPT_WEIGHTS_BIN="weights/model.bin"; NNOPT_WEIGHTS_META="weights/model.meta.json"; NNOPT_BUILD_DIR="build" ;;
@@ -57,6 +57,31 @@ if [ -f "$OPENCL_LIB" ]; then
     echo "  libOpenCL.so deployed to device"
 else
     echo "Note: Using system OpenCL library (no cached lib found)"
+fi
+
+# Push CLBlast shared library if we linked dynamically.
+# Even if we *intend* to link CLBlast statically, some toolchains still end up
+# producing a DT_NEEDED on libclblast.so depending on how CLBlast was built.
+# Deploy it to avoid 'library "libclblast.so" not found' at runtime.
+CLBLAST_SO=""
+if [ -f "$NNOPT_BUILD_DIR/libclblast.so" ]; then
+    CLBLAST_SO="$NNOPT_BUILD_DIR/libclblast.so"
+elif [ -f "$NNOPT_BUILD_DIR/lib/libclblast.so" ]; then
+    CLBLAST_SO="$NNOPT_BUILD_DIR/lib/libclblast.so"
+elif [ -f "$NNOPT_BUILD_DIR/_deps/clblast-build/libclblast.so" ]; then
+    CLBLAST_SO="$NNOPT_BUILD_DIR/_deps/clblast-build/libclblast.so"
+elif [ -f "build/_deps/clblast-build/libclblast.so" ]; then
+    CLBLAST_SO="build/_deps/clblast-build/libclblast.so"
+elif [ -f "build/fp16/_deps/clblast-build/libclblast.so" ]; then
+    CLBLAST_SO="build/fp16/_deps/clblast-build/libclblast.so"
+fi
+
+if [ -n "$CLBLAST_SO" ]; then
+    echo "Pushing CLBlast runtime ($CLBLAST_SO)..."
+    $ADB push "$CLBLAST_SO" $REMOTE_DIR/lib/libclblast.so
+    echo "  libclblast.so deployed to device"
+else
+    echo "Note: libclblast.so not found in build outputs; assuming CLBlast was statically linked"
 fi
 
 # Push weights matching the dtype (model.bin OR model.fp16.bin — never both).

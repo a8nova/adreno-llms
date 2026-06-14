@@ -8,8 +8,8 @@ cd "$(dirname "$0")/.."
 ADB="${ADB:-adb}"
 REMOTE_DIR="${REMOTE_DIR:-/data/local/tmp/LFM2.5_VL_450M_inference}"
 
-# Dtype: NNOPT_DTYPE=fp16 picks the fp16 binary + fp16 weights, fp32 default.
-NNOPT_DTYPE="${NNOPT_DTYPE:-fp32}"
+# Dtype: NNOPT_DTYPE=fp16 (the default) picks the fp16 binary + fp16 weights.
+NNOPT_DTYPE="${NNOPT_DTYPE:-fp16}"
 case "$NNOPT_DTYPE" in
     fp16) NNOPT_BIN_SUFFIX="_fp16"; NNOPT_WEIGHTS_BIN="weights/model.fp16.bin"; NNOPT_WEIGHTS_META="weights/model.fp16.meta.json"; NNOPT_BUILD_DIR="build/fp16" ;;
     fp32|"") NNOPT_BIN_SUFFIX=""; NNOPT_WEIGHTS_BIN="weights/model.bin"; NNOPT_WEIGHTS_META="weights/model.meta.json"; NNOPT_BUILD_DIR="build" ;;
@@ -58,6 +58,20 @@ else
     echo "Note: Using system OpenCL library (no cached lib found)"
 fi
 
+# Push CLBlast — the binary is dynamically linked against libclblast.so (it
+# handles the M>1 prefill GEMMs), so without it on the device the executable
+# fails to link at launch: 'library "libclblast.so" not found'. CMake's
+# FetchContent builds it under the model's build dir.
+CLBLAST_LIB="$NNOPT_BUILD_DIR/_deps/clblast-build/libclblast.so"
+if [ -f "$CLBLAST_LIB" ]; then
+    echo "Pushing CLBlast library..."
+    $ADB push "$CLBLAST_LIB" $REMOTE_DIR/lib/libclblast.so
+    echo "  libclblast.so deployed to device"
+else
+    echo "Warning: $CLBLAST_LIB not found — the binary will fail to link at launch."
+    echo "         Build first: NNOPT_DTYPE=$NNOPT_DTYPE ./scripts/build.sh --release"
+fi
+
 # Push weights matching the dtype. Under fp16, prefer the int8 quantized
 # bundle (weights/model.int8.bin + .meta.json — per-row int8 with fp16 scales,
 # ~50% smaller and ~2x decode-bandwidth) when present. The runtime probes the
@@ -78,6 +92,19 @@ if [ -d "kernels" ]; then
     for kernel in kernels/*.cl; do
         if [ -f "$kernel" ]; then
             $ADB push "$kernel" $REMOTE_DIR/kernels/
+        fi
+    done
+fi
+
+# Push fixture image(s). run_android.sh / the README quickstart reference them
+# by device-relative path (e.g. --image fixtures/sample.jpg), so they must exist
+# on-device — otherwise the run fails opening the image on a clean deploy.
+if [ -d "fixtures" ]; then
+    echo "Pushing fixtures..."
+    $ADB shell "mkdir -p $REMOTE_DIR/fixtures"
+    for fx in fixtures/*; do
+        if [ -f "$fx" ]; then
+            $ADB push "$fx" $REMOTE_DIR/fixtures/
         fi
     done
 fi

@@ -8,8 +8,8 @@ cd "$(dirname "$0")/.."
 ADB="${ADB:-adb}"
 REMOTE_DIR="${REMOTE_DIR:-/data/local/tmp/SmolLM2_135M_Instruct_inference}"
 
-# Dtype: NNOPT_DTYPE=fp16 picks the fp16 binary + fp16 weights, fp32 default.
-NNOPT_DTYPE="${NNOPT_DTYPE:-fp32}"
+# Dtype: NNOPT_DTYPE=fp16 (the default) picks the fp16 binary + fp16 weights.
+NNOPT_DTYPE="${NNOPT_DTYPE:-fp16}"
 case "$NNOPT_DTYPE" in
     fp16) NNOPT_BIN_SUFFIX="_fp16"; NNOPT_WEIGHTS_BIN="weights/model.fp16.bin"; NNOPT_WEIGHTS_META="weights/model.fp16.meta.json"; NNOPT_BUILD_DIR="build/fp16" ;;
     fp32|"") NNOPT_BIN_SUFFIX=""; NNOPT_WEIGHTS_BIN="weights/model.bin"; NNOPT_WEIGHTS_META="weights/model.meta.json"; NNOPT_BUILD_DIR="build" ;;

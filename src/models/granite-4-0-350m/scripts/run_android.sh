@@ -10,7 +10,7 @@ REMOTE_DIR="${REMOTE_DIR:-/data/local/tmp/granite_4.0_350m_inference}"
 
 # Dtype suffix: NNOPT_DTYPE=fp16 picks <name>_inference_fp16, default fp32 picks
 # <name>_inference. The Infer tool sets this env when invoked with dtype:"fp16".
-NNOPT_DTYPE="${NNOPT_DTYPE:-fp32}"
+NNOPT_DTYPE="${NNOPT_DTYPE:-fp16}"
 case "$NNOPT_DTYPE" in
     fp16) NNOPT_BIN_SUFFIX="_fp16" ;;
     fp32|"") NNOPT_BIN_SUFFIX="" ;;
