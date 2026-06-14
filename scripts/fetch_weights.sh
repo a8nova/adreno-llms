@@ -8,8 +8,8 @@
 #   ./scripts/fetch_weights.sh all          [--quant fp16|int8|q4]
 #
 # Models:
-#   granite-4-0-350m  lfm2-5-350m  mamba-130m  mamba2-130m  qwen2-5-0-5b
-#   smollm2-135m-instruct  whisper-tiny
+#   granite-4-0-350m  lfm2-5-350m  lfm2-5-vl-450m  mamba-130m  mamba2-130m
+#   qwen2-5-0-5b  smollm2-135m-instruct  whisper-tiny
 #
 # Per model, this fetches the base set the runtime needs:
 #   weights/model.fp16.bin
@@ -38,7 +38,7 @@ HF_BRANCH="${HF_BRANCH:-main}"
 HF_BASE="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}"
 
 
-MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct)
+MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny)
 BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
 # whisper-tiny is ASR (encoder-decoder): its runtime loads tokenizer_vocab.bin
 # directly and has no tokenizer.json, so its base set is 3 files.
