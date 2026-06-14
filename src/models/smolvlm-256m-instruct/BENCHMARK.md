@@ -483,15 +483,6 @@ Build: `NNOPT_DTYPE=fp16 ./scripts/build.sh --release`, run with
 | Fast (`--image-size 384`, default) | 36 | 51 | 57.0 | 10.9 | **6.0** | 721 |
 | Quality (`--image-size 512`)       | 64 | 79 | 82.2 | 11.2 | 13.2 | 733 |
 
-Takeaways:
-- **TTFT is the mode-sensitive metric** — Fast nearly halves it (13.2 → 6.0 s)
-  by running the SigLIP tower at 24×24 instead of 32×32 (~44% less vision compute).
-- **Decode is mode-independent** (~11 tok/s single-shot) — image size only changes
-  prompt length / KV, not per-token decode work. Warm REPL with prewarm reaches
-  ~13–15 tok/s (Round 6).
-- Prefill tok/s is higher at 512 only because more tokens amortize fixed
-  per-launch cost; absolute prefill *time* is still larger at 512.
-
 ### Tooling note: `weight_384`
 
 Fast/384 needs a 24×24-interpolated copy of the SigLIP position embedding stored

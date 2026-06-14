@@ -43,7 +43,7 @@ ADB="${ADB:-adb}"
 REMOTE_DIR="${REMOTE_DIR:-/data/local/tmp/SmolVLM_256M_Instruct_inference}"
 REMOTE_UPLOAD_DIR="images_uploaded"
 
-NNOPT_DTYPE="${NNOPT_DTYPE:-fp32}"
+NNOPT_DTYPE="${NNOPT_DTYPE:-fp16}"
 case "$NNOPT_DTYPE" in
     fp16) NNOPT_BIN_SUFFIX="_fp16" ;;
     fp32|"") NNOPT_BIN_SUFFIX="" ;;

@@ -7,7 +7,16 @@ HuggingFace's smallest vision-language model ported to C++/OpenCL for Adreno 6xx
 - **Architecture:** SigLIP-based vision encoder → linear projector → LLaMA-style LM with GQA
 - **Precision:** fp16
 
-This port is at the bring-up / perf-investigation stage — see `BENCHMARK.md` for the current decode/prefill numbers. Decode is the open optimization target.
+See `BENCHMARK.md` for the full optimization log.
+
+## Performance
+
+Motorola Razr 2020 (Adreno 620 / Snapdragon 765G), fp16 release build, `NNOPT_DEBUG_LAYERS=0`, `"Describe this image."` + `fixtures/sample.jpg`, 64 decoded tokens, single-shot greedy, 3-run warm median (2026-06-03). `--image-size` selects the SigLIP input resolution.
+
+| Mode | Image tokens | Prefill tok/s | Decode tok/s | TTFT (s) | Peak CPU mem (MB) |
+|---|---:|---:|---:|---:|---:|
+| Fast (`--image-size 384`, default) | 36 | 57.0 | 10.9 | 6.0 | 721 |
+| Quality (`--image-size 512`) | 64 | 82.2 | 11.2 | 13.2 | 733 |
 
 ## Quickstart
 
