@@ -52,14 +52,11 @@ Decode tok/s = warm 3-run median, greedy (`--temperature 0`), 32-token generatio
 
 ### Vision-language
 
-Workload: `"Describe this image."` + sample JPEG, 64 decoded tokens, single-shot greedy. TTFT includes image preprocessing, vision tower, projector, and weight loading (~513 MB). 3-run warm median, fp16 release build (`NNOPT_DEBUG_LAYERS=0`). Measured 2026-06-03.
-
-SmolVLM has two image-resolution modes (`--image-size`) that trade vision-tower cost for detail — TTFT in particular nearly halves in Fast mode. Decode is mode-independent (~11 tok/s single-shot; warm REPL with prewarm is higher — see [BENCHMARK.md](src/models/smolvlm-256m-instruct/BENCHMARK.md)).
+Workload: `"Describe this image."` + sample JPEG, 64 decoded tokens, single-shot greedy. TTFT includes image preprocessing, vision tower, projector, and weight loading (~513 MB). 3-run warm median, fp16 release build (`NNOPT_DEBUG_LAYERS=0`). Measured 2026-06-03. Default Fast mode (`--image-size 384`); see the [model README](src/models/smolvlm-256m-instruct/) for the Quality (512) mode.
 
 | Model | Precision | Params | Architecture | Prefill tok/s | Decode tok/s | TTFT (s) | Peak CPU mem (MB) | Notes |
 |---|:-:|---:|---|---:|---:|---:|---:|---|
-| [SmolVLM-256M](src/models/smolvlm-256m-instruct/) **Fast** (`--image-size 384`) | fp16 | 256M | SigLIP + LLaMA (GQA) | 57.0 | **10.9** | **6.0** | 721 | default; 24×24 grid → 36 image tokens |
-| [SmolVLM-256M](src/models/smolvlm-256m-instruct/) **Quality** (`--image-size 512`) | fp16 | 256M | SigLIP + LLaMA (GQA) | 82.2 | **11.2** | 13.2 | 733 | 32×32 grid → 64 image tokens (upstream training res) |
+| [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) | fp16 | 256M | SigLIP + LLaMA (GQA) | 57.0 | **10.9** | **6.0** | 721 | Fast/384 default; 36 image tokens |
 
 ### Text-to-speech
 
@@ -68,6 +65,14 @@ RTF = wall time / audio duration (lower is better; RTF ≤ 1.0 = real-time). Mea
 | Model | Precision | Params | Architecture | RTF | Audio | Wall (s) | Peak CPU mem (MB) | Notes |
 |---|:-:|---:|---|---:|---:|---:|---:|---|
 | [MMS-TTS](src/models/mms-tts/) | fp16 | 36M | VITS (enc + flow + HiFi-GAN) | **1.3** | 7.8 s | ~10.1 | 686 | ~1100 languages; per-op cosine ≥ 0.996 vs HF reference |
+
+### Speech-to-text (ASR)
+
+RTF = processing time / audio duration (lower is better; < 1.0 = faster than real time). 10-clip LibriSpeech set, batch mode (model loaded once, JIT amortized), 3-run warm median. Measured 2026-06-14.
+
+| Model | Precision | Params | Architecture | RTF | Audio | Wall (s) | Peak CPU mem (MB) | Notes |
+|---|:-:|---:|---|---:|---:|---:|---:|---|
+| [Whisper-tiny](src/models/whisper-tiny/) | fp16 | 37M | Whisper encoder-decoder (4 enc + 4 dec, d=384) | **0.53** | 109.8 s | ~58.2 | 458 | faster than real time; 9/10 byte-exact; long clips (18–29 s) ~0.40; live streaming + VAD mode |
 
 
 State-of-the-art small language models running on **Adreno 6xx GPUs** — the GPU class found in mid-range Android phones. Pure C++/OpenCL inference, cross-compiled on macOS, deployed via `adb` to `/data/local/tmp/`.
