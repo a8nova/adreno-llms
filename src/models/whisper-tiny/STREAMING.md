@@ -10,10 +10,19 @@ mel → encoder → decoder pipeline as the batch path (aggregate RTF 0.529).
 - **Energy VAD** (per-30ms-frame RMS with hysteresis) finds speech and the pauses
   between phrases.
 - **Sliding window:** while a phrase is in progress it re-transcribes the growing
-  window every `--step-ms` and emits `PARTIAL: <text>` (live, refining).
+  window every `--step-ms` and emits `PARTIAL [t0-t1]: <text>` (live, refining).
 - When the VAD sees `--hangover-ms` of trailing silence (end of phrase), or the
-  window reaches Whisper's 30 s limit, it emits `FINAL: <text>` and clears the
-  window. On stdin EOF any in-progress phrase is flushed as a `FINAL`.
+  window reaches Whisper's 30 s limit, it emits `FINAL [t0-t1]: <text>` and clears
+  the window. On stdin EOF any in-progress phrase is flushed as a `FINAL`.
+- **`[t0-t1]` = the phrase's position in the global stdin stream** (seconds since
+  the first sample fed). The host counts the samples it writes, so it can (a) drop
+  events from audio fed before a UI reset — a FINAL takes seconds to decode and can
+  land after the user started a new recording session — and (b) key phrases by
+  start offset, making replace-vs-append structural (no text heuristics).
+- **FINAL loop guard:** finals decode with a fast ~12 s padded floor; if the text
+  repeats a 4-gram verbatim (Whisper-tiny re-reading padded silence — the floor is
+  out-of-distribution vs its fixed-30s training), the engine logs `STREAM_REDO` on
+  stderr and re-decodes that phrase with the full 30 s pad, which doesn't loop.
 
 Energy VAD naturally segments on sentence-boundary pauses, so each spoken sentence
 typically comes out as its own `FINAL`.
@@ -28,10 +37,23 @@ adb shell "cd $REMOTE_DIR && LD_LIBRARY_PATH=$REMOTE_DIR/lib:/system/vendor/lib6
 
 Output (stdout):
 ```
-PARTIAL:  Nor is Mr. Quilters' manner less interesting than he
-FINAL:  Nor is Mr. Quilters' manner less interesting than his matter.
+PARTIAL [0.60-3.90]:  Nor is Mr. Quilters' manner less interesting than he
+FINAL [0.60-5.73]:  Nor is Mr. Quilters' manner less interesting than his matter.
 ```
-`STREAM: ready …` / `STREAM: end …` diagnostics go to stderr.
+`STREAM: ready …` / `STREAM: end …` / `STREAM_SEG` / `STREAM_REDO` diagnostics go
+to stderr.
+
+## Deterministic replay testing (no mic needed)
+
+A replay harness pipes the LibriSpeech bench clips into `--stream` on-device,
+**paced at 1× real time in 100 ms chunks** — byte-for-byte what the app's mic
+capture does — and records timestamped event logs (JSONL). Scenarios cover:
+short utterance, two utterances split by a pause, ~29 s continuous speech
+(soft/force segmentation), and a stop→start session race. The logs double as
+fixtures for the app-side `TranscriptReducer` JVM tests, which assert
+append-only committed text, no duplicated 4-grams, LocalAgreement monotonicity,
+and reset-fence isolation. (The replay harness and the app-side tests land with
+the See & Say streaming integration.)
 
 ### Flags
 

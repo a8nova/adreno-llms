@@ -50,12 +50,12 @@ static inline const char* nnopt_basename(const char* path) {
 // Error logging — ALWAYS active (even in release). Errors are critical.
 // ──────────────────────────────────────────────
 #define NNOPT_ERROR(msg) do { \
-    fprintf(stderr, "ERROR: %s (%s:%d)\\n", (msg), nnopt_basename(__FILE__), __LINE__); \
+    fprintf(stderr, "ERROR: %s (%s:%d)\n", (msg), nnopt_basename(__FILE__), __LINE__); \
     fflush(stderr); \
 } while(0)
 
 #define NNOPT_ERROR_FMT(fmt, ...) do { \
-    fprintf(stderr, "ERROR: " fmt " (%s:%d)\\n", __VA_ARGS__, nnopt_basename(__FILE__), __LINE__); \
+    fprintf(stderr, "ERROR: " fmt " (%s:%d)\n", __VA_ARGS__, nnopt_basename(__FILE__), __LINE__); \
     fflush(stderr); \
 } while(0)
 
@@ -68,7 +68,7 @@ static inline const char* nnopt_basename(const char* path) {
 #define NNOPT_TODO(what) do { \
     static bool _nnopt_todo_logged = false; \
     if (!_nnopt_todo_logged) { \
-        fprintf(stderr, "NNOPT_TODO: %s is not yet wired — using slow default path (%s:%d)\\n", \
+        fprintf(stderr, "NNOPT_TODO: %s is not yet wired — using slow default path (%s:%d)\n", \
                 (what), nnopt_basename(__FILE__), __LINE__); \
         fflush(stderr); \
         _nnopt_todo_logged = true; \
@@ -118,13 +118,13 @@ static int  g_checkpoint_count     = 0;
 
 #define NNOPT_CHECKPOINT(msg) do { \
     snprintf(g_last_checkpoint, sizeof(g_last_checkpoint), "%s", (msg)); \
-    fprintf(stderr, "CHECKPOINT[%d]: %s (%s:%d)\\n", ++g_checkpoint_count, (msg), nnopt_basename(__FILE__), __LINE__); \
+    fprintf(stderr, "CHECKPOINT[%d]: %s (%s:%d)\n", ++g_checkpoint_count, (msg), nnopt_basename(__FILE__), __LINE__); \
     fflush(stderr); \
 } while(0)
 
 #define NNOPT_CHECKPOINT_FMT(fmt, ...) do { \
     snprintf(g_last_checkpoint, sizeof(g_last_checkpoint), fmt, __VA_ARGS__); \
-    fprintf(stderr, "CHECKPOINT[%d]: " fmt " (%s:%d)\\n", ++g_checkpoint_count, __VA_ARGS__, nnopt_basename(__FILE__), __LINE__); \
+    fprintf(stderr, "CHECKPOINT[%d]: " fmt " (%s:%d)\n", ++g_checkpoint_count, __VA_ARGS__, nnopt_basename(__FILE__), __LINE__); \
     fflush(stderr); \
 } while(0)
 
@@ -133,28 +133,28 @@ static char g_last_layer_op[512] = {0};
 
 #define NNOPT_LAYER_INIT(name) do { \
     snprintf(g_last_layer_op, sizeof(g_last_layer_op), "INIT: %s", (name)); \
-    fprintf(stderr, "LAYER_INIT: %s (%s:%d)\\n", (name), nnopt_basename(__FILE__), __LINE__); fflush(stderr); \
+    fprintf(stderr, "LAYER_INIT: %s (%s:%d)\n", (name), nnopt_basename(__FILE__), __LINE__); fflush(stderr); \
 } while(0)
 
 #define NNOPT_LAYER_INIT_FMT(fmt, idx) do { \
     char _li_name[256]; snprintf(_li_name, sizeof(_li_name), fmt, idx); \
     snprintf(g_last_layer_op, sizeof(g_last_layer_op), "INIT: %s", _li_name); \
-    fprintf(stderr, "LAYER_INIT: %s (%s:%d)\\n", _li_name, nnopt_basename(__FILE__), __LINE__); fflush(stderr); \
+    fprintf(stderr, "LAYER_INIT: %s (%s:%d)\n", _li_name, nnopt_basename(__FILE__), __LINE__); fflush(stderr); \
 } while(0)
 
 #define NNOPT_LAYER_WEIGHTS(name) do { \
     snprintf(g_last_layer_op, sizeof(g_last_layer_op), "WEIGHTS: %s", (name)); \
-    fprintf(stderr, "LAYER_WEIGHTS: %s (%s:%d)\\n", (name), nnopt_basename(__FILE__), __LINE__); fflush(stderr); \
+    fprintf(stderr, "LAYER_WEIGHTS: %s (%s:%d)\n", (name), nnopt_basename(__FILE__), __LINE__); fflush(stderr); \
 } while(0)
 
 #define NNOPT_LAYER_FWD(name) do { \
     snprintf(g_last_layer_op, sizeof(g_last_layer_op), "FWD: %s", (name)); \
-    fprintf(stderr, "LAYER_FWD: %s (%s:%d)\\n", (name), nnopt_basename(__FILE__), __LINE__); fflush(stderr); \
+    fprintf(stderr, "LAYER_FWD: %s (%s:%d)\n", (name), nnopt_basename(__FILE__), __LINE__); fflush(stderr); \
 } while(0)
 
 #define NNOPT_LAYER_FWD_DONE(name) do { \
     snprintf(g_last_layer_op, sizeof(g_last_layer_op), "FWD_DONE: %s", (name)); \
-    fprintf(stderr, "LAYER_FWD_DONE: %s (%s:%d)\\n", (name), nnopt_basename(__FILE__), __LINE__); fflush(stderr); \
+    fprintf(stderr, "LAYER_FWD_DONE: %s (%s:%d)\n", (name), nnopt_basename(__FILE__), __LINE__); fflush(stderr); \
 } while(0)
 
 // Per-layer numerical validation
