@@ -1,0 +1,149 @@
+{
+  "produced_by": "_run_reference.py",
+  "script_version": "2026-06-03-encdec-generic-forward-v4-waveform-capture",
+  "transformers_version": "4.44.0",
+  "pytorch_version": "2.2.2",
+  "python_version": "3.12.9",
+  "input_ids": [
+    6899,
+    18,
+    89,
+    23,
+    723,
+    28,
+    3,
+    9,
+    21785,
+    27832,
+    1
+  ],
+  "generated_ids": [],
+  "prompt": "lo-fi music with a soothing melody",
+  "reference_text": "",
+  "generated_text": "",
+  "max_new_tokens": 7,
+  "model_id": "facebook/musicgen-small",
+  "test_prompts": [
+    {
+      "prompt": "lo-fi music with a soothing melody",
+      "input_ids": [
+        6899,
+        18,
+        89,
+        23,
+        723,
+        28,
+        3,
+        9,
+        21785,
+        27832,
+        1
+      ]
+    },
+    {
+      "prompt": "Hello",
+      "input_ids": [
+        8774,
+        1
+      ]
+    },
+    {
+      "prompt": "Hello, world!",
+      "input_ids": [
+        8774,
+        6,
+        296,
+        55,
+        1
+      ]
+    },
+    {
+      "prompt": "The quick brown fox jumps over the lazy dog.",
+      "input_ids": [
+        37,
+        1704,
+        4216,
+        3,
+        20400,
+        4418,
+        7,
+        147,
+        8,
+        19743,
+        1782,
+        5,
+        1
+      ]
+    },
+    {
+      "prompt": "  leading and   multiple   whitespace  ",
+      "input_ids": [
+        1374,
+        11,
+        1317,
+        872,
+        6633,
+        1
+      ]
+    },
+    {
+      "prompt": "Numbers 0 1 2 3 and code def f(x): return x**2",
+      "input_ids": [
+        7720,
+        7,
+        3,
+        632,
+        209,
+        204,
+        220,
+        11,
+        1081,
+        20,
+        89,
+        3,
+        89,
+        599,
+        226,
+        61,
+        10,
+        1205,
+        3,
+        226,
+        19844,
+        357,
+        1
+      ]
+    },
+    {
+      "prompt": "Email: user@example.com (2024-01-01)",
+      "input_ids": [
+        8601,
+        10,
+        1139,
+        1741,
+        994,
+        9,
+        9208,
+        5,
+        287,
+        17543,
+        2266,
+        14772,
+        14772,
+        61,
+        1
+      ]
+    },
+    {
+      "prompt": "\n\tnewlines and\ttabs\n",
+      "input_ids": [
+        126,
+        6972,
+        11,
+        3808,
+        7,
+        1
+      ]
+    }
+  ]
+}

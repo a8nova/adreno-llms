@@ -55,3 +55,19 @@ adreno-llms-demos/
 
 # Local Claude Code config
 **/.claude/
+
+# espeak-ng phonemizer data for Kokoro — fetched per-language from HF via
+# scripts/fetch_espeak_lang.sh (English base + add-on languages), not committed.
+**/assets/espeak-ng-data/
+
+# Kokoro voice packs — fetched from HF (54 voices) via scripts/fetch_voice.sh,
+# not committed (the default af_heart is just one of them).
+**/assets/voice_pack_*.bin
+
+# Editor/agent backup files — never commit these
+*.bak
+*.megabak
+*bak
+*.orig
+*.swp
+*~

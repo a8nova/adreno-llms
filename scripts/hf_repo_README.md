@@ -40,6 +40,8 @@ Decode tok/s = 5-run warm median, fp16, greedy (`temperature=0, seed=42`), 32-to
 | `lfm2-5-350m/model.fp16.bin` | [LiquidAI/LFM2.5-350M-Base](https://huggingface.co/LiquidAI/LFM2.5-350M-Base) | 350M | 10.20 | Liquid AI Open License |
 | `qwen2-5-0-5b/model.fp16.bin` | [Qwen/Qwen2.5-0.5B](https://huggingface.co/Qwen/Qwen2.5-0.5B) | 500M | 8.45 | Apache 2.0 |
 | `whisper-tiny/model.fp16.bin` | [openai/whisper-tiny](https://huggingface.co/openai/whisper-tiny) | 39M | ASR (see repo) | Apache 2.0 |
+| `kokoro-82m/model.fp16.bin` | [hexgrad/Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | 82M | TTS (see repo) | Apache 2.0 |
+| `musicgen-small/model.fp16.bin` | [facebook/musicgen-small](https://huggingface.co/facebook/musicgen-small) | ~590M | text→music (see repo) | CC-BY-NC 4.0 |
 | `openelm-270m/` (companion files only) | [apple/OpenELM-270M](https://huggingface.co/apple/OpenELM-270M) | 270M | 4.47 | Apple ASCL — fetch + convert locally |
 
 **OpenELM-270M is partially hosted here.** Under `openelm-270m/` you'll find only the small companion files:

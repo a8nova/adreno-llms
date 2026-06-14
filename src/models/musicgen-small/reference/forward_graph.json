@@ -1,0 +1,4595 @@
+{
+  "version": 1,
+  "model_class": "MusicgenForConditionalGeneration",
+  "nodes": [
+    {
+      "op": "Embedding",
+      "dump_name": "embedding_wte",
+      "module_path": "text_encoder.shared",
+      "input_shape": [
+        1,
+        11
+      ],
+      "output_shape": [
+        1,
+        11,
+        768
+      ],
+      "order": 0,
+      "weight_prefix": "text_encoder.shared",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "T5Block",
+      "dump_name": "embedding",
+      "module_path": "text_encoder.encoder.block.0",
+      "input_shape": [
+        1,
+        11,
+        768
+      ],
+      "output_shape": [
+        1,
+        11,
+        768
+      ],
+      "order": 1,
+      "weight_prefix": null,
+      "is_pre_hook": true
+    },
+    {
+      "op": "T5LayerNorm",
+      "dump_name": "final_norm",
+      "module_path": "text_encoder.encoder.block.0.layer.0.layer_norm",
+      "input_shape": [
+        1,
+        11,
+        768
+      ],
+      "output_shape": [
+        1,
+        11,
+        768
+      ],
+      "order": 2,
+      "weight_prefix": "text_encoder.encoder.block.0.layer.0.layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "T5Block",
+      "dump_name": "block_layer_0",
+      "module_path": "text_encoder.encoder.block.0.layer",
+      "input_shape": [
+        1,
+        11,
+        768
+      ],
+      "output_shape": [
+        1,
+        11,
+        768
+      ],
+      "order": 3,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "T5Block",
+      "dump_name": "block_layer_1",
+      "module_path": "text_encoder.encoder.block.1.layer",
+      "input_shape": [
+        1,
+        11,
+        768
+      ],
+      "output_shape": [
+        1,
+        11,
+        768
+      ],
+      "order": 4,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "T5Block",
+      "dump_name": "block_layer_2",
+      "module_path": "text_encoder.encoder.block.2.layer",
+      "input_shape": [
+        1,
+        11,
+        768
+      ],
+      "output_shape": [
+        1,
+        11,
+        768
+      ],
+      "order": 5,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "T5Block",
+      "dump_name": "block_layer_3",
+      "module_path": "text_encoder.encoder.block.3.layer",
+      "input_shape": [
+        1,
+        11,
+        768
+      ],
+      "output_shape": [
+        1,
+        11,
+        768
+      ],
+      "order": 6,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "T5Block",
+      "dump_name": "block_layer_4",
+      "module_path": "text_encoder.encoder.block.4.layer",
+      "input_shape": [
+        1,
+        11,
+        768
+      ],
+      "output_shape": [
+        1,
+        11,
+        768
+      ],
+      "order": 7,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "T5Block",
+      "dump_name": "block_layer_5",
+      "module_path": "text_encoder.encoder.block.5.layer",
+      "input_shape": [
+        1,
+        11,
+        768
+      ],
+      "output_shape": [
+        1,
+        11,
+        768
+      ],
+      "order": 8,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "T5Block",
+      "dump_name": "block_layer_6",
+      "module_path": "text_encoder.encoder.block.6.layer",
+      "input_shape": [
+        1,
+        11,
+        768
+      ],
+      "output_shape": [
+        1,
+        11,
+        768
+      ],
+      "order": 9,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "T5Block",
+      "dump_name": "block_layer_7",
+      "module_path": "text_encoder.encoder.block.7.layer",
+      "input_shape": [
+        1,
+        11,
+        768
+      ],
+      "output_shape": [
+        1,
+        11,
+        768
+      ],
+      "order": 10,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "T5Block",
+      "dump_name": "block_layer_8",
+      "module_path": "text_encoder.encoder.block.8.layer",
+      "input_shape": [
+        1,
+        11,
+        768
+      ],
+      "output_shape": [
+        1,
+        11,
+        768
+      ],
+      "order": 11,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "T5Block",
+      "dump_name": "block_layer_9",
+      "module_path": "text_encoder.encoder.block.9.layer",
+      "input_shape": [
+        1,
+        11,
+        768
+      ],
+      "output_shape": [
+        1,
+        11,
+        768
+      ],
+      "order": 12,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "T5Block",
+      "dump_name": "block_layer_10",
+      "module_path": "text_encoder.encoder.block.10.layer",
+      "input_shape": [
+        1,
+        11,
+        768
+      ],
+      "output_shape": [
+        1,
+        11,
+        768
+      ],
+      "order": 13,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "T5Block",
+      "dump_name": "block_layer_11",
+      "module_path": "text_encoder.encoder.block.11.layer",
+      "input_shape": [
+        1,
+        11,
+        768
+      ],
+      "output_shape": [
+        1,
+        11,
+        768
+      ],
+      "order": 14,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Embedding",
+      "dump_name": "decoder_model_decoder_embed_tokens_frontend_out",
+      "module_path": "decoder.model.decoder.embed_tokens",
+      "input_shape": [
+        1,
+        1
+      ],
+      "output_shape": [
+        1,
+        1
+      ],
+      "order": 15,
+      "weight_prefix": "decoder.model.decoder.embed_tokens",
+      "is_pre_hook": true
+    },
+    {
+      "op": "Embedding",
+      "dump_name": "embed_tokens_layer_0",
+      "module_path": "decoder.model.decoder.embed_tokens.0",
+      "input_shape": [
+        1,
+        1
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 16,
+      "weight_prefix": "decoder.model.decoder.embed_tokens.0",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Embedding",
+      "dump_name": "embed_tokens_layer_1",
+      "module_path": "decoder.model.decoder.embed_tokens.1",
+      "input_shape": [
+        1,
+        1
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 17,
+      "weight_prefix": "decoder.model.decoder.embed_tokens.1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Embedding",
+      "dump_name": "embed_tokens_layer_2",
+      "module_path": "decoder.model.decoder.embed_tokens.2",
+      "input_shape": [
+        1,
+        1
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 18,
+      "weight_prefix": "decoder.model.decoder.embed_tokens.2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Embedding",
+      "dump_name": "embed_tokens_layer_3",
+      "module_path": "decoder.model.decoder.embed_tokens.3",
+      "input_shape": [
+        1,
+        1
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 19,
+      "weight_prefix": "decoder.model.decoder.embed_tokens.3",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "decoder_model_decoder_frontend_out",
+      "module_path": "decoder.model.decoder",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 20,
+      "weight_prefix": null,
+      "is_pre_hook": true
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_0",
+      "module_path": "decoder.model.decoder.layers.0.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 21,
+      "weight_prefix": "decoder.model.decoder.layers.0.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_0",
+      "module_path": "decoder.model.decoder.layers.0.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 22,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_0",
+      "module_path": "decoder.model.decoder.layers.0.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 23,
+      "weight_prefix": "decoder.model.decoder.layers.0.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_0",
+      "module_path": "decoder.model.decoder.layers.0.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 24,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_0",
+      "module_path": "decoder.model.decoder.layers.0.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 25,
+      "weight_prefix": "decoder.model.decoder.layers.0.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_0",
+      "module_path": "decoder.model.decoder.layers.0.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 26,
+      "weight_prefix": "decoder.model.decoder.layers.0.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_0",
+      "module_path": "decoder.model.decoder.layers.0.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 27,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_0",
+      "module_path": "decoder.model.decoder.layers.0.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 28,
+      "weight_prefix": "decoder.model.decoder.layers.0.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_0",
+      "module_path": "decoder.model.decoder.layers.0",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 29,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_1",
+      "module_path": "decoder.model.decoder.layers.1.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 30,
+      "weight_prefix": "decoder.model.decoder.layers.1.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_1",
+      "module_path": "decoder.model.decoder.layers.1.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 31,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_1",
+      "module_path": "decoder.model.decoder.layers.1.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 32,
+      "weight_prefix": "decoder.model.decoder.layers.1.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_1",
+      "module_path": "decoder.model.decoder.layers.1.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 33,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_1",
+      "module_path": "decoder.model.decoder.layers.1.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 34,
+      "weight_prefix": "decoder.model.decoder.layers.1.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_1",
+      "module_path": "decoder.model.decoder.layers.1.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 35,
+      "weight_prefix": "decoder.model.decoder.layers.1.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_1",
+      "module_path": "decoder.model.decoder.layers.1.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 36,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_1",
+      "module_path": "decoder.model.decoder.layers.1.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 37,
+      "weight_prefix": "decoder.model.decoder.layers.1.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_1",
+      "module_path": "decoder.model.decoder.layers.1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 38,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_2",
+      "module_path": "decoder.model.decoder.layers.2.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 39,
+      "weight_prefix": "decoder.model.decoder.layers.2.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_2",
+      "module_path": "decoder.model.decoder.layers.2.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 40,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_2",
+      "module_path": "decoder.model.decoder.layers.2.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 41,
+      "weight_prefix": "decoder.model.decoder.layers.2.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_2",
+      "module_path": "decoder.model.decoder.layers.2.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 42,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_2",
+      "module_path": "decoder.model.decoder.layers.2.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 43,
+      "weight_prefix": "decoder.model.decoder.layers.2.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_2",
+      "module_path": "decoder.model.decoder.layers.2.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 44,
+      "weight_prefix": "decoder.model.decoder.layers.2.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_2",
+      "module_path": "decoder.model.decoder.layers.2.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 45,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_2",
+      "module_path": "decoder.model.decoder.layers.2.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 46,
+      "weight_prefix": "decoder.model.decoder.layers.2.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_2",
+      "module_path": "decoder.model.decoder.layers.2",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 47,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_3",
+      "module_path": "decoder.model.decoder.layers.3.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 48,
+      "weight_prefix": "decoder.model.decoder.layers.3.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_3",
+      "module_path": "decoder.model.decoder.layers.3.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 49,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_3",
+      "module_path": "decoder.model.decoder.layers.3.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 50,
+      "weight_prefix": "decoder.model.decoder.layers.3.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_3",
+      "module_path": "decoder.model.decoder.layers.3.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 51,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_3",
+      "module_path": "decoder.model.decoder.layers.3.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 52,
+      "weight_prefix": "decoder.model.decoder.layers.3.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_3",
+      "module_path": "decoder.model.decoder.layers.3.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 53,
+      "weight_prefix": "decoder.model.decoder.layers.3.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_3",
+      "module_path": "decoder.model.decoder.layers.3.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 54,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_3",
+      "module_path": "decoder.model.decoder.layers.3.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 55,
+      "weight_prefix": "decoder.model.decoder.layers.3.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_3",
+      "module_path": "decoder.model.decoder.layers.3",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 56,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_4",
+      "module_path": "decoder.model.decoder.layers.4.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 57,
+      "weight_prefix": "decoder.model.decoder.layers.4.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_4",
+      "module_path": "decoder.model.decoder.layers.4.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 58,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_4",
+      "module_path": "decoder.model.decoder.layers.4.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 59,
+      "weight_prefix": "decoder.model.decoder.layers.4.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_4",
+      "module_path": "decoder.model.decoder.layers.4.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 60,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_4",
+      "module_path": "decoder.model.decoder.layers.4.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 61,
+      "weight_prefix": "decoder.model.decoder.layers.4.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_4",
+      "module_path": "decoder.model.decoder.layers.4.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 62,
+      "weight_prefix": "decoder.model.decoder.layers.4.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_4",
+      "module_path": "decoder.model.decoder.layers.4.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 63,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_4",
+      "module_path": "decoder.model.decoder.layers.4.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 64,
+      "weight_prefix": "decoder.model.decoder.layers.4.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_4",
+      "module_path": "decoder.model.decoder.layers.4",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 65,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_5",
+      "module_path": "decoder.model.decoder.layers.5.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 66,
+      "weight_prefix": "decoder.model.decoder.layers.5.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_5",
+      "module_path": "decoder.model.decoder.layers.5.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 67,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_5",
+      "module_path": "decoder.model.decoder.layers.5.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 68,
+      "weight_prefix": "decoder.model.decoder.layers.5.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_5",
+      "module_path": "decoder.model.decoder.layers.5.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 69,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_5",
+      "module_path": "decoder.model.decoder.layers.5.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 70,
+      "weight_prefix": "decoder.model.decoder.layers.5.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_5",
+      "module_path": "decoder.model.decoder.layers.5.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 71,
+      "weight_prefix": "decoder.model.decoder.layers.5.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_5",
+      "module_path": "decoder.model.decoder.layers.5.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 72,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_5",
+      "module_path": "decoder.model.decoder.layers.5.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 73,
+      "weight_prefix": "decoder.model.decoder.layers.5.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_5",
+      "module_path": "decoder.model.decoder.layers.5",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 74,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_6",
+      "module_path": "decoder.model.decoder.layers.6.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 75,
+      "weight_prefix": "decoder.model.decoder.layers.6.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_6",
+      "module_path": "decoder.model.decoder.layers.6.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 76,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_6",
+      "module_path": "decoder.model.decoder.layers.6.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 77,
+      "weight_prefix": "decoder.model.decoder.layers.6.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_6",
+      "module_path": "decoder.model.decoder.layers.6.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 78,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_6",
+      "module_path": "decoder.model.decoder.layers.6.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 79,
+      "weight_prefix": "decoder.model.decoder.layers.6.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_6",
+      "module_path": "decoder.model.decoder.layers.6.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 80,
+      "weight_prefix": "decoder.model.decoder.layers.6.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_6",
+      "module_path": "decoder.model.decoder.layers.6.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 81,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_6",
+      "module_path": "decoder.model.decoder.layers.6.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 82,
+      "weight_prefix": "decoder.model.decoder.layers.6.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_6",
+      "module_path": "decoder.model.decoder.layers.6",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 83,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_7",
+      "module_path": "decoder.model.decoder.layers.7.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 84,
+      "weight_prefix": "decoder.model.decoder.layers.7.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_7",
+      "module_path": "decoder.model.decoder.layers.7.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 85,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_7",
+      "module_path": "decoder.model.decoder.layers.7.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 86,
+      "weight_prefix": "decoder.model.decoder.layers.7.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_7",
+      "module_path": "decoder.model.decoder.layers.7.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 87,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_7",
+      "module_path": "decoder.model.decoder.layers.7.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 88,
+      "weight_prefix": "decoder.model.decoder.layers.7.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_7",
+      "module_path": "decoder.model.decoder.layers.7.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 89,
+      "weight_prefix": "decoder.model.decoder.layers.7.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_7",
+      "module_path": "decoder.model.decoder.layers.7.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 90,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_7",
+      "module_path": "decoder.model.decoder.layers.7.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 91,
+      "weight_prefix": "decoder.model.decoder.layers.7.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_7",
+      "module_path": "decoder.model.decoder.layers.7",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 92,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_8",
+      "module_path": "decoder.model.decoder.layers.8.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 93,
+      "weight_prefix": "decoder.model.decoder.layers.8.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_8",
+      "module_path": "decoder.model.decoder.layers.8.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 94,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_8",
+      "module_path": "decoder.model.decoder.layers.8.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 95,
+      "weight_prefix": "decoder.model.decoder.layers.8.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_8",
+      "module_path": "decoder.model.decoder.layers.8.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 96,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_8",
+      "module_path": "decoder.model.decoder.layers.8.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 97,
+      "weight_prefix": "decoder.model.decoder.layers.8.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_8",
+      "module_path": "decoder.model.decoder.layers.8.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 98,
+      "weight_prefix": "decoder.model.decoder.layers.8.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_8",
+      "module_path": "decoder.model.decoder.layers.8.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 99,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_8",
+      "module_path": "decoder.model.decoder.layers.8.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 100,
+      "weight_prefix": "decoder.model.decoder.layers.8.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_8",
+      "module_path": "decoder.model.decoder.layers.8",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 101,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_9",
+      "module_path": "decoder.model.decoder.layers.9.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 102,
+      "weight_prefix": "decoder.model.decoder.layers.9.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_9",
+      "module_path": "decoder.model.decoder.layers.9.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 103,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_9",
+      "module_path": "decoder.model.decoder.layers.9.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 104,
+      "weight_prefix": "decoder.model.decoder.layers.9.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_9",
+      "module_path": "decoder.model.decoder.layers.9.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 105,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_9",
+      "module_path": "decoder.model.decoder.layers.9.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 106,
+      "weight_prefix": "decoder.model.decoder.layers.9.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_9",
+      "module_path": "decoder.model.decoder.layers.9.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 107,
+      "weight_prefix": "decoder.model.decoder.layers.9.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_9",
+      "module_path": "decoder.model.decoder.layers.9.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 108,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_9",
+      "module_path": "decoder.model.decoder.layers.9.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 109,
+      "weight_prefix": "decoder.model.decoder.layers.9.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_9",
+      "module_path": "decoder.model.decoder.layers.9",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 110,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_10",
+      "module_path": "decoder.model.decoder.layers.10.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 111,
+      "weight_prefix": "decoder.model.decoder.layers.10.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_10",
+      "module_path": "decoder.model.decoder.layers.10.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 112,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_10",
+      "module_path": "decoder.model.decoder.layers.10.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 113,
+      "weight_prefix": "decoder.model.decoder.layers.10.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_10",
+      "module_path": "decoder.model.decoder.layers.10.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 114,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_10",
+      "module_path": "decoder.model.decoder.layers.10.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 115,
+      "weight_prefix": "decoder.model.decoder.layers.10.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_10",
+      "module_path": "decoder.model.decoder.layers.10.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 116,
+      "weight_prefix": "decoder.model.decoder.layers.10.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_10",
+      "module_path": "decoder.model.decoder.layers.10.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 117,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_10",
+      "module_path": "decoder.model.decoder.layers.10.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 118,
+      "weight_prefix": "decoder.model.decoder.layers.10.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_10",
+      "module_path": "decoder.model.decoder.layers.10",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 119,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_11",
+      "module_path": "decoder.model.decoder.layers.11.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 120,
+      "weight_prefix": "decoder.model.decoder.layers.11.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_11",
+      "module_path": "decoder.model.decoder.layers.11.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 121,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_11",
+      "module_path": "decoder.model.decoder.layers.11.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 122,
+      "weight_prefix": "decoder.model.decoder.layers.11.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_11",
+      "module_path": "decoder.model.decoder.layers.11.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 123,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_11",
+      "module_path": "decoder.model.decoder.layers.11.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 124,
+      "weight_prefix": "decoder.model.decoder.layers.11.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_11",
+      "module_path": "decoder.model.decoder.layers.11.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 125,
+      "weight_prefix": "decoder.model.decoder.layers.11.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_11",
+      "module_path": "decoder.model.decoder.layers.11.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 126,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_11",
+      "module_path": "decoder.model.decoder.layers.11.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 127,
+      "weight_prefix": "decoder.model.decoder.layers.11.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_11",
+      "module_path": "decoder.model.decoder.layers.11",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 128,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_12",
+      "module_path": "decoder.model.decoder.layers.12.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 129,
+      "weight_prefix": "decoder.model.decoder.layers.12.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_12",
+      "module_path": "decoder.model.decoder.layers.12.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 130,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_12",
+      "module_path": "decoder.model.decoder.layers.12.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 131,
+      "weight_prefix": "decoder.model.decoder.layers.12.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_12",
+      "module_path": "decoder.model.decoder.layers.12.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 132,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_12",
+      "module_path": "decoder.model.decoder.layers.12.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 133,
+      "weight_prefix": "decoder.model.decoder.layers.12.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_12",
+      "module_path": "decoder.model.decoder.layers.12.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 134,
+      "weight_prefix": "decoder.model.decoder.layers.12.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_12",
+      "module_path": "decoder.model.decoder.layers.12.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 135,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_12",
+      "module_path": "decoder.model.decoder.layers.12.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 136,
+      "weight_prefix": "decoder.model.decoder.layers.12.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_12",
+      "module_path": "decoder.model.decoder.layers.12",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 137,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_13",
+      "module_path": "decoder.model.decoder.layers.13.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 138,
+      "weight_prefix": "decoder.model.decoder.layers.13.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_13",
+      "module_path": "decoder.model.decoder.layers.13.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 139,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_13",
+      "module_path": "decoder.model.decoder.layers.13.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 140,
+      "weight_prefix": "decoder.model.decoder.layers.13.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_13",
+      "module_path": "decoder.model.decoder.layers.13.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 141,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_13",
+      "module_path": "decoder.model.decoder.layers.13.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 142,
+      "weight_prefix": "decoder.model.decoder.layers.13.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_13",
+      "module_path": "decoder.model.decoder.layers.13.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 143,
+      "weight_prefix": "decoder.model.decoder.layers.13.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_13",
+      "module_path": "decoder.model.decoder.layers.13.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 144,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_13",
+      "module_path": "decoder.model.decoder.layers.13.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 145,
+      "weight_prefix": "decoder.model.decoder.layers.13.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_13",
+      "module_path": "decoder.model.decoder.layers.13",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 146,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_14",
+      "module_path": "decoder.model.decoder.layers.14.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 147,
+      "weight_prefix": "decoder.model.decoder.layers.14.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_14",
+      "module_path": "decoder.model.decoder.layers.14.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 148,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_14",
+      "module_path": "decoder.model.decoder.layers.14.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 149,
+      "weight_prefix": "decoder.model.decoder.layers.14.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_14",
+      "module_path": "decoder.model.decoder.layers.14.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 150,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_14",
+      "module_path": "decoder.model.decoder.layers.14.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 151,
+      "weight_prefix": "decoder.model.decoder.layers.14.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_14",
+      "module_path": "decoder.model.decoder.layers.14.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 152,
+      "weight_prefix": "decoder.model.decoder.layers.14.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_14",
+      "module_path": "decoder.model.decoder.layers.14.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 153,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_14",
+      "module_path": "decoder.model.decoder.layers.14.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 154,
+      "weight_prefix": "decoder.model.decoder.layers.14.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_14",
+      "module_path": "decoder.model.decoder.layers.14",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 155,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_15",
+      "module_path": "decoder.model.decoder.layers.15.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 156,
+      "weight_prefix": "decoder.model.decoder.layers.15.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_15",
+      "module_path": "decoder.model.decoder.layers.15.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 157,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_15",
+      "module_path": "decoder.model.decoder.layers.15.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 158,
+      "weight_prefix": "decoder.model.decoder.layers.15.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_15",
+      "module_path": "decoder.model.decoder.layers.15.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 159,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_15",
+      "module_path": "decoder.model.decoder.layers.15.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 160,
+      "weight_prefix": "decoder.model.decoder.layers.15.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_15",
+      "module_path": "decoder.model.decoder.layers.15.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 161,
+      "weight_prefix": "decoder.model.decoder.layers.15.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_15",
+      "module_path": "decoder.model.decoder.layers.15.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 162,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_15",
+      "module_path": "decoder.model.decoder.layers.15.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 163,
+      "weight_prefix": "decoder.model.decoder.layers.15.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_15",
+      "module_path": "decoder.model.decoder.layers.15",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 164,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_16",
+      "module_path": "decoder.model.decoder.layers.16.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 165,
+      "weight_prefix": "decoder.model.decoder.layers.16.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_16",
+      "module_path": "decoder.model.decoder.layers.16.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 166,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_16",
+      "module_path": "decoder.model.decoder.layers.16.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 167,
+      "weight_prefix": "decoder.model.decoder.layers.16.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_16",
+      "module_path": "decoder.model.decoder.layers.16.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 168,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_16",
+      "module_path": "decoder.model.decoder.layers.16.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 169,
+      "weight_prefix": "decoder.model.decoder.layers.16.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_16",
+      "module_path": "decoder.model.decoder.layers.16.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 170,
+      "weight_prefix": "decoder.model.decoder.layers.16.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_16",
+      "module_path": "decoder.model.decoder.layers.16.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 171,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_16",
+      "module_path": "decoder.model.decoder.layers.16.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 172,
+      "weight_prefix": "decoder.model.decoder.layers.16.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_16",
+      "module_path": "decoder.model.decoder.layers.16",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 173,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_17",
+      "module_path": "decoder.model.decoder.layers.17.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 174,
+      "weight_prefix": "decoder.model.decoder.layers.17.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_17",
+      "module_path": "decoder.model.decoder.layers.17.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 175,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_17",
+      "module_path": "decoder.model.decoder.layers.17.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 176,
+      "weight_prefix": "decoder.model.decoder.layers.17.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_17",
+      "module_path": "decoder.model.decoder.layers.17.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 177,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_17",
+      "module_path": "decoder.model.decoder.layers.17.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 178,
+      "weight_prefix": "decoder.model.decoder.layers.17.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_17",
+      "module_path": "decoder.model.decoder.layers.17.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 179,
+      "weight_prefix": "decoder.model.decoder.layers.17.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_17",
+      "module_path": "decoder.model.decoder.layers.17.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 180,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_17",
+      "module_path": "decoder.model.decoder.layers.17.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 181,
+      "weight_prefix": "decoder.model.decoder.layers.17.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_17",
+      "module_path": "decoder.model.decoder.layers.17",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 182,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_18",
+      "module_path": "decoder.model.decoder.layers.18.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 183,
+      "weight_prefix": "decoder.model.decoder.layers.18.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_18",
+      "module_path": "decoder.model.decoder.layers.18.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 184,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_18",
+      "module_path": "decoder.model.decoder.layers.18.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 185,
+      "weight_prefix": "decoder.model.decoder.layers.18.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_18",
+      "module_path": "decoder.model.decoder.layers.18.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 186,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_18",
+      "module_path": "decoder.model.decoder.layers.18.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 187,
+      "weight_prefix": "decoder.model.decoder.layers.18.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_18",
+      "module_path": "decoder.model.decoder.layers.18.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 188,
+      "weight_prefix": "decoder.model.decoder.layers.18.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_18",
+      "module_path": "decoder.model.decoder.layers.18.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 189,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_18",
+      "module_path": "decoder.model.decoder.layers.18.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 190,
+      "weight_prefix": "decoder.model.decoder.layers.18.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_18",
+      "module_path": "decoder.model.decoder.layers.18",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 191,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_19",
+      "module_path": "decoder.model.decoder.layers.19.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 192,
+      "weight_prefix": "decoder.model.decoder.layers.19.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_19",
+      "module_path": "decoder.model.decoder.layers.19.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 193,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_19",
+      "module_path": "decoder.model.decoder.layers.19.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 194,
+      "weight_prefix": "decoder.model.decoder.layers.19.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_19",
+      "module_path": "decoder.model.decoder.layers.19.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 195,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_19",
+      "module_path": "decoder.model.decoder.layers.19.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 196,
+      "weight_prefix": "decoder.model.decoder.layers.19.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_19",
+      "module_path": "decoder.model.decoder.layers.19.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 197,
+      "weight_prefix": "decoder.model.decoder.layers.19.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_19",
+      "module_path": "decoder.model.decoder.layers.19.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 198,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_19",
+      "module_path": "decoder.model.decoder.layers.19.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 199,
+      "weight_prefix": "decoder.model.decoder.layers.19.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_19",
+      "module_path": "decoder.model.decoder.layers.19",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 200,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_20",
+      "module_path": "decoder.model.decoder.layers.20.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 201,
+      "weight_prefix": "decoder.model.decoder.layers.20.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_20",
+      "module_path": "decoder.model.decoder.layers.20.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 202,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_20",
+      "module_path": "decoder.model.decoder.layers.20.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 203,
+      "weight_prefix": "decoder.model.decoder.layers.20.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_20",
+      "module_path": "decoder.model.decoder.layers.20.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 204,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_20",
+      "module_path": "decoder.model.decoder.layers.20.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 205,
+      "weight_prefix": "decoder.model.decoder.layers.20.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_20",
+      "module_path": "decoder.model.decoder.layers.20.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 206,
+      "weight_prefix": "decoder.model.decoder.layers.20.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_20",
+      "module_path": "decoder.model.decoder.layers.20.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 207,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_20",
+      "module_path": "decoder.model.decoder.layers.20.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 208,
+      "weight_prefix": "decoder.model.decoder.layers.20.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_20",
+      "module_path": "decoder.model.decoder.layers.20",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 209,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_21",
+      "module_path": "decoder.model.decoder.layers.21.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 210,
+      "weight_prefix": "decoder.model.decoder.layers.21.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_21",
+      "module_path": "decoder.model.decoder.layers.21.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 211,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_21",
+      "module_path": "decoder.model.decoder.layers.21.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 212,
+      "weight_prefix": "decoder.model.decoder.layers.21.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_21",
+      "module_path": "decoder.model.decoder.layers.21.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 213,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_21",
+      "module_path": "decoder.model.decoder.layers.21.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 214,
+      "weight_prefix": "decoder.model.decoder.layers.21.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_21",
+      "module_path": "decoder.model.decoder.layers.21.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 215,
+      "weight_prefix": "decoder.model.decoder.layers.21.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_21",
+      "module_path": "decoder.model.decoder.layers.21.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 216,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_21",
+      "module_path": "decoder.model.decoder.layers.21.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 217,
+      "weight_prefix": "decoder.model.decoder.layers.21.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_21",
+      "module_path": "decoder.model.decoder.layers.21",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 218,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_22",
+      "module_path": "decoder.model.decoder.layers.22.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 219,
+      "weight_prefix": "decoder.model.decoder.layers.22.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_22",
+      "module_path": "decoder.model.decoder.layers.22.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 220,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_22",
+      "module_path": "decoder.model.decoder.layers.22.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 221,
+      "weight_prefix": "decoder.model.decoder.layers.22.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_22",
+      "module_path": "decoder.model.decoder.layers.22.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 222,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_22",
+      "module_path": "decoder.model.decoder.layers.22.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 223,
+      "weight_prefix": "decoder.model.decoder.layers.22.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_22",
+      "module_path": "decoder.model.decoder.layers.22.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 224,
+      "weight_prefix": "decoder.model.decoder.layers.22.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_22",
+      "module_path": "decoder.model.decoder.layers.22.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 225,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_22",
+      "module_path": "decoder.model.decoder.layers.22.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 226,
+      "weight_prefix": "decoder.model.decoder.layers.22.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_22",
+      "module_path": "decoder.model.decoder.layers.22",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 227,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "self_attn_layer_norm_23",
+      "module_path": "decoder.model.decoder.layers.23.self_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 228,
+      "weight_prefix": "decoder.model.decoder.layers.23.self_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "self_attn_23",
+      "module_path": "decoder.model.decoder.layers.23.self_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 229,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "encoder_attn_layer_norm_23",
+      "module_path": "decoder.model.decoder.layers.23.encoder_attn_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 230,
+      "weight_prefix": "decoder.model.decoder.layers.23.encoder_attn_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenSdpaAttention",
+      "dump_name": "encoder_attn_23",
+      "module_path": "decoder.model.decoder.layers.23.encoder_attn",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 231,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "final_layer_norm_23",
+      "module_path": "decoder.model.decoder.layers.23.final_layer_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 232,
+      "weight_prefix": "decoder.model.decoder.layers.23.final_layer_norm",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc1_23",
+      "module_path": "decoder.model.decoder.layers.23.fc1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 233,
+      "weight_prefix": "decoder.model.decoder.layers.23.fc1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "GELUActivation",
+      "dump_name": "activation_fn_23",
+      "module_path": "decoder.model.decoder.layers.23.activation_fn",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 234,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "fc2_23",
+      "module_path": "decoder.model.decoder.layers.23.fc2",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 235,
+      "weight_prefix": "decoder.model.decoder.layers.23.fc2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "MusicgenDecoderLayer",
+      "dump_name": "layer_23",
+      "module_path": "decoder.model.decoder.layers.23",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 236,
+      "weight_prefix": null,
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "decoder_lm_heads_frontend_out",
+      "module_path": "decoder.lm_heads",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 237,
+      "weight_prefix": "decoder.lm_heads",
+      "is_pre_hook": true
+    },
+    {
+      "op": "Linear",
+      "dump_name": "lm_heads_layer_0",
+      "module_path": "decoder.lm_heads.0",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        2048
+      ],
+      "order": 238,
+      "weight_prefix": "decoder.lm_heads.0",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "lm_heads_layer_1",
+      "module_path": "decoder.lm_heads.1",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        2048
+      ],
+      "order": 239,
+      "weight_prefix": "decoder.lm_heads.1",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "lm_heads_layer_2",
+      "module_path": "decoder.lm_heads.2",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        2048
+      ],
+      "order": 240,
+      "weight_prefix": "decoder.lm_heads.2",
+      "is_pre_hook": false,
+      "reference_only": false
+    },
+    {
+      "op": "Linear",
+      "dump_name": "lm_heads_layer_3",
+      "module_path": "decoder.lm_heads.3",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        2048
+      ],
+      "order": 241,
+      "weight_prefix": "decoder.lm_heads.3",
+      "is_pre_hook": false,
+      "reference_only": false
+    }
+  ],
+  "_nnport_capture_version": "2026-06-03-encdec-generic-forward-v4-waveform-capture",
+  "_raw_node_count_before_dedup": 242
+}

@@ -8,13 +8,14 @@
 https://github.com/user-attachments/assets/c5723e58-6bc7-4fbc-921b-59388e26f2c9
 
 
-## ✨ NEW: three new modalities on-device — Vision, Speech & Listening
+## ✨ NEW: four new modalities on-device — Vision, Speech, Listening & Music
 
-Beyond text generation, three new model types now run **fully on-device** on Adreno 6xx:
+Beyond text generation, four new model types now run **fully on-device** on Adreno 6xx:
 
 - **👁️ Vision (VLM)** — [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) and [LFM2.5-VL-450M](src/models/lfm2-5-vl-450m/): image + text in, text out.
-- **🗣️ Speech (TTS)** — [MMS-TTS](src/models/mms-tts/): text in, speech out, across ~1100 languages (VITS + HiFi-GAN).
+- **🗣️ Speech (TTS)** — [MMS-TTS](src/models/mms-tts/) and [Kokoro-82M](src/models/kokoro-82m/): text in, speech out.
 - **🎧 Listening (ASR)** — [Whisper-tiny](src/models/whisper-tiny/): speech in, text out, with real-time streaming transcription.
+- **🎵 Music (text→music)** — [MusicGen-small](src/models/musicgen-small/): text prompt in, music out.
 
 The **[See & Say](examples/see-and-say/)** example app ties the vision and speech models together into a single sideloadable APK.
 
@@ -68,6 +69,7 @@ RTF = wall time / audio duration (lower is better; RTF ≤ 1.0 = real-time). Mea
 | Model | Precision | Params | Architecture | RTF | Audio | Wall (s) | Peak CPU mem (MB) | Notes |
 |---|:-:|---:|---|---:|---:|---:|---:|---|
 | [MMS-TTS](src/models/mms-tts/) | fp16 | 36M | VITS (enc + flow + HiFi-GAN) | **1.3** | 7.8 s | ~10.1 | 686 | ~1100 languages; per-op cosine ≥ 0.996 vs HF reference |
+| [Kokoro-82M](src/models/kokoro-82m/) | fp16 | 82M | StyleTTS2 (text enc + duration + iSTFT decoder) | **1.1** | 2.0 s | ~2.2 | 783 | near real-time; gapless `--serve` streaming ~1.0 RTF |
 
 ### Speech-to-text (ASR)
 
@@ -76,6 +78,14 @@ RTF = processing time / audio duration (lower is better; < 1.0 = faster than rea
 | Model | Precision | Params | Architecture | RTF | Audio | Wall (s) | Peak CPU mem (MB) | Notes |
 |---|:-:|---:|---|---:|---:|---:|---:|---|
 | [Whisper-tiny](src/models/whisper-tiny/) | fp16 | 37M | Whisper encoder-decoder (4 enc + 4 dec, d=384) | **0.53** | 109.8 s | ~58.2 | 458 | faster than real time; 9/10 byte-exact; long clips (18–29 s) ~0.40; live streaming + VAD mode |
+
+### Music generation
+
+> The heaviest model in the repo — a 590M composite (T5 + token LM + EnCodec). After mega-layer fusion + an fp16 texture GEMV path it decodes at **~11 tok/s**, but at **RTF ~6.9×** it's still ~7× slower than real time on the Adreno 620 (the entry tier); faster Adreno tiers close the gap.
+
+| Model | Precision | Params | Architecture | Decode tok/s | Output | Notes |
+|---|:-:|---:|---|---:|---|---|
+| [MusicGen-small](src/models/musicgen-small/) | fp16 | ~590M | T5 enc + 24-layer token LM + EnCodec | **11.0** | 32 kHz mono | RTF ~6.9× (a 5 s clip ≈ 34 s wall); peak ~2.7 GB; mega-fused decode + fp16 texture path |
 
 
 State-of-the-art small language models running on **Adreno 6xx GPUs** — the GPU class found in mid-range Android phones. Pure C++/OpenCL inference, cross-compiled on macOS, deployed via `adb` to `/data/local/tmp/`.

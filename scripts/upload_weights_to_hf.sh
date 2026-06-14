@@ -28,7 +28,7 @@
 set -euo pipefail
 
 HF_REPO="${HF_REPO:-a8nova/adreno-llms-weights}"
-MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny openelm-270m)
+MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m musicgen-small openelm-270m)
 WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
 # OpenELM weights are NOT redistributable (Apple ASCL). For openelm-270m we
 # upload only the 3 small files (meta + tokenizer); fetch_openelm_weights.sh
@@ -38,6 +38,9 @@ OPENELM_WEIGHT_FILES=(model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
 # tokenizer_vocab.bin directly and never reads a tokenizer.json, so its weight
 # set is 3 files — the full model.fp16.bin IS redistributable (Apache 2.0).
 WHISPER_WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json tokenizer_vocab.bin)
+# musicgen-small (text→music) uses the same 3-file set. kokoro-82m (TTS)
+# phonemizes via espeak assets and needs no tokenizer — just model + meta.
+KOKORO_WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -78,7 +81,9 @@ expected=0
 for m in "${MODELS[@]}"; do
   if [ "$m" = "openelm-270m" ]; then
     files=("${OPENELM_WEIGHT_FILES[@]}")
-  elif [ "$m" = "whisper-tiny" ]; then
+  elif [ "$m" = "kokoro-82m" ]; then
+    files=("${KOKORO_WEIGHT_FILES[@]}")
+  elif [ "$m" = "whisper-tiny" ] || [ "$m" = "musicgen-small" ]; then
     files=("${WHISPER_WEIGHT_FILES[@]}")
   else
     files=("${WEIGHT_FILES[@]}")

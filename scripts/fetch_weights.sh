@@ -38,11 +38,14 @@ HF_BRANCH="${HF_BRANCH:-main}"
 HF_BASE="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}"
 
 
-MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny)
+MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m musicgen-small)
 BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
-# whisper-tiny is ASR (encoder-decoder): its runtime loads tokenizer_vocab.bin
-# directly and has no tokenizer.json, so its base set is 3 files.
+# whisper-tiny (ASR) and musicgen-small (text→music) load tokenizer_vocab.bin
+# directly and have no tokenizer.json, so their base set is 3 files.
 WHISPER_BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer_vocab.bin)
+# kokoro-82m (TTS) phonemizes via espeak (assets), so it needs no tokenizer at
+# all — just the model + meta.
+KOKORO_BASE_FILES=(model.fp16.bin model.fp16.meta.json)
 
 # Which models currently have which quant variants published on HF. Update when
 # new quant bundles are uploaded.
@@ -114,7 +117,9 @@ _in_array() {
 file_list_for() {
   local model="$1"
   local files
-  if [ "${model}" = "whisper-tiny" ]; then
+  if [ "${model}" = "kokoro-82m" ]; then
+    files=("${KOKORO_BASE_FILES[@]}")
+  elif [ "${model}" = "whisper-tiny" ] || [ "${model}" = "musicgen-small" ]; then
     files=("${WHISPER_BASE_FILES[@]}")
   else
     files=("${BASE_FILES[@]}")
