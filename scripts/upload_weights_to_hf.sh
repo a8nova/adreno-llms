@@ -111,6 +111,18 @@ echo ">>> [3/5] Creating HF repo $HF_REPO (idempotent — ok if it already exist
 "${HF_REPO_CREATE[@]}" 2>&1 | sed 's/^/    /' || echo "    (repo likely already exists, continuing)"
 echo ""
 
+# Local folder name -> HF repo subdir. Instruct ports keep generic local folder
+# names but live under a -instruct path on HF for clarity (must match
+# fetch_weights.sh's hf_subdir_for).
+hf_subdir_for() {
+  case "$1" in
+    qwen2-5-0-5b)  echo "qwen2-5-0-5b-instruct" ;;
+    lfm2-5-350m)   echo "lfm2-5-350m-instruct" ;;
+    openelm-270m)  echo "openelm-270m-instruct" ;;
+    *)             echo "$1" ;;
+  esac
+}
+
 # ── Step 4: upload each model's weights/ ─────────────────────────────────
 echo ">>> [4/5] Uploading weights"
 for m in "${MODELS[@]}"; do
@@ -123,7 +135,7 @@ for m in "${MODELS[@]}"; do
   if [ "$m" = "openelm-270m" ]; then
     exclude_args+=( --exclude "model.fp16.bin" --exclude "model.bin" )
   fi
-  "$HF" upload "$HF_REPO" "$src_dir" "$m" "${exclude_args[@]}"
+  "$HF" upload "$HF_REPO" "$src_dir" "$(hf_subdir_for "$m")" "${exclude_args[@]}"
 done
 echo ""
 

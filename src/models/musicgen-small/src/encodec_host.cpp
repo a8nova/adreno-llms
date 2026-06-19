@@ -49,6 +49,25 @@
 
 namespace {
 
+// --- white-flash mitigation --------------------------------------------------
+// The GPU EnCodec SEANet decode (encodec_decode_gpu) queues its whole conv/LSTM/
+// upsample stack onto the in-order queue with no host sync until the final PCM
+// readback. On the Adreno 620 (single CU) that unbroken burst starves
+// SurfaceFlinger of every vsync → the entire screen goes WHITE for the duration
+// (right after token decode completes). Draining the queue + a ~2 ms sleep
+// between stages hands the GPU back so the compositor can grab a frame. Gated on
+// NNOPT_GPU_YIELD (set by the Android app). Mirrors smolvlm's
+// OpenCLContext::yield_for_compositor. Cost: a few clFinish stalls (~ms each).
+void enc_yield(cl_command_queue q) {
+    static const bool on = [](){
+        const char* e = std::getenv("NNOPT_GPU_YIELD");
+        return e != nullptr && e[0] != '0' && e[0] != '\0';
+    }();
+    if (!on || !q) return;
+    clFinish(q);  // clFlush is non-blocking; clFinish blocks until the GPU truly idles
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+}
+
 // --- multi-core out-channel parallelism --------------------------------------
 // The SEANet decode was 54 s of a 140 s 5-s-clip wall (0.35 ms/sample, ~11×
 // slower than realtime) running these conv loops on ONE core. Both conv kinds
@@ -1174,6 +1193,7 @@ std::vector<float> encodec_decode_gpu(OpenCLContext& cl_ctx, Weights& weights,
             // recurrence: gates + cell per step (async; queue order = data order)
             const int rpw = 32;   // 4096/32 = 128 WGs
             for (int t = 0; t < Tt && ok; ++t) {
+                if ((t & 63) == 0) enc_yield(q);  // drain every 64 steps so the compositor gets a vsync
                 err  = clSetKernelArg(g_enc.k_lstm_gates, 0, sizeof(cl_mem), &whh);
                 err |= clSetKernelArg(g_enc.k_lstm_gates, 1, sizeof(cl_mem), &gin);
                 err |= clSetKernelArg(g_enc.k_lstm_gates, 2, sizeof(cl_mem), &hbuf);
@@ -1233,6 +1253,7 @@ std::vector<float> encodec_decode_gpu(OpenCLContext& cl_ctx, Weights& weights,
         if (err != CL_SUCCESS) { fail("enc-gpu", "lstm upload"); enc_release(x.mem); return {}; }
     }
     ph_mark("conv0+lstm");
+    enc_yield(q);  // yield after the LSTM block
 
     struct Stage { int convt_idx; int resnet_idx; int stride; };
     const Stage stages[4] = {{3, 4, 8}, {6, 7, 5}, {9, 10, 4}, {12, 13, 4}};
@@ -1245,6 +1266,7 @@ std::vector<float> encodec_decode_gpu(OpenCLContext& cl_ctx, Weights& weights,
         if (!enc_gpu_resnet(cl_ctx, weights, D + std::to_string(s.resnet_idx), x)) {
             enc_release(x.mem); return {};
         }
+        enc_yield(q);  // yield between the (increasingly large) upsampling stages
     }
     if (!enc_gpu_elu(cl_ctx, x)) { enc_release(x.mem); return {}; }
     GSig wave;

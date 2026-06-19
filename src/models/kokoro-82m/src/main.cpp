@@ -98,7 +98,12 @@ int main(int argc, char** argv) {
     std::string token_ids_path;
     bool serve_mode = false;   // --serve: persistent streaming server (see below)
     bool stream_mode = false;  // --stream: on-device G2P + chunked PCM to stdout
+    bool serve_stream_mode = false;  // --serve-stream: persistent --stream REPL (app)
     std::string voice = "en-us";
+    // Style-embedding voice pack. Defaults to the bundled af_heart; the app
+    // passes --voicepack assets/voices/<name>.bin to switch among downloaded
+    // voices (the 82M model is shared across all 54 voices).
+    std::string voicepack = "assets/voice_pack_af_heart.bin";
 
     SamplerConfig sampler_config;
     sampler_config.temperature = 0.0f;          // greedy by default — matches PyTorch reference
@@ -116,8 +121,12 @@ int main(int argc, char** argv) {
                 serve_mode = true;
             } else if (a == "--stream") {
                 stream_mode = true;
+            } else if (a == "--serve-stream") {
+                serve_stream_mode = true;
             } else if (a == "--voice" && i + 1 < argc) {
                 voice = argv[++i];
+            } else if (a == "--voicepack" && i + 1 < argc) {
+                voicepack = argv[++i];
             } else if (a == "--temperature" && i + 1 < argc) {
                 sampler_config.temperature = std::stof(argv[++i]);
             } else if (a == "--top-k" && i + 1 < argc) {
@@ -267,9 +276,9 @@ int main(int argc, char** argv) {
     //   adb exec-out 'cd <dir> && ./<bin> --stream "text"' | ffplay -f s16le -ar 24000 -ac 1 -nodisp -
     if (stream_mode) {
 #ifdef NNOPT_TTS_STREAMING
-        auto vp = load_float_bin("assets/voice_pack_af_heart.bin");
+        auto vp = load_float_bin(voicepack.c_str());
         if (vp.size() != 510u * 256u) {
-            NNOPT_ERROR_FMT("voice_pack size %zu != 510*256", vp.size());
+            NNOPT_ERROR_FMT("voice_pack %s size %zu != 510*256", voicepack.c_str(), vp.size());
             return 5;
         }
         nnopt_tts::Phonemizer ph;
@@ -323,6 +332,101 @@ int main(int argc, char** argv) {
         return 0;
 #else
         NNOPT_ERROR("--stream needs espeak-ng vendored at src/third_party/espeak-ng/ "
+                    "and a rebuild (CMake auto-enables NNOPT_TTS_STREAMING when present)");
+        return 2;
+#endif
+    }
+
+    // ── Persistent on-device streaming REPL (--serve-stream) ─────────────
+    // Same pipeline as --stream (on-device G2P -> chunked synth -> raw int16 LE
+    // PCM on stdout), but the process STAYS RESIDENT: weights, CL context, and
+    // the phonemizer load ONCE, then we loop reading one utterance per stdin
+    // line. This is what the See & Say app drives — per-utterance cost is pure
+    // synthesis (no ~0.7s reload tax), so back-to-back "Speak" presses are
+    // gapless and real-time.
+    //
+    // Per-chunk framing (mirrors mms-tts's TTS_PCM_BEGIN/END so the Kotlin
+    // reader knows exactly how many bytes to slurp before the next stderr line):
+    //   stderr: KOKORO_PCM_BEGIN <n_samples> 24000      (flushed BEFORE the PCM)
+    //   stdout: <n_samples> int16 LE samples            (flushed)
+    //   ...one BEGIN+PCM pair per chunk...
+    //   stderr: KOKORO_UTT_END                          (end of this utterance)
+    // Readiness: prints `ready.` on stderr once, after model + phonemizer init.
+    // A blank line or EOF exits the REPL cleanly.
+    if (serve_stream_mode) {
+#ifdef NNOPT_TTS_STREAMING
+        auto vp = load_float_bin(voicepack.c_str());
+        if (vp.size() != 510u * 256u) {
+            NNOPT_ERROR_FMT("voice_pack %s size %zu != 510*256", voicepack.c_str(), vp.size());
+            return 5;
+        }
+        nnopt_tts::Phonemizer ph;
+        if (!ph.init(/*espeak_data_parent=*/"assets", "assets/phoneme_vocab.tsv", voice))
+            return 5;
+
+        // Readiness marker — the KokoroSession.start() coroutine blocks on this.
+        std::fprintf(stderr, "ready. send one utterance per line; blank line to quit.\n");
+        std::fprintf(stderr, "STREAM_SAMPLE_RATE 24000\n");
+        std::fflush(stderr);
+
+        std::string line;
+        while (std::getline(std::cin, line)) {
+            // Strip trailing CR/LF; a blank line ends the REPL (matches mms-tts).
+            while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+                line.pop_back();
+            if (line.empty()) break;
+
+            const auto chunks = nnopt_tts::chunk_text(line);
+            std::fprintf(stderr, "STREAM_CHUNKS %zu\n", chunks.size());
+            std::fflush(stderr);
+
+            for (size_t c = 0; c < chunks.size(); ++c) {
+                std::vector<int32_t> ids = ph.phonemize(chunks[c]);
+                if (ids.size() <= 2) {  // only pad/pad — nothing phonemized
+                    std::fprintf(stderr, "STREAM_SKIP empty chunk %zu: \"%s\"\n",
+                                 c, chunks[c].c_str());
+                    continue;
+                }
+                int vidx = (int)ids.size() - 1;
+                if (vidx < 0) vidx = 0;
+                if (vidx > 509) vidx = 509;
+                std::vector<float> style(vp.begin() + (size_t)vidx * 256,
+                                         vp.begin() + (size_t)(vidx + 1) * 256);
+
+                std::vector<int16_t> chunk_pcm;
+                const auto t0 = std::chrono::steady_clock::now();
+                const int rc2 = model.forward_graph(ids, style, chunk_pcm);
+                const double synth_s = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - t0).count();
+                if (rc2 != 0) {
+                    NNOPT_ERROR_FMT("forward_graph chunk %zu rc=%d", c, rc2);
+                    std::fprintf(stderr, "KOKORO_UTT_END\n");
+                    std::fflush(stderr);
+                    return 7;
+                }
+
+                // Length-prefix on stderr, THEN the raw PCM on stdout.
+                std::fprintf(stderr, "KOKORO_PCM_BEGIN %zu 24000\n", chunk_pcm.size());
+                std::fflush(stderr);
+                std::fwrite(chunk_pcm.data(), sizeof(int16_t), chunk_pcm.size(), stdout);
+                std::fflush(stdout);
+
+                const double audio_s = (double)chunk_pcm.size() / 24000.0;
+                std::fprintf(stderr,
+                             "STREAM_CHUNK %zu synth_s=%.3f samples=%zu audio_s=%.3f rtf=%.3f \"%s\"\n",
+                             c, synth_s, chunk_pcm.size(), audio_s,
+                             audio_s > 0 ? synth_s / audio_s : 0.0, chunks[c].c_str());
+                std::fflush(stderr);
+            }
+            // End-of-utterance marker so the reader can fire onComplete.
+            std::fprintf(stderr, "KOKORO_UTT_END\n");
+            std::fflush(stderr);
+        }
+        std::fprintf(stderr, "NNOPT_EXIT_CLEAN exit_code=0\n");
+        std::fflush(stderr);
+        return 0;
+#else
+        NNOPT_ERROR("--serve-stream needs espeak-ng vendored at src/third_party/espeak-ng/ "
                     "and a rebuild (CMake auto-enables NNOPT_TTS_STREAMING when present)");
         return 2;
 #endif

@@ -142,6 +142,17 @@ file_list_for() {
   printf '%s\n' "${files[@]}"
 }
 
+# Local folder name -> HF repo subdir. The instruct ports keep their generic
+# local folder names but live under a -instruct path on HF for clarity.
+hf_subdir_for() {
+  case "$1" in
+    qwen2-5-0-5b)  echo "qwen2-5-0-5b-instruct" ;;
+    lfm2-5-350m)   echo "lfm2-5-350m-instruct" ;;
+    openelm-270m)  echo "openelm-270m-instruct" ;;
+    *)             echo "$1" ;;
+  esac
+}
+
 fetch_one() {
   local model="$1"
 
@@ -156,7 +167,7 @@ fetch_one() {
   echo ">>> ${model} (--quant ${QUANT})"
   while IFS= read -r f; do
     local dest="${weights_dir}/${f}"
-    local url="${HF_BASE}/${model}/${f}"
+    local url="${HF_BASE}/$(hf_subdir_for "${model}")/${f}"
     echo "    ${f}"
     curl --location --continue-at - --fail-with-body --progress-bar \
          --retry 3 --retry-delay 5 \

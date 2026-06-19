@@ -31,11 +31,38 @@ static std::vector<int> load_token_ids_from_file(const std::string& path) {
     return ids;
 }
 
+// A prior conversation turn (multi-turn memory), loaded from --history.
+struct ChatTurn { char role; std::string content; };  // role: 'U' user, 'A' assistant
+
+// History file format, one record per prior turn:
+//   <role 'U'|'A'> <byte-length>\n<content bytes>\n
+// Length-delimited so message content needs no escaping. Empty/unreadable ⇒ single-turn.
+static std::vector<ChatTurn> load_history(const std::string& path) {
+    std::vector<ChatTurn> turns;
+    if (path.empty()) return turns;
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return turns;
+    while (true) {
+        int role = fgetc(f);
+        while (role == '\n' || role == '\r' || role == ' ') role = fgetc(f);  // skip separators
+        if (role == EOF) break;
+        long len = -1;
+        if (fscanf(f, "%ld", &len) != 1 || len < 0) break;
+        fgetc(f);  // consume the single '\n' before the content bytes
+        std::string content((size_t)len, '\0');
+        if (len > 0 && fread(&content[0], 1, (size_t)len, f) != (size_t)len) break;
+        turns.push_back({ (char)role, content });
+    }
+    fclose(f);
+    return turns;
+}
+
 static void print_usage(const char* prog) {
     std::cerr << "Usage: " << prog
               << " <prompt> [max_tokens]"
               << " [--temperature T] [--top-k K] [--top-p P]"
               << " [--repetition-penalty R] [--seed S]"
+              << " [--chat] [--system \"<text>\"]"
               << " [--token-ids <file>]"
               << std::endl;
 }
@@ -59,6 +86,9 @@ int main(int argc, char* argv[]) {
     int max_tokens = 64;
     SamplerConfig sampler_config;
     std::string token_ids_file;
+    bool chat_mode = false;
+    std::string system_prompt;  // optional system instruction (chat mode)
+    std::string history_file;   // optional prior-turns file (multi-turn memory); empty = none
 
     // Parse positional and optional args
     int arg_idx = 2;
@@ -67,7 +97,10 @@ int main(int argc, char* argv[]) {
     }
     while (arg_idx < argc) {
         std::string flag = argv[arg_idx++];
+        if (flag == "--chat") { chat_mode = true; continue; }  // bare flag, no value
         if (arg_idx >= argc) { print_usage(argv[0]); return 1; }
+        if (flag == "--system") { system_prompt = argv[arg_idx++]; continue; }
+        if (flag == "--history") { history_file = argv[arg_idx++]; continue; }
         if (flag == "--temperature")       sampler_config.temperature = std::stof(argv[arg_idx++]);
         else if (flag == "--top-k")        sampler_config.top_k = std::stoi(argv[arg_idx++]);
         else if (flag == "--top-p")        sampler_config.top_p = std::stof(argv[arg_idx++]);
@@ -154,6 +187,22 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         std::cerr << "Loaded " << input_ids.size() << " token IDs from file (tokenizer bypass)" << std::endl;
+    } else if (chat_mode) {
+        // OpenELM-270M-Instruct ships NO official chat template — Apple's model
+        // card drives the instruct model with plain prompts (Llama-2 tokenizer,
+        // add_bos_token=true). We honor that: --chat feeds the prompt as-is
+        // (encode() already prepends BOS), optionally prefixing a system
+        // instruction. This keeps the flag uniform across the APK's models
+        // without inventing a template the 270M model was never tuned on.
+        // No official template — concatenate plainly. System first, then prior turns
+        // (multi-turn memory via --history) as "role: content" lines, then the new prompt.
+        std::string text;
+        if (!system_prompt.empty()) text += system_prompt + "\n\n";
+        for (const auto& t : load_history(history_file)) {
+            text += (t.role == 'A' ? "Assistant: " : "User: ") + t.content + "\n";
+        }
+        text += (history_file.empty() ? prompt : ("User: " + prompt + "\nAssistant:"));
+        input_ids = tokenizer.encode(text);
     } else {
         input_ids = tokenizer.encode(prompt);
         // Dump encode result so FinalizePort can diff C++ tokenizer output

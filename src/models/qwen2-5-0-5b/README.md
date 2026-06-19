@@ -1,11 +1,12 @@
-# Qwen2.5-0.5B on Adreno (Android)
+# Qwen2.5-0.5B-Instruct on Adreno (Android)
 
-Alibaba's Qwen2.5-0.5B (LLaMA-style + GQA) ported to C++/OpenCL for Adreno 6xx GPUs on non-flagship Android. Verified on Motorola Razr 2020 (Adreno 620 / Snapdragon 765G).
+Alibaba's Qwen2.5-0.5B-Instruct (LLaMA-style + GQA, chat-tuned) ported to C++/OpenCL for Adreno 6xx GPUs on non-flagship Android. Verified on Motorola Razr 2020 (Adreno 620 / Snapdragon 765G).
 
-- **Upstream:** [Qwen/Qwen2.5-0.5B](https://huggingface.co/Qwen/Qwen2.5-0.5B)
+- **Upstream:** [Qwen/Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct)
 - **Parameters:** 500M
-- **Architecture:** LLaMA-style transformer with grouped-query attention (GQA)
+- **Architecture:** LLaMA-style transformer with grouped-query attention (GQA), instruction/chat-tuned
 - **Precision:** fp16
+- **Chat:** ChatML template built in — pass `--chat` to wrap the prompt in `<|im_start|>` turns
 
 ## Quickstart
 
@@ -21,8 +22,11 @@ NNOPT_DTYPE=fp16 ./scripts/build.sh --release
 # 3. Deploy
 NNOPT_DTYPE=fp16 ./scripts/deploy_android.sh
 
-# 4. Run
+# 4. Run (completion)
 NNOPT_DTYPE=fp16 ./scripts/run_android.sh "Once upon a time" 64
+
+# 4b. Run (chat — instruction-tuned)
+NNOPT_DTYPE=fp16 ./scripts/run_android.sh "What is the capital of France?" 40 --chat
 ```
 
 ## Performance

@@ -581,6 +581,7 @@ bool siglip_vision_forward_tile(
     };
 
     for (int li = 0; li < num_layers; ++li) {
+        cl_ctx.yield_for_compositor();   // yield GPU between vision layers so the UI doesn't ANR
         std::string p = "model.vision_tower.vision_model.encoder.layers." + std::to_string(li);
         cl_mem ln1_w = weights.get_buffer(p + ".layer_norm1.weight");
         cl_mem ln1_b = weights.get_buffer(p + ".layer_norm1.bias");
@@ -1097,6 +1098,7 @@ bool siglip_vision_forward_batched(
     // Head-major buffer for one tile is the same byte count: heads*rows*head_dim = hidden*rows.
 
     for (int li = 0; li < num_layers; ++li) {
+        cl_ctx.yield_for_compositor();   // yield GPU between vision layers so the UI doesn't ANR
         std::string p = "model.vision_tower.vision_model.encoder.layers." + std::to_string(li);
         cl_mem ln1_w = weights.get_buffer(p + ".layer_norm1.weight");
         cl_mem ln1_b = weights.get_buffer(p + ".layer_norm1.bias");

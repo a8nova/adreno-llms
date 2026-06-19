@@ -45,12 +45,12 @@ Decode tok/s = warm 3-run median, greedy (`--temperature 0`), 32-token generatio
 | [Mamba-130M](src/models/mamba-130m/) | fp16 | 130M | SSM | 21.52 | 1.62 | 686 | No attention |
 | [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | fp16 | 135M | LLaMA + GQA | **24.40** | 1.67 | 923 | Instruct-tuned; 61% of ceiling |
 | [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | **int8** | 135M | LLaMA + GQA | 24.21 | **0.91** | **670** | Per-row symmetric int8; −27% memory at tied tok/s |
-| [OpenELM-270M](src/models/openelm-270m/) | fp16 | 270M | LLaMA-style + tied lm_head | 14.65 | 2.00 | 1371 | 78.9% of 10 GB/s ceiling |
-| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | fp16 | 350M | Hybrid conv+attn | 11.43 | 2.21 | 1666 | Liquid AI hybrid; 58% of texture ceiling |
-| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | **int8** | 350M | Hybrid conv+attn | 13.67 | **0.81** | 1015 | +19.6% vs fp16 |
-| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | **Q4** | 350M | Hybrid conv+attn | **14.54** | **0.79** | **719** | +27.2% vs fp16; ALU-bound nibble unpack |
-| [Granite-4.0-350M](src/models/granite-4-0-350m/) | fp16 | 350M | Dense decoder + GQA | 10.19 | 2.41 | 2580 | IBM Granite; 71% of 10 GB/s ceiling |
-| [Qwen2.5-0.5B](src/models/qwen2-5-0-5b/) | fp16 | 500M | LLaMA + GQA | 10.36 | 3.66 | 2720 | Largest in the repo; 70% of 14 GB/s ceiling |
+| [OpenELM-270M-Instruct](src/models/openelm-270m/) | fp16 | 270M | LLaMA-style + tied lm_head | 14.65 | 2.00 | 1371 | 78.9% of 10 GB/s ceiling |
+| [LFM2.5-350M](src/models/lfm2-5-350m/) | fp16 | 350M | Hybrid conv+attn | 11.43 | 2.21 | 1666 | Liquid AI hybrid; 58% of texture ceiling |
+| [LFM2.5-350M](src/models/lfm2-5-350m/) | **int8** | 350M | Hybrid conv+attn | 13.67 | **0.81** | 1015 | +19.6% vs fp16 |
+| [LFM2.5-350M](src/models/lfm2-5-350m/) | **Q4** | 350M | Hybrid conv+attn | **14.54** | **0.79** | **719** | +27.2% vs fp16; ALU-bound nibble unpack |
+| [Granite-4.0-350M](src/models/granite-4-0-350m/) | fp16 | 350M | Dense decoder + GQA | 10.19 | 2.41 | 2580 | IBM Granite (instruct); 71% of 10 GB/s ceiling |
+| [Qwen2.5-0.5B-Instruct](src/models/qwen2-5-0-5b/) | fp16 | 500M | LLaMA + GQA | 10.36 | 3.66 | 2720 | Largest in the repo; 70% of 14 GB/s ceiling |
 
 ### Vision-language
 
@@ -186,7 +186,8 @@ adreno-llms/
 ├── README.md, LICENSE, .gitignore
 ├── scripts/
 │   ├── fetch_weights.sh          # downloads converted weights for one model
-│   ├── fetch_openelm_weights.sh  # special: pulls + converts from apple/OpenELM-270M
+│   ├── fetch_openelm_weights.sh  # special: pulls + converts from apple/OpenELM-270M-Instruct
+│   ├── convert_hf_to_bin.py      # universal HF safetensors → fp16 .bin + meta.json converter
 │   └── verify_clean_checkout.sh  # pre-push leak scanner
 └── src/models/<model>/
     ├── README.md                 # per-model quickstart

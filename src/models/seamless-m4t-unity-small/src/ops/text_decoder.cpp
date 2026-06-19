@@ -25,7 +25,15 @@ std::vector<int> Pipeline::text_beam_search(const std::vector<float>& encv, int 
         if (tbprof) slot += std::chrono::duration<double, std::milli>(clk() - a).count();
     };
     const std::string dir = "model.target_letter_decoder.";
-    const int nlayers = 4, vocab = 20005, beam = 5, eos = 2, pad = 1, min_len = 1, max_len = 200;
+    // Beam width is configurable via NNOPT_SEAMLESS_BEAM (the app's Translate
+    // settings sets it). Default 5 = the paper/fairseq setting; 1 = greedy
+    // (fastest, lower quality). Clamped to [1, 8] to bound memory/latency.
+    const int beam = []{
+        const char* e = std::getenv("NNOPT_SEAMLESS_BEAM");
+        int b = (e && *e) ? std::atoi(e) : 5;
+        return b < 1 ? 1 : (b > 8 ? 8 : b);
+    }();
+    const int nlayers = 4, vocab = 20005, eos = 2, pad = 1, min_len = 1, max_len = 200;
     const int CACHE_MAX = 200;  // bound on hypothesis length for the self-attn cache
     const std::vector<int> prefix{text_prefix_};  // target-language text lang token
     const float NEG = -1e30f;

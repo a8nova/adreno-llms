@@ -37,19 +37,20 @@ Decode tok/s = 5-run warm median, fp16, greedy (`temperature=0, seed=42`), 32-to
 | `mamba2-130m/model.fp16.bin` | [state-spaces/mamba2-130m](https://huggingface.co/state-spaces/mamba2-130m) | 130M | 23.18 | Apache 2.0 |
 | `mamba-130m/model.fp16.bin` | [state-spaces/mamba-130m-hf](https://huggingface.co/state-spaces/mamba-130m-hf) | 130M | 22.15 | Apache 2.0 |
 | `smollm2-135m-instruct/model.fp16.bin` | [HuggingFaceTB/SmolLM2-135M-Instruct](https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct) | 135M | 14.57 | Apache 2.0 |
-| `lfm2-5-350m/model.fp16.bin` | [LiquidAI/LFM2.5-350M-Base](https://huggingface.co/LiquidAI/LFM2.5-350M-Base) | 350M | 10.20 | Liquid AI Open License |
-| `qwen2-5-0-5b/model.fp16.bin` | [Qwen/Qwen2.5-0.5B](https://huggingface.co/Qwen/Qwen2.5-0.5B) | 500M | 8.45 | Apache 2.0 |
+| `lfm2-5-350m-instruct/model.fp16.bin` | [LiquidAI/LFM2.5-350M](https://huggingface.co/LiquidAI/LFM2.5-350M) | 350M | 10.20 | Liquid AI Open License |
+| `qwen2-5-0-5b-instruct/model.fp16.bin` | [Qwen/Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) | 500M | 8.45 | Apache 2.0 |
 | `whisper-tiny/model.fp16.bin` | [openai/whisper-tiny](https://huggingface.co/openai/whisper-tiny) | 39M | ASR (see repo) | Apache 2.0 |
 | `kokoro-82m/model.fp16.bin` | [hexgrad/Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | 82M | TTS (see repo) | Apache 2.0 |
 | `musicgen-small/model.fp16.bin` | [facebook/musicgen-small](https://huggingface.co/facebook/musicgen-small) | ~590M | text→music (see repo) | CC-BY-NC 4.0 |
-| `openelm-270m/` (companion files only) | [apple/OpenELM-270M](https://huggingface.co/apple/OpenELM-270M) | 270M | 4.47 | Apple ASCL — fetch + convert locally |
+| `seamless-m4t-unity-small/model.fp16.bin` | [facebook/seamless-m4t-unity-small](https://huggingface.co/facebook/seamless-m4t-unity-small) | ~323M | S2ST/S2TT (see repo) | CC-BY-NC 4.0 |
+| `openelm-270m-instruct/` (companion files only) | [apple/OpenELM-270M-Instruct](https://huggingface.co/apple/OpenELM-270M-Instruct) | 270M | 4.47 | Apple ASCL — fetch + convert locally |
 
-**OpenELM-270M is partially hosted here.** Under `openelm-270m/` you'll find only the small companion files:
+**OpenELM-270M-Instruct is partially hosted here.** Under `openelm-270m-instruct/` you'll find only the small companion files:
 
 ```
-openelm-270m/model.fp16.meta.json     # tensor layout for the C++ runtime
-openelm-270m/tokenizer.json           # HuggingFace tokenizer config
-openelm-270m/tokenizer_vocab.bin      # vocab + merges (binary)
+openelm-270m-instruct/model.fp16.meta.json     # tensor layout for the C++ runtime
+openelm-270m-instruct/tokenizer.json           # HuggingFace tokenizer config
+openelm-270m-instruct/tokenizer_vocab.bin      # vocab + merges (binary)
 ```
 
 The actual `model.fp16.bin` is **NOT redistributed** — Apple's [Apple Sample Code License](https://huggingface.co/apple/OpenELM-270M/blob/main/LICENSE) restricts that. Instead, `scripts/fetch_openelm_weights.sh` in the GitHub repo pulls `apple/OpenELM-270M`'s safetensors directly from Apple's HF and runs `scripts/convert_openelm_weights.py` to produce the binary locally using the layout described in `model.fp16.meta.json`.

@@ -387,6 +387,20 @@ int main(int argc, char** argv) {
     int serve_gen = 0;
     while (true) {
     generated_ids.clear();
+    // In --serve mode, wait for the FIRST prompt before generating — otherwise
+    // launching with --serve would waste ~34 s synthesizing the default prompt
+    // no client asked for. Subsequent prompts are read at the loop tail.
+    if (serve_mode && serve_gen == 0) {
+        fprintf(stderr, "SERVE_READY\n");
+        fflush(stderr); fflush(stdout);
+        std::string first;
+        if (!std::getline(std::cin, first)) break;      // EOF before any prompt
+        while (!first.empty() && (first.back() == '\r' || first.back() == '\n')) first.pop_back();
+        if (first.empty()) break;                        // blank line exits
+        prompt = first;
+        token_ids_path.clear();                          // serve prompts always tokenize
+        out_wav_path = "serve_000.wav";
+    }
     const auto gen_t0 = std::chrono::steady_clock::now();
     // Prefer test_input_ids.bin (deterministic) over re-encoding the prompt.
     // The reference's "generated_text" field is computed from these EXACT
@@ -607,6 +621,8 @@ int main(int argc, char** argv) {
     const auto step0_t0 = std::chrono::steady_clock::now();
     if (nnopt_ttft_trace_enabled()) fprintf(stderr, "TTFT_TRACE [%.0f] decode_loop_enter\n", nnopt_uptime_ms());
     for (int t = 0; t < steps && decode_ok; ++t) {
+        // Live decode progress for the app UI — one line per autoregressive step (unconditional).
+        fprintf(stderr, "MG_PROGRESS %d %d\n", t, steps);
         if (!gpu_grid)
             for (int k = 0; k < NCB; ++k) col[(size_t)k] = grid[(size_t)k][(size_t)t];
 

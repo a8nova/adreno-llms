@@ -68,6 +68,7 @@ extern "C" cl_mem nnopt_dequant_int8_to_fp16_alloc(cl_command_queue queue,
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <chrono>
 
 
 // Read prompt input ids from a binary file (int32 little-endian) when the
@@ -99,6 +100,7 @@ int main(int argc, char** argv) {
     std::string token_ids_path;
 
     std::string image_path;  // --image <file.jpg|.png> for VLM inference
+    bool interactive_mode = false;  // --interactive: stdin REPL with /image, /reset (Edgi describeImage contract)
 
     SamplerConfig sampler_config;
     sampler_config.temperature = 0.0f;          // greedy by default — matches PyTorch reference
@@ -124,6 +126,12 @@ int main(int argc, char** argv) {
                 sampler_config.top_p = std::stof(argv[++i]);
             } else if (a == "--seed" && i + 1 < argc) {
                 sampler_config.seed = static_cast<uint32_t>(std::stoul(argv[++i]));
+            } else if (a == "--interactive") {
+                interactive_mode = true;
+            } else if (a == "--max-tokens" && i + 1 < argc) {
+                max_new_tokens = std::stoi(argv[++i]);
+            } else if (a == "--image-size" && i + 1 < argc) {
+                ++i;  // accepted for app compatibility; LFM2-VL uses fixed TILE_SIZE (512)
             } else if (a.rfind("--", 0) == 0) {
                 // Unknown flag — skip the value too if present.
                 if (i + 1 < argc && argv[i + 1][0] != '-') ++i;
@@ -282,6 +290,134 @@ int main(int argc, char** argv) {
     if (!model.initialize()) {
         NNOPT_ERROR("Model::initialize() failed — see prior NNOPT_ERROR for the layer that failed");
         return 1;
+    }
+
+    // ── Interactive REPL ──
+    // `--interactive` opens a stdin-driven loop that matches the Edgi app's
+    // describeImage contract (and SmolVLM's interactive mode):
+    //   /image <path>   load image, run vision pipeline (set_image)
+    //   /reset          drop the image (next prompt is text-only)
+    //   /quit | EOF | blank line   exit
+    // A plain text line is one user turn: encode_with_image() when an image is
+    // loaded (else text-only encode), prefill at start_pos=0, stream decoded
+    // tokens to STDOUT, stop at eos. Per-turn perf + a `✓ turn` marker go to
+    // STDERR (the app reads stdout for the caption, stderr for perf). The caller
+    // closes stdin after one turn, so getline() returns EOF and we exit cleanly.
+    // NOTE: each turn re-prefills at start_pos=0 (no multi-turn KV reuse) — the
+    // app does exactly one image+prompt per process, which this serves directly.
+    if (interactive_mode) {
+        if (!tokenizer_ok) {
+            NNOPT_ERROR("--interactive needs weights/tokenizer_vocab.bin");
+            return 1;
+        }
+        const int  MAX_DECODE_PER_TURN = (max_new_tokens > 0 ? max_new_tokens : 128);
+        const bool greedy = (sampler_config.temperature <= 0.0f);
+        // ChatML assistant turns terminate with <|im_end|> (id 7), NOT the tokenizer's
+        // eos_id (2). Without stopping on it the decode runs to max-tokens and pads the
+        // (otherwise correct) caption with repetition garbage. Stop on either.
+        const int32_t im_end_id = tok.token_to_id("<|im_end|>");
+
+        bool image_loaded = false;
+        int  turn = 0;
+
+        std::fprintf(stderr,
+                     "ready. commands:\n"
+                     "  /image <path>   load an image\n"
+                     "  /reset          start fresh (text-only)\n"
+                     "  /quit           exit (or Ctrl-D / blank line)\n");
+        std::fflush(stderr);
+
+        std::string line;
+        while (true) {
+            std::fprintf(stderr, "\n> "); std::fflush(stderr);
+            if (!std::getline(std::cin, line)) break;   // EOF → exit
+            while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+            if (line.empty()) break;
+
+            // /image <path>
+            if (line.rfind("/image ", 0) == 0 || line.rfind("/image\t", 0) == 0) {
+                std::string path = line.substr(7);
+                while (!path.empty() && (path.front() == ' ' || path.front() == '\t')) path.erase(path.begin());
+                while (!path.empty() && (path.back() == ' ' || path.back() == '\t')) path.pop_back();
+                if (path.empty()) { std::fprintf(stderr, "usage: /image <path>\n"); continue; }
+                ImageBufferU8 img;
+                if (!load_image_rgb_u8(path, img)) {
+                    std::fprintf(stderr, "failed to load %s: %s\n", path.c_str(), img.error.c_str());
+                    continue;
+                }
+                if (!model.set_image(img.data, img.W, img.H)) {
+                    std::fprintf(stderr, "set_image failed for %s\n", path.c_str());
+                    image_loaded = false;
+                    continue;
+                }
+                image_loaded = true;
+                std::fprintf(stderr, "loaded %s (%dx%d)\n", path.c_str(), img.W, img.H);
+                std::fflush(stderr);
+                continue;
+            }
+            if (line == "/reset") { image_loaded = false; std::fprintf(stderr, "reset\n"); continue; }
+            if (line == "/quit" || line == "/exit") break;
+
+            // Build this turn's input ids (same machinery as the batch --image path).
+            std::vector<int32_t> prompt_ids;
+            if (image_loaded) {
+                const int grid_h = model.image_grid_h();
+                const int grid_w = model.image_grid_w();
+                const int thumb_h = model.image_thumbnail_h();
+                const int thumb_w = model.image_thumbnail_w();
+                const bool use_thumbnail = (thumb_h > 0 && thumb_w > 0);
+                const int tile_tokens = (MODEL_CONFIG::TILE_SIZE / MODEL_CONFIG::ENCODER_PATCH_SIZE
+                                         / MODEL_CONFIG::DOWNSAMPLE_FACTOR);
+                const int tile_tokens_sq = tile_tokens * tile_tokens;
+                prompt_ids = tok.encode_with_image(line, grid_h, grid_w, thumb_h, thumb_w,
+                                                   tile_tokens_sq, use_thumbnail,
+                                                   /*add_generation_prompt=*/true);
+            } else {
+                const std::vector<int> enc = tok.encode(line);
+                prompt_ids.assign(enc.begin(), enc.end());
+            }
+            if (prompt_ids.empty()) { std::fprintf(stderr, "tokenize produced no ids\n"); continue; }
+
+            const size_t prompt_len = prompt_ids.size();
+            const auto t_prefill_0 = std::chrono::steady_clock::now();
+            std::vector<float> logits = model.forward(prompt_ids, /*start_pos=*/0);
+            const auto t_first = std::chrono::steady_clock::now();
+
+            std::vector<int32_t> generated;
+            generated.reserve(MAX_DECODE_PER_TURN);
+            for (int step = 0; step < MAX_DECODE_PER_TURN; ++step) {
+                int next;
+                if (!logits.empty()) { next = sampler.sample(logits, generated); logits.clear(); }
+                else                 { next = model.read_greedy_result(); }
+                if ((sampler_config.eos_token_id >= 0 && next == sampler_config.eos_token_id) ||
+                    (im_end_id >= 0 && next == im_end_id)) break;
+                generated.push_back(next);
+                std::cout << tok.decode(std::vector<int32_t>{next}) << std::flush;
+                if (step + 1 < MAX_DECODE_PER_TURN) {
+                    const int decode_start_pos = (int)prompt_len + step;
+                    if (greedy) model.forward_greedy(std::vector<int32_t>{next}, decode_start_pos);
+                    else        logits = model.forward(std::vector<int32_t>{next}, decode_start_pos);
+                }
+            }
+            const auto t_decode_1 = std::chrono::steady_clock::now();
+            std::cout << std::endl;
+            turn++;
+
+            const double prefill_s = std::chrono::duration<double>(t_first    - t_prefill_0).count();
+            const double decode_s  = std::chrono::duration<double>(t_decode_1 - t_first).count();
+            const double prefill_tps = prefill_s > 0 ? (double)prompt_len        / prefill_s : 0.0;
+            const double decode_tps  = decode_s  > 0 ? (double)generated.size()  / decode_s  : 0.0;
+            std::fprintf(stderr,
+                         "✓ turn %d  prefill %zu tok %.2fs (%.2f tok/s)  decode %zu tok %.2fs (%.2f tok/s)\n",
+                         turn, prompt_len, prefill_s, prefill_tps, generated.size(), decode_s, decode_tps);
+            // BENCHMARK lines: parsed by the app's PerfAccumulator for the tok/s strip.
+            std::fprintf(stderr, "BENCHMARK prefill_tokens_per_sec: %.4f\n", prefill_tps);
+            std::fprintf(stderr, "BENCHMARK decode_tokens_per_sec: %.4f\n", decode_tps);
+            std::fprintf(stderr, "BENCHMARK time_to_first_token_sec: %.4f\n", prefill_s);
+            std::fflush(stderr);
+        }
+        std::fprintf(stderr, "\nbye.\n");
+        return 0;
     }
 
     // VLM input pipeline: when --image is provided, decode RGB8 via stb_image,

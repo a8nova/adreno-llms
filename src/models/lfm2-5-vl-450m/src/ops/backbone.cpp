@@ -240,6 +240,10 @@ std::vector<float> model_forward_graph(OpenCLContext& cl_ctx,
         1, 0, 1, 0
     };
     for (int i = 0; i < 16; ++i) {
+        // Yield the GPU per layer during the heavy multi-second prefill (seq_len>1)
+        // so the UI thread doesn't starve → ANR. Skip it on single-token decode
+        // steps, which are short and where the per-layer sleep would just add latency.
+        if (seq_len > 1) cl_ctx.yield_for_compositor();
         cl_mem next = nullptr;
         switch (LAYER_KINDS[i]) {
             case 0:  // conv
@@ -421,6 +425,10 @@ cl_mem model_forward_graph_logits_buf(OpenCLContext& cl_ctx,
 
     static const int LAYER_KINDS[16] = {0,0,1,0,0,1,0,0,1,0,1,0,1,0,1,0};
     for (int i = 0; i < 16; ++i) {
+        // Yield the GPU per layer during the heavy multi-second prefill (seq_len>1)
+        // so the UI thread doesn't starve → ANR. Skip it on single-token decode
+        // steps, which are short and where the per-layer sleep would just add latency.
+        if (seq_len > 1) cl_ctx.yield_for_compositor();
         cl_mem next = nullptr;
         switch (LAYER_KINDS[i]) {
             case 0: next = op_lfm2_conv_block(cl_ctx, weights, queue, x, seq_len, hidden, i, start_pos); break;

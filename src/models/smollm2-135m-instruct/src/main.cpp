@@ -185,11 +185,38 @@ static std::vector<int> load_token_ids_from_file(const std::string& path) {
     return ids;
 }
 
+// A prior conversation turn (multi-turn memory), loaded from --history.
+struct ChatTurn { char role; std::string content; };  // role: 'U' user, 'A' assistant
+
+// History file format, one record per prior turn:
+//   <role 'U'|'A'> <byte-length>\n<content bytes>\n
+// Length-delimited so message content needs no escaping. Empty/unreadable ⇒ no history.
+static std::vector<ChatTurn> load_history(const std::string& path) {
+    std::vector<ChatTurn> turns;
+    if (path.empty()) return turns;
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return turns;
+    while (true) {
+        int role = fgetc(f);
+        while (role == '\n' || role == '\r' || role == ' ') role = fgetc(f);
+        if (role == EOF) break;
+        long len = -1;
+        if (fscanf(f, "%ld", &len) != 1 || len < 0) break;
+        fgetc(f);  // consume the single '\n' before the content bytes
+        std::string content((size_t)len, '\0');
+        if (len > 0 && fread(&content[0], 1, (size_t)len, f) != (size_t)len) break;
+        turns.push_back({ (char)role, content });
+    }
+    fclose(f);
+    return turns;
+}
+
 static void print_usage(const char* prog) {
     std::cerr << "Usage: " << prog
               << " <prompt> [max_tokens]"
               << " [--temperature T] [--top-k K] [--top-p P]"
               << " [--repetition-penalty R] [--seed S]"
+              << " [--chat] [--system \"<text>\"] [--history <file>]"
               << " [--token-ids <file>]"
               << std::endl;
 }
@@ -214,6 +241,8 @@ int main(int argc, char* argv[]) {
     SamplerConfig sampler_config;
     std::string token_ids_file;
     bool chat_mode = false;
+    std::string system_prompt;  // optional system turn (chat mode); empty = none
+    std::string history_file;   // optional prior-turns file (multi-turn memory); empty = none
 
     // Parse positional and optional args
     int arg_idx = 2;
@@ -230,6 +259,8 @@ int main(int argc, char* argv[]) {
         else if (flag == "--repetition-penalty") sampler_config.repetition_penalty = std::stof(argv[arg_idx++]);
         else if (flag == "--seed")         sampler_config.seed = static_cast<uint32_t>(std::stoul(argv[arg_idx++]));
         else if (flag == "--token-ids")    token_ids_file = argv[arg_idx++];
+        else if (flag == "--system")       system_prompt = argv[arg_idx++];
+        else if (flag == "--history")      history_file = argv[arg_idx++];
         else { std::cerr << "Unknown flag: " << flag << std::endl; print_usage(argv[0]); return 1; }
     }
 
@@ -324,25 +355,29 @@ int main(int argc, char* argv[]) {
         }
         std::cerr << "Loaded " << input_ids.size() << " token IDs from file (tokenizer bypass)" << std::endl;
     } else if (chat_mode) {
-        // SmolLM2-Instruct chat template (matches the HF tokenizer's
-        // chat_template field). Special tokens are inserted as raw IDs because
-        // the BPE encoder treats them as substrings; only the user-visible
-        // body and "user"/"assistant" role labels go through encode().
-        //   <|im_start|>user
-        //   {prompt}<|im_end|>
-        //   <|im_start|>assistant
-        //
+        // SmolLM2-Instruct ChatML template (HF tokenizer chat_template). Each turn is
+        //   <|im_start|>{role}\n{content}<|im_end|>\n
+        // <|im_start|>/<|im_end|> go in as raw IDs (BPE treats them as substrings);
+        // role labels + content go through encode(). The full conversation is:
+        //   [system?] + [prior turns from --history] + [current user] + assistant opener
+        // The binary streams only the assistant's reply (no template echo), so the
+        // host needs no marker stripping — robust for any number of turns.
         constexpr int IM_START = 1;  // <|im_start|>
         constexpr int IM_END   = 2;  // <|im_end|>
-        auto user_ids = tokenizer.encode("user\n");
-        auto body_ids = tokenizer.encode(prompt);
-        auto assistant_ids = tokenizer.encode("\nassistant\n");
-        input_ids.push_back(IM_START);
-        input_ids.insert(input_ids.end(), user_ids.begin(), user_ids.end());
-        input_ids.insert(input_ids.end(), body_ids.begin(), body_ids.end());
-        input_ids.push_back(IM_END);
-        input_ids.push_back(IM_START);
-        input_ids.insert(input_ids.end(), assistant_ids.begin(), assistant_ids.end());
+        auto append_text = [&](const std::string& s) {
+            auto ids = tokenizer.encode(s);
+            input_ids.insert(input_ids.end(), ids.begin(), ids.end());
+        };
+        auto append_turn = [&](const std::string& role, const std::string& content) {
+            input_ids.push_back(IM_START); append_text(role + "\n" + content); input_ids.push_back(IM_END);
+            append_text("\n");
+        };
+        if (!system_prompt.empty()) append_turn("system", system_prompt);
+        for (const auto& t : load_history(history_file))
+            append_turn(t.role == 'U' ? "user" : "assistant", t.content);
+        append_turn("user", prompt);
+        // assistant opener — the model continues from here: <|im_start|>assistant\n
+        input_ids.push_back(IM_START); append_text("assistant\n");
         // Stop generation at <|im_end|> (the assistant's turn-end marker).
         sampler_config.eos_token_id = IM_END;
     } else {
@@ -480,16 +515,17 @@ int main(int argc, char* argv[]) {
     size_t streamed_chars = 0;
     Model::TokenCallback on_token = nullptr;
     if (tokenizer_ok && stream_enabled) {
-        // Seed the stream buffer with the prompt so the user sees their input
-        // before the first generated token appears. Decoding through the
-        // tokenizer (rather than echoing argv[1]) gives round-trip parity and
-        // covers the chat-mode path where input_ids include ChatML wrapper
-        // tokens that aren't in the raw prompt string.
-        stream_buf.assign(input_ids.begin(), input_ids.end());
-        std::string text = tokenizer.decode(stream_buf);
-        std::fputs(text.c_str(), stdout);
-        std::fflush(stdout);
-        streamed_chars = text.size();
+        // Non-chat (raw completion): echo the decoded prompt so the user sees their
+        // input before the continuation. Chat mode streams ONLY the reply (stream_buf
+        // starts empty, no echo) — the host shows the user's message itself, which
+        // keeps multi-turn robust (no template echo to disambiguate across turns).
+        if (!chat_mode) {
+            stream_buf.assign(input_ids.begin(), input_ids.end());
+            std::string text = tokenizer.decode(stream_buf);
+            std::fputs(text.c_str(), stdout);
+            std::fflush(stdout);
+            streamed_chars = text.size();
+        }
         on_token = [&](int32_t t) {
             stream_buf.push_back(t);
             std::string text = tokenizer.decode(stream_buf);

@@ -6,6 +6,9 @@
 #include <sstream>
 #include <iostream>
 #include <cstring>
+#include <cstdlib>
+#include <thread>
+#include <chrono>
 
 OpenCLContext::OpenCLContext() {}
 
@@ -248,4 +251,19 @@ size_t OpenCLContext::local_mem_size() const {
     cl_ulong size;
     clGetDeviceInfo(device_, CL_DEVICE_LOCAL_MEM_SIZE, sizeof(size), &size, nullptr);
     return (size_t)size;
+}
+
+void OpenCLContext::yield_for_compositor(int sleep_ms) {
+    // Cache the env check once: cheap to call per layer.
+    static const bool enabled = ([]() {
+        const char* e = std::getenv("NNOPT_GPU_YIELD");
+        return e != nullptr && e[0] != '0' && e[0] != '\0';
+    })();
+    if (!enabled || !queue_) return;
+    // clFinish (not clFlush) so the GPU actually drains and goes idle, letting
+    // the compositor render a frame before we enqueue the next layer's kernels.
+    clFinish(queue_);
+    if (sleep_ms > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+    }
 }

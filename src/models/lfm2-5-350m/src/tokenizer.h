@@ -18,7 +18,11 @@ class Tokenizer {
 public:
     bool load(const std::string& vocab_path);
 
-    std::vector<int32_t> encode(const std::string& text) const;
+    // add_bos=true (default) prepends <|startoftext|> + an add_prefix_space " "
+    // (canonical for a standalone single sequence). Chat mode passes false so
+    // per-turn text segments don't repeat the BOS / leading space that the
+    // ChatML scaffold already places via raw special-token IDs.
+    std::vector<int32_t> encode(const std::string& text, bool add_bos = true) const;
     std::string decode(const std::vector<int32_t>& token_ids) const;
 
     int32_t bos_token_id() const { return bos_id_; }
