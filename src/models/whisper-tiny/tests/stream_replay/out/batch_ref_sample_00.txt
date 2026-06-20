@@ -1,0 +1,3 @@
+TRANSCRIPT:  Mr. Quilter is the apostle of the middle classes and we are glad to welcome his gospel.
+GENERATED_TEXT:  Mr. Quilter is the apostle of the middle classes and we are glad to welcome his gospel.
+RTF: 1.331  (audio=5.86s proc=7.79s mel=0.150s)
