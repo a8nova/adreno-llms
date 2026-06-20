@@ -42,13 +42,16 @@ Text modes detokenize via the decoder's own 20,005-entry vocabulary (`tokenizer_
 
 ## Performance
 
-Razr 2020 / Adreno 620 / Snapdragon 765G, fp16, warm on-device, 6.0 s English input clip.
+Razr 2020 / Adreno 620 / Snapdragon 765G, fp16, warm on-device, 6.0 s English input clip. Median of 3 warm runs (per-stage `std::chrono`; GPU 100% busy over the timed run).
 
-| stage | encoder | text_beam | unit | vocoder | **TOTAL** |
-|---|---:|---:|---:|---:|---:|
-| ms | 5300 | 5000 | 2500 | 6800 | **~20,000** |
+| stage | fbank | encoder | text_beam | mt_feat | synth | unit_greedy | vocoder | **TOTAL** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| ms | 32 | 4320 | 4900 | 197 | 80 | 2440 | 5710 | **~17,700** |
 
-Units bit-exact (211/211), waveform cosine **0.999999** vs the `.ptl` reference. Optimized from a 271 s cold baseline (≈13× on the GPU pipeline) — full log, including the per-kernel breakdown and the on-device profiling methodology, in [BENCHMARK.md](./BENCHMARK.md).
+- **S2ST** (speech → translated **speech**): the full cascade ≈ **17.7 s** → **RTF ~2.9×** vs the 6.0 s input.
+- **S2TT / ASR** (speech → **text**): stops after the text decoder (`fbank + encoder + text_beam`) ≈ **9.2 s** → **RTF ~1.5×**. The text modes skip the T2U → unit-decoder → vocoder synthesis half (~8 s), so they are ~1.9× faster than S2ST.
+
+Units bit-exact (211/211), waveform cosine **0.999999** vs the `.ptl` reference. Optimized from a 271 s cold baseline (≈15× on the GPU pipeline) — full log, including the per-kernel breakdown and the on-device profiling methodology, in [BENCHMARK.md](./BENCHMARK.md).
 
 ## Layout
 

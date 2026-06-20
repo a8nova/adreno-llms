@@ -90,11 +90,11 @@ RTF = processing time / audio duration (lower is better; < 1.0 = faster than rea
 
 ### Speech translation (S2ST / S2TT)
 
-> A multi-stage **cascade**, not a single forward pass: fbank → Conformer encoder → text decoder (beam-5) → T2U synthesizer → unit decoder (greedy) → CodeHiFiGAN vocoder. Speech in → translated speech (S2ST) or text (S2TT / ASR) out. KV cache across both autoregressive decoders cuts a 1 s clip from RTF 271 → **53** warm. Correctness held fixed: units exact (53/53), waveform cos ≥ 0.999999 vs HF reference.
+> A multi-stage **cascade**, not a single forward pass: fbank → Conformer encoder → text decoder (beam-5) → T2U synthesizer → unit decoder (greedy) → CodeHiFiGAN vocoder. Speech in → translated speech (S2ST) or text (S2TT / ASR) out. On a realistic **6.0 s** English clip (warm): **S2ST RTF ~2.9×** (full cascade, ~17.7 s) and **S2TT / ASR RTF ~1.5×** (~9.2 s) — the text modes stop after the text decoder, skipping the T2U → unit-decoder → vocoder synthesis half (~8 s of the wall). Correctness held fixed: units bit-exact (211/211), waveform cos ≥ 0.999999 vs the `.ptl` reference.
 
 | Model | Precision | Params | Architecture | RTF (warm) | Modes | Notes |
 |---|:-:|---:|---|---:|---|---|
-| [SeamlessM4T UnitY-small](src/models/seamless-m4t-unity-small/) | fp16 | ~323M | Conformer enc + text dec (beam-5) + T2U + unit dec + CodeHiFiGAN | **53** | s2s / s2tt / asr | 1 s input; encoder + decoders dominate; eng/spa/por/hin/rus output |
+| [SeamlessM4T UnitY-small](src/models/seamless-m4t-unity-small/) | fp16 | ~323M | Conformer enc + text dec (beam-5) + T2U + unit dec + CodeHiFiGAN | **2.9** / **1.5** | s2s / s2tt / asr | 6.0 s input, warm: **S2ST 2.9×** (speech out, ~17.7 s) vs **S2TT/ASR 1.5×** (text out, ~9.2 s) — text modes skip T2U+unit-decoder+vocoder; eng/spa/por/hin/rus output |
 
 
 State-of-the-art small language models running on **Adreno 6xx GPUs** — the GPU class found in mid-range Android phones. Pure C++/OpenCL inference, cross-compiled on macOS, deployed via `adb` to `/data/local/tmp/`.
