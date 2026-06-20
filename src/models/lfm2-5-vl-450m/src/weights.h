@@ -85,6 +85,15 @@ private:
     uint8_t* mapped_ = nullptr;
     size_t mapped_size_ = 0;
     int mapped_fd_ = -1;
+    // True only when [mapped_] is a real file-backed mmap (not the malloc fallback). Gates
+    // advise_dontneed(): MADV_DONTNEED on file-backed pages re-reads from the file on next access
+    // (safe), but on malloc/anonymous memory it ZEROES the pages — which would corrupt the weights.
+    bool mmap_backed_ = false;
+
+    // After a tensor has been copied to its GPU buffer, hint the kernel to drop that tensor's host
+    // pages (MADV_DONTNEED) so the host RSS doesn't carry a redundant full copy of the weights
+    // alongside the GPU copy. No-op unless [mmap_backed_]. Ported from smolvlm-256m.
+    void advise_dontneed(size_t offset, size_t nbytes);
 
     struct TensorMeta {
         size_t offset;

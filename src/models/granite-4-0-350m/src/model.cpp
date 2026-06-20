@@ -828,12 +828,14 @@ std::vector<int32_t> Model::generate(
 
     ids.push_back(next_token);
     generated.push_back(next_token);
-    if (on_token) on_token(next_token);
     NNOPT_BENCH_FIRST_TOKEN();
+    // EOS check BEFORE the streaming callback: the stop token must end the turn, not be emitted as
+    // text. Emitting it leaked the literal end-of-turn marker into replies and poisoned chat history.
     if (sampler_config.eos_token_id >= 0 && next_token == sampler_config.eos_token_id) {
         NNOPT_CHECKPOINT("generate() complete (eos at first token)");
         return ids;
     }
+    if (on_token) on_token(next_token);
 
     if (greedy_path) {
         // Step #3 chained-decode loop. Pattern (OpenELM-style):
@@ -872,14 +874,15 @@ std::vector<int32_t> Model::generate(
                 int32_t prev_token = host_slots[pending_slot];
                 ids.push_back(prev_token);
                 generated.push_back(prev_token);
-                auto t_cb = t_now();
-                if (on_token) on_token(prev_token);
-                decode_ontoken_ms += ms_between(t_cb, t_now());
                 decode_steps++;
+                // EOS check before emit (see first-token note): stop without streaming the marker.
                 if (sampler_config.eos_token_id >= 0 && prev_token == sampler_config.eos_token_id) {
                     have_pending = false;
                     break;
                 }
+                auto t_cb = t_now();
+                if (on_token) on_token(prev_token);
+                decode_ontoken_ms += ms_between(t_cb, t_now());
             }
             pending_slot = slot;
             pending_token = -1;  // value lives in host_slots[slot] once event fires
@@ -892,10 +895,13 @@ std::vector<int32_t> Model::generate(
             int32_t prev_token = host_slots[pending_slot];
             ids.push_back(prev_token);
             generated.push_back(prev_token);
-            auto t_cb = t_now();
-            if (on_token) on_token(prev_token);
-            decode_ontoken_ms += ms_between(t_cb, t_now());
             decode_steps++;
+            // Don't emit the final token if it's the stop token (see first-token note).
+            if (!(sampler_config.eos_token_id >= 0 && prev_token == sampler_config.eos_token_id)) {
+                auto t_cb = t_now();
+                if (on_token) on_token(prev_token);
+                decode_ontoken_ms += ms_between(t_cb, t_now());
+            }
             (void)pending_token;
         }
         if (read_events[0]) clReleaseEvent(read_events[0]);
@@ -918,12 +924,12 @@ std::vector<int32_t> Model::generate(
 
             ids.push_back(next_token);
             generated.push_back(next_token);
+            decode_steps++;
+            // EOS check before emit (see first-token note): stop without streaming the marker.
+            if (sampler_config.eos_token_id >= 0 && next_token == sampler_config.eos_token_id) break;
             auto t_cb = t_now();
             if (on_token) on_token(next_token);
             decode_ontoken_ms += ms_between(t_cb, t_now());
-            decode_steps++;
-
-            if (sampler_config.eos_token_id >= 0 && next_token == sampler_config.eos_token_id) break;
         }
     }
 

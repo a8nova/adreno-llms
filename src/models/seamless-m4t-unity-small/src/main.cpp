@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <iostream>   // --serve: std::cin / std::getline
+#include <sstream>    // --serve: parse the request line
 
 // Adreno hardware GPU-busy counter (kgsl): "<busy> <total>" cycles since last read.
 // busy/total over an interval = TRUE GPU utilization, counting EVERY kernel (incl. CLBlast
@@ -49,10 +51,12 @@ int main(int argc, char* argv[]) {
     std::string mode = (argc > 1 && argv[1][0] != '-') ? argv[1] : "full";
     std::string in_wav = "assets/input.wav", out_wav = "output.wav", lang = "eng";
     bool in_given = false;
+    bool serve_mode = false;   // --serve: stay resident, one translation per stdin request line
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--in") && i + 1 < argc) { in_wav = argv[++i]; in_given = true; }
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out_wav = argv[++i];
         else if (!strcmp(argv[i], "--lang") && i + 1 < argc) lang = argv[++i];
+        else if (!strcmp(argv[i], "--serve")) serve_mode = true;
     }
     fprintf(stderr, "=== SeamlessM4T UnitY on-device (mode=%s) ===\n", mode.c_str());
 
@@ -80,6 +84,60 @@ int main(int argc, char* argv[]) {
         {"por", 20002, 10012, 21, 38}, {"hin", 20003, 10011, 12, 16},
         {"rus", 20004, 10013, 23, 40},
     };
+
+    // ── Warm server (--serve): model loaded once above; one translation per stdin request line ──
+    // Request: "<mode> <lang> <in_wav> <out_wav>"  (out_wav used only for s2s; "-" otherwise).
+    // s2tt/asr → translated text on STDOUT; s2s → wav written to out_wav (blank stdout line). Each
+    // reply ends with SEAMLESS_DONE on STDERR; SEAMLESS_READY (stderr) signals the model is warm.
+    if (serve_mode) {
+        Tokenizer stok; stok.load("weights/tokenizer_vocab.bin");
+        fprintf(stderr, "SEAMLESS_READY\n"); std::fflush(stderr);
+        std::string reqline;
+        while (std::getline(std::cin, reqline)) {
+            if (reqline.empty()) continue;
+            std::istringstream iss(reqline);
+            std::string rmode, rlang, rin, rout;
+            iss >> rmode >> rlang >> rin >> rout;
+            const LangCfg* L = nullptr;
+            for (const auto& cfg : LANGS) if (rlang == cfg.code) { L = &cfg; break; }
+            auto finish = []() { fprintf(stderr, "SEAMLESS_DONE\n"); std::fflush(stderr); };
+            if (rmode.empty() || rin.empty() || !L) {
+                fprintf(stderr, "seamless: bad request '%s'\n", reqline.c_str());
+                std::fputc('\n', stdout); std::fflush(stdout); finish(); continue;
+            }
+            pipe.set_lang(L->text_prefix, L->unit_prefix, L->voc_lang, L->voc_spkr);
+            WavData w;
+            if (!read_wav(rin, w)) {
+                fprintf(stderr, "seamless: failed to read %s\n", rin.c_str());
+                std::fputc('\n', stdout); std::fflush(stdout); finish(); continue;
+            }
+            int nframes = (int)w.samples.size() / w.channels;
+            Tensor mono = ops.audio_decode(ops.upload_s16(w.samples), nframes, w.channels);
+            int n16 = nframes;
+            if (w.sample_rate != 16000) { int nout = 0; mono = ops.audio_resample(mono, nframes, w.sample_rate, 16000, nout); n16 = nout; }
+            auto audio = ops.download(mono, n16);
+            if (rmode == "s2s") {
+                std::vector<float> units, wav;
+                pipe.run(audio, units, wav);
+                Tensor wavT = ops.upload(wav);
+                cl_mem s16out = ops.audio_encode_s16(wavT, (int)wav.size());
+                auto pcm = ops.download_s16(s16out, (int)wav.size());
+                write_wav(rout, pcm, 16000);
+                std::fputc('\n', stdout); std::fflush(stdout);   // s2s has no text
+            } else {  // s2tt / asr
+                int nf = 0; auto fb = pipe.fbank(audio, nf);
+                int Tenc = 0; auto enc = pipe.encoder(fb, nf, Tenc);
+                auto hypo = pipe.text_beam_search(enc, Tenc);
+                std::string text;
+                if (hypo.size() >= 2) { std::vector<int32_t> ids(hypo.begin() + 1, hypo.end() - 1); text = stok.decode(ids); }
+                fprintf(stdout, "%s\n", text.c_str()); std::fflush(stdout);
+            }
+            finish();
+        }
+        ops.free_all();
+        return 0;
+    }
+
     const LangCfg* lc = nullptr;
     for (const auto& L : LANGS) if (lang == L.code) { lc = &L; break; }
     if (!lc) {

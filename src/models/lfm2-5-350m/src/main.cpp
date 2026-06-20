@@ -423,6 +423,7 @@ int main(int argc, char* argv[]) {
     std::string token_ids_file;
     bool ignore_eos = false;
     bool chat_mode = false;
+    bool serve_mode = false;    // --serve: stay resident, stream replies per stdin request (warm model)
     std::string system_prompt;  // optional system turn (chat mode); empty = none
     std::string history_file;   // optional prior-turns file (multi-turn memory); empty = none
 
@@ -435,6 +436,7 @@ int main(int argc, char* argv[]) {
         std::string flag = argv[arg_idx++];
         if (flag == "--ignore-eos" || flag == "--no-eos") { ignore_eos = true; continue; }
         if (flag == "--chat") { chat_mode = true; continue; }  // bare flag, no value
+        if (flag == "--serve") { serve_mode = true; continue; } // bare flag, no value
         if (arg_idx >= argc) { print_usage(argv[0]); return 1; }
         if (flag == "--system") { system_prompt = argv[arg_idx++]; continue; }
         if (flag == "--history") { history_file = argv[arg_idx++]; continue; }
@@ -575,6 +577,71 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     NNOPT_CHECKPOINT("model created");
+
+    // ── Persistent serve mode (warm model) — port of the qwen --serve REPL ──────
+    // OpenCL init + weight upload + kernel compile run ONCE; --serve then loops reading
+    // requests from stdin so query 2+ skip the cold load. Protocol (identical to qwen):
+    //   "GEN <max> <temp> <top_k> <top_p> <rep_pen> <sys_nbytes> <prompt_nbytes> <use_history>\n"
+    //   then system + prompt bytes; use_history=1 ⇒ read prior turns from "history.bin".
+    // Reply streams to stdout, ending with a single 0x1E byte; per-reply BENCHMARK lines on stderr.
+    if (serve_mode) {
+        std::cerr << "SERVE_READY" << std::endl;
+        std::string header;
+        while (std::getline(std::cin, header)) {
+            if (header.empty()) continue;
+            int rq_max = 256, rq_topk = 40, rq_usehist = 0;
+            float rq_temp = 0.7f, rq_topp = 0.95f, rq_rep = 1.1f;
+            unsigned long rq_sysn = 0, rq_promptn = 0;
+            if (std::sscanf(header.c_str(), "GEN %d %f %d %f %f %lu %lu %d",
+                            &rq_max, &rq_temp, &rq_topk, &rq_topp, &rq_rep,
+                            &rq_sysn, &rq_promptn, &rq_usehist) != 8) {
+                std::cerr << "serve: bad request header: " << header << std::endl;
+                std::cout << '\x1e' << std::flush; continue;
+            }
+            std::string rq_system(rq_sysn, '\0');
+            if (rq_sysn) std::cin.read(&rq_system[0], (std::streamsize)rq_sysn);
+            std::string rq_prompt(rq_promptn, '\0');
+            if (rq_promptn) std::cin.read(&rq_prompt[0], (std::streamsize)rq_promptn);
+            if (!std::cin) break;
+
+            // LFM2.5 ChatML template (BOS=1, IM_START=6, IM_END=7; encode add_bos=false) — same as --chat.
+            std::vector<int> ids;
+            constexpr int BOS = 1, IM_START = 6, IM_END = 7;
+            auto add = [&](const std::string& s){ auto e = tokenizer.encode(s, /*add_bos=*/false); ids.insert(ids.end(), e.begin(), e.end()); };
+            ids.push_back(BOS);
+            if (!rq_system.empty()) { ids.push_back(IM_START); add("system\n" + rq_system); ids.push_back(IM_END); add("\n"); }
+            if (rq_usehist) for (const auto& t : load_history("history.bin")) {
+                ids.push_back(IM_START); add(std::string(t.role == 'A' ? "assistant" : "user") + "\n" + t.content); ids.push_back(IM_END); add("\n");
+            }
+            ids.push_back(IM_START); add("user\n" + rq_prompt); ids.push_back(IM_END); add("\n");
+            ids.push_back(IM_START); add("assistant\n");
+
+            SamplerConfig sc;
+            sc.temperature = rq_temp; sc.top_k = rq_topk; sc.top_p = rq_topp;
+            sc.repetition_penalty = rq_rep; sc.eos_token_id = IM_END;
+
+            std::string emitted = tokenizer.decode(ids);  // delta baseline
+            const size_t prompt_toks = ids.size();
+            const auto t_req = std::chrono::steady_clock::now();
+            std::chrono::steady_clock::time_point t_first; bool got_first = false; int gen_n = 0;
+            auto on_token = [&](int32_t, const std::vector<int32_t>& all){
+                if (!got_first) { got_first = true; t_first = std::chrono::steady_clock::now(); }
+                ++gen_n;
+                std::string full = tokenizer.decode(all);
+                if (full.size() > emitted.size()) { std::cout << full.substr(emitted.size()) << std::flush; emitted = std::move(full); }
+            };
+            model.generate(ids, rq_max, sc, on_token);
+            const auto t_end = std::chrono::steady_clock::now();
+            auto secs = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b){ return std::chrono::duration<double>(b - a).count(); };
+            const double ttft = got_first ? secs(t_req, t_first) : 0.0;
+            const double dec_s = got_first ? secs(t_first, t_end) : 0.0;
+            if (ttft > 0.0) { std::cerr << "BENCHMARK time_to_first_token_sec: " << ttft << "\n"; std::cerr << "BENCHMARK prefill_tokens_per_sec: " << (prompt_toks / ttft) << "\n"; }
+            if (dec_s > 0.0 && gen_n > 1) std::cerr << "BENCHMARK decode_tokens_per_sec: " << ((gen_n - 1) / dec_s) << "\n";
+            std::cerr << std::flush;
+            std::cout << '\x1e' << std::flush;  // end-of-reply sentinel
+        }
+        return 0;
+    }
 
     // Baseline benchmark instrumentation (emits BENCHMARK <key>: <value>
     // lines on stderr; parsed by runUtils.ts parseInferenceMetrics).

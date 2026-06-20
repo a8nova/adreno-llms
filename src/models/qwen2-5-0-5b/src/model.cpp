@@ -884,14 +884,14 @@ std::vector<int32_t> Model::generate(
     // Drop prefill events from the profile — we want a decode-only attribution.
     nnopt_prof::reset();
 
-    // First-token streaming callback. Fire BEFORE the eos check so the
-    // user sees the eos token text (if any) even if generation stops here.
-    if (on_token) on_token(next_token, ids);
-
+    // EOS check BEFORE the streaming callback: the stop token (<|im_end|>) ends the turn and must NOT
+    // be emitted as text. Emitting it leaked the literal "<|im_end|>" into replies and — once saved to
+    // chat history — poisoned every later turn (the model then free-ran fake turns). Apply at all sites.
     if (sampler_config.eos_token_id >= 0 && next_token == sampler_config.eos_token_id) {
         NNOPT_CHECKPOINT("generate() complete (eos at first token)");
         return ids;
     }
+    if (on_token) on_token(next_token, ids);
 
     // Greedy fast path: temperature ≤ 0 with no repetition penalty means the
     // sampler reduces to plain argmax. forward_greedy resolves the argmax on
@@ -932,9 +932,10 @@ std::vector<int32_t> Model::generate(
         next_token = tok0;
         ids.push_back(next_token);
         generated.push_back(next_token);
-        if (on_token) on_token(next_token, ids);
+        // EOS check before emit (see first-token note): don't stream the stop token's text.
         bool eos_seen =
             (sampler_config.eos_token_id >= 0 && next_token == sampler_config.eos_token_id);
+        if (!eos_seen && on_token) on_token(next_token, ids);
 
         // Step 2+: chained loop with 2-slot ping-pong async readback.
         cl_command_queue queue = cl_ctx_.queue();
@@ -970,9 +971,11 @@ std::vector<int32_t> Model::generate(
                 int32_t t = host_int[prev_slot];
                 ids.push_back(t);
                 generated.push_back(t);
-                if (on_token) on_token(t, ids);
+                // EOS check before emit (see first-token note): don't stream the stop token's text.
                 if (sampler_config.eos_token_id >= 0 && t == sampler_config.eos_token_id) {
                     eos_seen = true;
+                } else if (on_token) {
+                    on_token(t, ids);
                 }
             }
             prev_slot = cur_slot;
@@ -1016,11 +1019,10 @@ std::vector<int32_t> Model::generate(
         ids.push_back(next_token);
         generated.push_back(next_token);
 
-        // Streaming callback after each new token. Fires BEFORE the eos
-        // check so the user can see what the model decided to stop on.
-        if (on_token) on_token(next_token, ids);
-
+        // EOS check BEFORE the streaming callback (see first-token note): stop on the eos token
+        // without emitting its text, so <|im_end|> never reaches the reply.
         if (sampler_config.eos_token_id >= 0 && next_token == sampler_config.eos_token_id) break;
+        if (on_token) on_token(next_token, ids);
     }
 
     NNOPT_CHECKPOINT("generate() complete");

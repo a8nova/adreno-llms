@@ -188,6 +188,7 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
         fprintf(stderr, "  local_mem       %.0f KB\n", (double)lmem / 1024.0);
         fprintf(stderr, "  cl_khr_fp16     %s\n", has_fp16    ? "yes" : "no");
         fprintf(stderr, "  qcom_perf_hint  %s\n", has_perfhnt ? "yes" : "no");
+        fprintf(stderr, "  cl_device_extensions   %s\n", ext_buf);
         fprintf(stderr, "─────────────────────────────────────────────────────────────\n");
         fflush(stderr);
     }

@@ -100,7 +100,8 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
     queue_ = clCreateCommandQueue(context_, device_, CL_QUEUE_PROFILING_ENABLE, &err);
 
     // ── One-time device banner (matches mms-tts format). Always shown — it's
-    // small + useful. Debug builds additionally dump the full extensions list.
+    // small + useful. The full cl_device_extensions list is always printed too:
+    // the Android app parses it to drive the "Will it run?" device matrix.
     {
         char platform_name[128] = {0};
         char device_name[128]   = {0};
@@ -127,6 +128,19 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
         const bool has_perfhnt = std::strstr(ext_buf, "cl_qcom_perf_hint")    != nullptr;
         const bool has_record  = std::strstr(ext_buf, "cl_qcom_recordable_queues") != nullptr;
         const bool has_dotp8   = std::strstr(ext_buf, "cl_qcom_dot_product8") != nullptr;
+        // Adreno 619 (SM6375) ADVERTISES cl_qcom_reqd_sub_group_size in CL_DEVICE_EXTENSIONS but its
+        // compiler rejects the pragma (clBuildProgram -11). Advertisement != usability — so compile-probe it.
+        auto ext_compiles = [&](const char* src) -> bool {
+            cl_int e; const char* s = src;
+            cl_program p = clCreateProgramWithSource(context_, 1, &s, nullptr, &e);
+            if (e != CL_SUCCESS || !p) return false;
+            e = clBuildProgram(p, 1, &device_, "", nullptr, nullptr);
+            clReleaseProgram(p);
+            return e == CL_SUCCESS;
+        };
+        const bool has_reqdsg  = (std::strstr(ext_buf, "cl_qcom_reqd_sub_group_size") != nullptr) && ext_compiles(
+            "#pragma OPENCL EXTENSION cl_qcom_reqd_sub_group_size : enable\n"
+            "__attribute__((qcom_reqd_sub_group_size(\"full\"))) __kernel void p(){}\n");
         fprintf(stderr, "── OpenCL device ────────────────────────────────────────────\n");
         fprintf(stderr, "  platform        %s\n", platform_name);
         fprintf(stderr, "  device          %s\n", device_name);
@@ -141,11 +155,9 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
         fprintf(stderr, "  qcom_perf_hint         %s\n", has_perfhnt ? "yes" : "no");
         fprintf(stderr, "  qcom_recordable_queues %s\n", has_record  ? "yes" : "no");
         fprintf(stderr, "  qcom_dot_product8      %s\n", has_dotp8   ? "yes" : "no");
+        fprintf(stderr, "  qcom_reqd_sub_group_size %s\n", has_reqdsg ? "yes" : "no");
         fprintf(stderr, "─────────────────────────────────────────────────────────────\n");
-#ifdef NNOPT_DEBUG
-        // Debug-only: full extensions dump for diagnostics.
-        fprintf(stderr, "  extensions      %s\n", ext_buf);
-#endif
+        fprintf(stderr, "  cl_device_extensions   %s\n", ext_buf);
         fflush(stderr);
     }
 

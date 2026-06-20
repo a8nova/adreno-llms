@@ -104,6 +104,67 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
     queue_ = clCreateCommandQueue(context_, device_, CL_QUEUE_PROFILING_ENABLE, &err);
     if (err != CL_SUCCESS) return false;
 
+    // ── One-time device banner (matches mms-tts format). Always shown — it's
+    // small + useful. Debug builds additionally dump the full extensions list.
+    {
+        char platform_name[128] = {0};
+        char device_name[128]   = {0};
+        char device_version[128]= {0};
+        char driver_version[256]= {0};
+        char ext_buf[8192]      = {0};
+        cl_uint cu = 0;
+        size_t max_wg = 0;
+        cl_ulong gmem = 0, lmem = 0;
+        cl_uint clock_mhz = 0;
+        cl_platform_id platform = nullptr;
+        clGetDeviceInfo(device_, CL_DEVICE_PLATFORM, sizeof(platform), &platform, nullptr);
+        if (platform) clGetPlatformInfo(platform, CL_PLATFORM_NAME, sizeof(platform_name), platform_name, nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_NAME,                 sizeof(device_name),    device_name,    nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_VERSION,              sizeof(device_version), device_version, nullptr);
+        clGetDeviceInfo(device_, CL_DRIVER_VERSION,              sizeof(driver_version), driver_version, nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_MAX_COMPUTE_UNITS,    sizeof(cu),       &cu,       nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_MAX_WORK_GROUP_SIZE,  sizeof(max_wg),   &max_wg,   nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_GLOBAL_MEM_SIZE,      sizeof(gmem),     &gmem,     nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_LOCAL_MEM_SIZE,       sizeof(lmem),     &lmem,     nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_MAX_CLOCK_FREQUENCY,  sizeof(clock_mhz),&clock_mhz,nullptr);
+        clGetDeviceInfo(device_, CL_DEVICE_EXTENSIONS, sizeof(ext_buf) - 1, ext_buf, nullptr);
+        const bool has_fp16    = std::strstr(ext_buf, "cl_khr_fp16")          != nullptr;
+        const bool has_perfhnt = std::strstr(ext_buf, "cl_qcom_perf_hint")    != nullptr;
+        const bool has_record  = std::strstr(ext_buf, "cl_qcom_recordable_queues") != nullptr;
+        const bool has_dotp8   = std::strstr(ext_buf, "cl_qcom_dot_product8") != nullptr;
+        // Adreno 619 (SM6375) ADVERTISES cl_qcom_reqd_sub_group_size in CL_DEVICE_EXTENSIONS but its
+        // compiler rejects the pragma (clBuildProgram -11). Advertisement != usability — so compile-probe it.
+        auto ext_compiles = [&](const char* src) -> bool {
+            cl_int e; const char* s = src;
+            cl_program p = clCreateProgramWithSource(context_, 1, &s, nullptr, &e);
+            if (e != CL_SUCCESS || !p) return false;
+            e = clBuildProgram(p, 1, &device_, "", nullptr, nullptr);
+            clReleaseProgram(p);
+            return e == CL_SUCCESS;
+        };
+        const bool has_reqdsg  = (std::strstr(ext_buf, "cl_qcom_reqd_sub_group_size") != nullptr) && ext_compiles(
+            "#pragma OPENCL EXTENSION cl_qcom_reqd_sub_group_size : enable\n"
+            "__attribute__((qcom_reqd_sub_group_size(\"full\"))) __kernel void p(){}\n");
+        fprintf(stderr, "── OpenCL device ────────────────────────────────────────────\n");
+        fprintf(stderr, "  platform        %s\n", platform_name);
+        fprintf(stderr, "  device          %s\n", device_name);
+        fprintf(stderr, "  version         %s\n", device_version);
+        fprintf(stderr, "  driver          %s\n", driver_version);
+        fprintf(stderr, "  compute_units   %u\n", (unsigned)cu);
+        fprintf(stderr, "  max_clock_MHz   %u\n", (unsigned)clock_mhz);
+        fprintf(stderr, "  max_workgroup   %zu\n", max_wg);
+        fprintf(stderr, "  global_mem      %.0f MB\n", (double)gmem / (1024.0 * 1024.0));
+        fprintf(stderr, "  local_mem       %.0f KB\n", (double)lmem / 1024.0);
+        fprintf(stderr, "  cl_khr_fp16            %s\n", has_fp16    ? "yes" : "no");
+        fprintf(stderr, "  qcom_perf_hint         %s\n", has_perfhnt ? "yes" : "no");
+        fprintf(stderr, "  qcom_recordable_queues %s\n", has_record  ? "yes" : "no");
+        fprintf(stderr, "  qcom_dot_product8      %s\n", has_dotp8   ? "yes" : "no");
+        fprintf(stderr, "  qcom_reqd_sub_group_size %s\n", has_reqdsg ? "yes" : "no");
+        fprintf(stderr, "─────────────────────────────────────────────────────────────\n");
+        fprintf(stderr, "  cl_device_extensions   %s\n", ext_buf);
+        fflush(stderr);
+    }
+
     // Track 5 — cl_qcom_recordable_queues feature detection + setup.
     // Vendor extension; Adreno hides entry points from
     // clGetExtensionFunctionAddressForPlatform, so dlsym from RTLD_DEFAULT.
