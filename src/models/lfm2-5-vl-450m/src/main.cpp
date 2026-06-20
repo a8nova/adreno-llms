@@ -100,7 +100,7 @@ int main(int argc, char** argv) {
     std::string token_ids_path;
 
     std::string image_path;  // --image <file.jpg|.png> for VLM inference
-    bool interactive_mode = false;  // --interactive: stdin REPL with /image, /reset (Edgi describeImage contract)
+    bool interactive_mode = false;  // --interactive: stdin REPL with /image, /reset (host-app describeImage contract)
 
     SamplerConfig sampler_config;
     sampler_config.temperature = 0.0f;          // greedy by default — matches PyTorch reference
@@ -293,7 +293,7 @@ int main(int argc, char** argv) {
     }
 
     // ── Interactive REPL ──
-    // `--interactive` opens a stdin-driven loop that matches the Edgi app's
+    // `--interactive` opens a stdin-driven loop that matches the host app's
     // describeImage contract (and SmolVLM's interactive mode):
     //   /image <path>   load image, run vision pipeline (set_image)
     //   /reset          drop the image (next prompt is text-only)
