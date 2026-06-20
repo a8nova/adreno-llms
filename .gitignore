@@ -71,3 +71,20 @@ adreno-llms-demos/
 *.orig
 *.swp
 *~
+
+# NNPort snapshot / scratch trees — full per-model working copies (weights,
+# builds, layer dumps, .nnport). Multi-GB and regenerable. lint_scripts.sh
+# already skips these; keep them out of the tree entirely.
+src/models/v2/
+src/models/v3/
+
+# Per-model benchmark scratch
+**/.bench/
+
+# Screen / demo captures — kept private, never committed (see also
+# adreno-llms-demos/ above). None are referenced by any README.
+*.mp4
+*.mov
+
+# Local-only build helpers with machine-specific absolute paths — never committed.
+/build_all_for_*.sh
