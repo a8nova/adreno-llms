@@ -65,12 +65,12 @@ Workload: `"Describe this image."` + sample JPEG. TTFT includes image preprocess
 
 ### Text-to-speech
 
-RTF = wall time / audio duration (lower is better; RTF ≤ 1.0 = real-time). Measured 2026-05-20.
+RTF = wall time / audio duration (lower is better; RTF ≤ 1.0 = real-time). Measured 2026-06-08 (Kokoro streaming), 2026-05-20 (MMS-TTS).
 
 | Model | Precision | Params | Architecture | RTF | Audio | Wall (s) | Peak CPU mem (MB) | Notes |
 |---|:-:|---:|---|---:|---:|---:|---:|---|
 | [MMS-TTS](src/models/mms-tts/) | fp16 | 36M | VITS (enc + flow + HiFi-GAN) | **1.3** | 7.8 s | ~10.1 | 686 | ~1100 languages; per-op cosine ≥ 0.996 vs HF reference |
-| [Kokoro-82M](src/models/kokoro-82m/) | fp16 | 82M | StyleTTS2 (text enc + duration + iSTFT decoder) | **1.1** | 2.0 s | ~2.2 | 783 | near real-time; gapless `--serve` streaming ~1.0 RTF |
+| [Kokoro-82M](src/models/kokoro-82m/) | fp16 | 82M | StyleTTS2 (text enc + duration + iSTFT decoder) | **0.93** | 2.0 s | ~2.1 | 783 | warm `--stream` / `--serve` streaming **faster than real-time** — sustained RTF **0.92–1.01** (int8 dot8 paths default-on, gapless); cold single-shot ~1.05 RTF (~2.1 s wall) |
 
 ### Speech-to-text (ASR)
 

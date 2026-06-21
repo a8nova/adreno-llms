@@ -6,7 +6,7 @@ Hexgrad's Kokoro-82M text-to-speech (24 kHz) ported to C++/OpenCL for Adreno 6xx
 - **Parameters:** 82M (one model, shared across all 54 voices)
 - **Architecture:** StyleTTS2-style — text → phonemes (via espeak) → style-conditioned acoustic model → iSTFT decoder → 24 kHz waveform
 - **Precision:** fp16
-- **Performance:** single-shot **~RTF 1.05** (~2.1 s wall for ~2.0 s audio); gapless `--serve` streaming **~1.0 RTF** (with `NNOPT_DOT8=1`). Full log in [BENCHMARK.md](BENCHMARK.md).
+- **Performance (Adreno 620):** warm `--stream` / `--serve` streaming is **faster than real-time** — sustained **RTF 0.92–0.96** on real sentences (0.96 @ 15 words → 0.92 @ 46 words; warm chunks ~0.88–0.92), int8 dot8 default-on. A lone short utterance is **~RTF 1.05** (one cold chunk, can't amortize). Requires `cl_qcom_dot_product8` — Adreno 619 (SD695) lacks it and falls back to the fp16 path at ~1.3× (measured 2026-06-21, 4-length × 5-run sweep). Full log in [BENCHMARK.md](BENCHMARK.md).
 
 ## Build (default = fastest)
 
