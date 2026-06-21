@@ -213,7 +213,35 @@ vocoder → conv vectorization (Tier 1 #5).
 | + Tier-3 batch beams | ~22,700 | 22.7 | 1.22× |
 | **cumulative** | | | **~12×** |
 
-## Multilingual S2ST profile (all output languages, warm)
+## Per-language warm profile — 2026-06-21 (current numbers)
+
+`s2s` on `samples/tell_me_nearest_gas_station.wav` (6.012 s in, T_enc=38), Razr / Adreno 620,
+fp16, warm. Median of **5 fresh-process runs** per language (each `NNOPT_WARMUP=1` untimed
+warm-up → timed steady-state run; `NNOPT_TIMING=1` per-stage `std::chrono`). Within-language
+spread < 2 %. RTF = wall ÷ 6.012 s input.
+
+| lang | fbank | encoder | text_beam | mt_feat | synth | unit_greedy | vocoder | **TOTAL** | S2ST RTF | S2TT\* | S2TT RTF |
+|------|------:|--------:|----------:|--------:|------:|------------:|--------:|----------:|---------:|-------:|---------:|
+| eng | 32 | 4377 | 4941 | 202 | 80 | 2443 | 5327 | **17,418** | 2.90× | 9,324 | 1.55× |
+| spa | 33 | 4353 | 7174 | 215 | 84 | 2170 | 4979 | **19,022** | 3.16× | 11,553 | 1.92× |
+| por | 32 | 4344 | 6239 | 204 | 80 | 2809 | 6185 | **19,833** | 3.30× | 10,605 | 1.76× |
+| hin | 32 | 4337 | 10475 | 231 | 90 | 3724 | 7925 | **26,810** | 4.46× | 14,844 | 2.47× |
+| rus | 33 | 4337 | 7526 | 208 | 81 | 2814 | 6541 | **21,521** | 3.58× | 11,899 | 1.98× |
+
+\*S2TT / ASR = `fbank + encoder + text_beam` (text modes stop after the text decoder, skipping
+T2U → unit_greedy → vocoder). **fbank + encoder (~4.4 s) is language-independent** (same input
+audio); all per-language spread is in `text_beam` and — for S2ST — the unit/vocoder lengths
+(grow with #units emitted; Hindi emits the most → slowest). Units bit-exact vs `.ptl`
+(eng 211/211, spa 191/191, por 234/234), waveform cos 0.999999.
+
+`s2tt_all` (encode once, decode all 5): name clip (3.09 s) **19.5 s** total (enc 2.2 s);
+gas clip (6.01 s) **40.5 s** total (enc 4.4 s).
+
+> The two tables below are **historical**: the laughter fixture (~1 s output, unrepresentative)
+> and the pre-optimization real-speech run (encoder ~35 s, since cut ~8× to ~4.4 s). Kept for
+> the optimization narrative — **use the 2026-06-21 table above for current numbers.**
+
+## Multilingual S2ST profile (all output languages, warm) — historical, laughter fixture
 
 `full --lang <code>` on the laughter fixture. Time scales with **#units emitted** (decode is
 per-token; vocoder length = units×320). The model rambles on this non-speech input for spa.
@@ -230,7 +258,7 @@ For a ~53-unit output (~1 s audio) the four big stages are each **~5 s and rough
 (encoder 27%, unit_greedy 27%, text_beam 22%, vocoder 22%) → **RTF ≈ 22**. unit_greedy and
 vocoder scale linearly with #units (see spa). Audio in `generated_audio/seamless_<lang>.wav`.
 
-## Real-speech profile (the numbers that matter) — `test_inputs/*.wav`
+## Real-speech profile — historical (pre encoder/decoder optimization) — `test_inputs/*.wav`
 
 S2ST via `s2s --in <wav>`. **Encoder cost scales with INPUT length and is identical across
 target languages** (same audio); unit_greedy + vocoder scale with OUTPUT units.

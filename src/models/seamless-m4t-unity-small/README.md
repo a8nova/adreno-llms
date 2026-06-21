@@ -1,9 +1,9 @@
 # SeamlessM4T UnitY-small on Adreno (Android)
 
-Meta's **SeamlessM4T UnitY-small** speech-to-speech translation model ported to C++/OpenCL for Adreno 6xx GPUs on non-flagship Android. Verified on Motorola Razr 2020 (Adreno 620, Snapdragon 765G). All compute runs in OpenCL **fp16** (fp32 accumulation inside kernels); only beam/greedy control flow is scalar on the CPU.
+Meta's **SeamlessM4T UnitY-small** speech translation model (speech→speech **and** speech→text) ported to C++/OpenCL for Adreno 6xx GPUs on non-flagship Android. Verified on Motorola Razr 2020 (Adreno 620, Snapdragon 765G). All compute runs in OpenCL **fp16** (fp32 accumulation inside kernels); only beam/greedy control flow is scalar on the CPU.
 
 - **Upstream:** [facebook/seamless-m4t-unity-small](https://huggingface.co/facebook/seamless-m4t-unity-small) (`.ptl` TorchScript UnitY)
-- **Task:** speech in → translated speech out (S2ST); English/Spanish/Portuguese/Hindi/Russian output
+- **Tasks:** speech in → translated **speech** (S2ST) or translated **text** (S2TT); same-language **transcription** (ASR); and `s2tt_all` (encode once, decode all five languages). Output languages: English / Spanish / Portuguese / Hindi / Russian.
 - **Precision:** fp16
 
 ## Architecture — a cascade, not a single forward pass
@@ -42,16 +42,23 @@ Text modes detokenize via the decoder's own 20,005-entry vocabulary (`tokenizer_
 
 ## Performance
 
-Razr 2020 / Adreno 620 / Snapdragon 765G, fp16, warm on-device, 6.0 s English input clip. Median of 3 warm runs (per-stage `std::chrono`; GPU 100% busy over the timed run).
+Razr 2020 / Adreno 620 / Snapdragon 765G, fp16, warm on-device. **6.0 s English input clip** (`samples/tell_me_nearest_gas_station.wav`, 6.012 s). Median of **5 warm runs** per language — each a fresh process with an untimed warm-up pass (`NNOPT_WARMUP=1`) so the timed run is steady-state (per-stage `std::chrono`; GPU ~100% busy). RTF = wall ÷ 6.0 s input (lower = faster; > 1.0 = slower than the input is long).
 
-| stage | fbank | encoder | text_beam | mt_feat | synth | unit_greedy | vocoder | **TOTAL** |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| ms | 32 | 4320 | 4900 | 197 | 80 | 2440 | 5710 | **~17,700** |
+Two latencies per target language — the full **S2ST** cascade (→ speech) and the **S2TT** text half (→ text, which stops after the text decoder and skips T2U → unit-decoder → vocoder):
 
-- **S2ST** (speech → translated **speech**): the full cascade ≈ **17.7 s** → **RTF ~2.9×** vs the 6.0 s input.
-- **S2TT / ASR** (speech → **text**): stops after the text decoder (`fbank + encoder + text_beam`) ≈ **9.2 s** → **RTF ~1.5×**. The text modes skip the T2U → unit-decoder → vocoder synthesis half (~8 s), so they are ~1.9× faster than S2ST.
+| target | S2ST (→ speech) | RTF | S2TT (→ text) | RTF |
+|---|---:|---:|---:|---:|
+| eng | 17.4 s | **2.90×** | 9.3 s | **1.55×** |
+| spa | 19.0 s | 3.16× | 11.6 s | 1.92× |
+| por | 19.8 s | 3.30× | 10.6 s | 1.76× |
+| hin | 26.8 s | 4.46× | 14.8 s | 2.47× |
+| rus | 21.5 s | 3.58× | 11.9 s | 1.98× |
 
-Units bit-exact (211/211), waveform cosine **0.999999** vs the `.ptl` reference. Optimized from a 271 s cold baseline (≈15× on the GPU pipeline) — full log, including the per-kernel breakdown and the on-device profiling methodology, in [BENCHMARK.md](./BENCHMARK.md).
+**ASR** (transcribe English speech → English text) is the eng S2TT path: **9.3 s, RTF 1.55×** — for English input, transcribe and translate-to-English are the same path.
+
+Per-stage breakdown (eng, ms): fbank 32 · encoder 4377 · text_beam 4941 · mt_feat 202 · synth 80 · unit_greedy 2443 · vocoder 5327 · **TOTAL 17,418**. The fbank + encoder cost (~4.4 s) is language-independent; **all** per-language variation lives in `text_beam` (and, for S2ST, the unit-decoder + vocoder lengths, which grow with the number of units emitted) — Hindi is slowest because the model emits the most tokens.
+
+Units bit-exact vs the `.ptl` reference (eng 211/211, spa 191/191, por 234/234), waveform cosine **0.999999**. Optimized from a 271 s cold baseline (≈15× on the GPU pipeline) — full per-kernel log + methodology in [BENCHMARK.md](./BENCHMARK.md). Measured 2026-06-21.
 
 ## Layout
 
@@ -81,7 +88,7 @@ All modes go through the single runner: `./scripts/run_android.sh <mode> <input.
 ```bash
 ./scripts/run_android.sh s2s samples/tell_me_nearest_gas_station.wav eng out.wav
 ```
-Full cascade (fbank → encoder → text → units → vocoder → waveform). Output: 16 kHz mono WAV. End-to-end ≈ **20 s** for a 6 s clip (encoder 5.3 · text 5.0 · unit 2.5 · vocoder 6.8). Units bit-exact (211/211), waveform cosine 0.999999.
+Full cascade (fbank → encoder → text → units → vocoder → waveform). Output: 16 kHz mono WAV. End-to-end ≈ **17.4 s** warm for the 6 s clip (encoder 4.4 · text 4.9 · unit 2.4 · vocoder 5.3). Units bit-exact (eng 211/211), waveform cosine 0.999999.
 
 ### 2. ASR — transcribe speech → text (same language)
 
@@ -90,7 +97,7 @@ Full cascade (fbank → encoder → text → units → vocoder → waveform). Ou
 #  what_is_your_name.wav            ->  What is your name?
 #  tell_me_nearest_gas_station.wav  ->  Can you tell me where the closest guest station is?
 ```
-For English input, transcription and translate-to-English are the same path. E2e ≈ **5.4 s** (3 s clip) / **10.5 s** (6 s clip) = encoder + one text decode.
+For English input, transcription and translate-to-English are the same path. E2e ≈ **4.5 s** (3 s clip) / **9.3 s** (6 s clip) = encoder + one text decode.
 
 ### 3. S2TT — speech → translated text (one target language)
 
@@ -106,22 +113,34 @@ For English input, transcription and translate-to-English are the same path. E2e
 ```
 The speech encoder is language-independent, so it runs once and is reused across all five text decodes.
 
-`what_is_your_name.wav` (≈3.1 s) — all-5 total **20.7 s** (encoder 3.1 s, paid once):
+`what_is_your_name.wav` (≈3.1 s) — all-5 total **19.5 s** (encoder 2.2 s, paid once):
 
 | lang | text | text ms |
 |---|---|---:|
-| eng | What is your name? | 2333 |
-| spa | Cuál es tu nombre? | 5570 |
-| por | Qual é o teu nome? | 3019 |
-| hin | आपका नाम क्या है? | 3663 |
-| rus | Что такое ваше имя? | 3010 |
+| eng | What is your name? | 2324 |
+| spa | Cuál es tu nombre? | 5533 |
+| por | Qual é o teu nome? | 2944 |
+| hin | आपका नाम क्या है? | 3558 |
+| rus | Что такое ваше имя? | 2931 |
 
-`tell_me_nearest_gas_station.wav` (≈6.0 s) — all-5 total **42.3 s** (encoder 5.5 s, paid once):
+`tell_me_nearest_gas_station.wav` (≈6.0 s) — all-5 total **40.5 s** (encoder 4.4 s, paid once):
 
 | lang | text | text ms |
 |---|---|---:|
-| eng | Can you tell me where the closest guest station is? | 4999 |
-| spa | Puedes decirme dónde está la estación de gas más cercana? | 7280 |
-| por | Podes dizer-me onde está a estação de convidação mais próxima? | 6295 |
-| hin | क्या आप मुे बता सकते हैं कि निकटतम गेस्टेशन कपया है? | 10546 |
-| rus | Можешь сказать мне, где находится ближайшая вокзал? | 7601 |
+| eng | Can you tell me where the closest guest station is? | 4919 |
+| spa | Puedes decirme dónde está la estación de gas más cercana? | 7157 |
+| por | Podes dizer-me onde está a estação de convidação mais próxima? | 6196 |
+| hin | क्या आप मुे बता सकते हैं कि निकटतम गेस्टेशन कपया है? | 10393 |
+| rus | Можешь сказать мне, где находится ближайшая вокзал? | 7436 |
+
+### 5. Warm server (`--serve`) — ⚠️ experimental
+
+`--serve` keeps the model resident (one 646 MB load) and reads one request per stdin line — `<mode> <lang> <in_wav> <out_wav>` (`<out_wav>` = `-` for text modes) — so requests 2+ skip the cold load. It prints `SEAMLESS_READY` once warm and `SEAMLESS_DONE` after each reply (both on stderr); s2tt/asr emit text on stdout, s2s writes the WAV.
+
+```bash
+printf 's2s eng assets/input.wav out.wav\ns2tt spa assets/input.wav -\n' \
+  | adb shell "cd $REMOTE_DIR && LD_LIBRARY_PATH=lib:/system/vendor/lib64:\$LD_LIBRARY_PATH \
+      ./seamless_m4t_unity_small_inference_fp16 s2s --serve"
+```
+
+> ⚠️ **Known bug:** GPU memory is not released between requests, so under repeated requests — especially with varying output lengths — the process aborts with `clReleaseMemObject (-38)` after ~10 runs. Use it for a handful of warm requests only. For batch benchmarking, spawn one fresh process per measurement with `NNOPT_WARMUP=1` (untimed warm-up pass → timed steady-state run) instead.
