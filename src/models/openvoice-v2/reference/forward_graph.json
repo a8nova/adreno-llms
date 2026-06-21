@@ -1,0 +1,479 @@
+{
+  "_produced_by": "_run_reference.py:llm_inference_call",
+  "nodes": [
+    {
+      "order": 0,
+      "dump_name": "dec_cond",
+      "module_path": "dec_cond",
+      "op": "captured_layer"
+    },
+    {
+      "order": 1,
+      "dump_name": "dec_conv_post",
+      "module_path": "dec_conv_post",
+      "op": "captured_layer"
+    },
+    {
+      "order": 2,
+      "dump_name": "dec_conv_pre",
+      "module_path": "dec_conv_pre",
+      "op": "captured_layer"
+    },
+    {
+      "order": 3,
+      "dump_name": "dec",
+      "module_path": "dec",
+      "op": "captured_layer"
+    },
+    {
+      "order": 4,
+      "dump_name": "dec_resblocks_0",
+      "module_path": "dec_resblocks_0",
+      "op": "captured_layer"
+    },
+    {
+      "order": 5,
+      "dump_name": "dec_resblocks_10",
+      "module_path": "dec_resblocks_10",
+      "op": "captured_layer"
+    },
+    {
+      "order": 6,
+      "dump_name": "dec_resblocks_11",
+      "module_path": "dec_resblocks_11",
+      "op": "captured_layer"
+    },
+    {
+      "order": 7,
+      "dump_name": "dec_resblocks_1",
+      "module_path": "dec_resblocks_1",
+      "op": "captured_layer"
+    },
+    {
+      "order": 8,
+      "dump_name": "dec_resblocks_2",
+      "module_path": "dec_resblocks_2",
+      "op": "captured_layer"
+    },
+    {
+      "order": 9,
+      "dump_name": "dec_resblocks_3",
+      "module_path": "dec_resblocks_3",
+      "op": "captured_layer"
+    },
+    {
+      "order": 10,
+      "dump_name": "dec_resblocks_4",
+      "module_path": "dec_resblocks_4",
+      "op": "captured_layer"
+    },
+    {
+      "order": 11,
+      "dump_name": "dec_resblocks_5",
+      "module_path": "dec_resblocks_5",
+      "op": "captured_layer"
+    },
+    {
+      "order": 12,
+      "dump_name": "dec_resblocks_6",
+      "module_path": "dec_resblocks_6",
+      "op": "captured_layer"
+    },
+    {
+      "order": 13,
+      "dump_name": "dec_resblocks_7",
+      "module_path": "dec_resblocks_7",
+      "op": "captured_layer"
+    },
+    {
+      "order": 14,
+      "dump_name": "dec_resblocks_8",
+      "module_path": "dec_resblocks_8",
+      "op": "captured_layer"
+    },
+    {
+      "order": 15,
+      "dump_name": "dec_resblocks_9",
+      "module_path": "dec_resblocks_9",
+      "op": "captured_layer"
+    },
+    {
+      "order": 16,
+      "dump_name": "dec_ups_0",
+      "module_path": "dec_ups_0",
+      "op": "captured_layer"
+    },
+    {
+      "order": 17,
+      "dump_name": "dec_ups_1",
+      "module_path": "dec_ups_1",
+      "op": "captured_layer"
+    },
+    {
+      "order": 18,
+      "dump_name": "dec_ups_2",
+      "module_path": "dec_ups_2",
+      "op": "captured_layer"
+    },
+    {
+      "order": 19,
+      "dump_name": "dec_ups_3",
+      "module_path": "dec_ups_3",
+      "op": "captured_layer"
+    },
+    {
+      "order": 20,
+      "dump_name": "enc_q_enc_cond_layer",
+      "module_path": "enc_q_enc_cond_layer",
+      "op": "captured_layer"
+    },
+    {
+      "order": 21,
+      "dump_name": "enc_q_enc_drop",
+      "module_path": "enc_q_enc_drop",
+      "op": "captured_layer"
+    },
+    {
+      "order": 22,
+      "dump_name": "enc_q_enc_in_layers_0",
+      "module_path": "enc_q_enc_in_layers_0",
+      "op": "captured_layer"
+    },
+    {
+      "order": 23,
+      "dump_name": "enc_q_enc_in_layers_10",
+      "module_path": "enc_q_enc_in_layers_10",
+      "op": "captured_layer"
+    },
+    {
+      "order": 24,
+      "dump_name": "enc_q_enc_in_layers_11",
+      "module_path": "enc_q_enc_in_layers_11",
+      "op": "captured_layer"
+    },
+    {
+      "order": 25,
+      "dump_name": "enc_q_enc_in_layers_12",
+      "module_path": "enc_q_enc_in_layers_12",
+      "op": "captured_layer"
+    },
+    {
+      "order": 26,
+      "dump_name": "enc_q_enc_in_layers_13",
+      "module_path": "enc_q_enc_in_layers_13",
+      "op": "captured_layer"
+    },
+    {
+      "order": 27,
+      "dump_name": "enc_q_enc_in_layers_14",
+      "module_path": "enc_q_enc_in_layers_14",
+      "op": "captured_layer"
+    },
+    {
+      "order": 28,
+      "dump_name": "enc_q_enc_in_layers_15",
+      "module_path": "enc_q_enc_in_layers_15",
+      "op": "captured_layer"
+    },
+    {
+      "order": 29,
+      "dump_name": "enc_q_enc_in_layers_1",
+      "module_path": "enc_q_enc_in_layers_1",
+      "op": "captured_layer"
+    },
+    {
+      "order": 30,
+      "dump_name": "enc_q_enc_in_layers_2",
+      "module_path": "enc_q_enc_in_layers_2",
+      "op": "captured_layer"
+    },
+    {
+      "order": 31,
+      "dump_name": "enc_q_enc_in_layers_3",
+      "module_path": "enc_q_enc_in_layers_3",
+      "op": "captured_layer"
+    },
+    {
+      "order": 32,
+      "dump_name": "enc_q_enc_in_layers_4",
+      "module_path": "enc_q_enc_in_layers_4",
+      "op": "captured_layer"
+    },
+    {
+      "order": 33,
+      "dump_name": "enc_q_enc_in_layers_5",
+      "module_path": "enc_q_enc_in_layers_5",
+      "op": "captured_layer"
+    },
+    {
+      "order": 34,
+      "dump_name": "enc_q_enc_in_layers_6",
+      "module_path": "enc_q_enc_in_layers_6",
+      "op": "captured_layer"
+    },
+    {
+      "order": 35,
+      "dump_name": "enc_q_enc_in_layers_7",
+      "module_path": "enc_q_enc_in_layers_7",
+      "op": "captured_layer"
+    },
+    {
+      "order": 36,
+      "dump_name": "enc_q_enc_in_layers_8",
+      "module_path": "enc_q_enc_in_layers_8",
+      "op": "captured_layer"
+    },
+    {
+      "order": 37,
+      "dump_name": "enc_q_enc_in_layers_9",
+      "module_path": "enc_q_enc_in_layers_9",
+      "op": "captured_layer"
+    },
+    {
+      "order": 38,
+      "dump_name": "enc_q_enc",
+      "module_path": "enc_q_enc",
+      "op": "captured_layer"
+    },
+    {
+      "order": 39,
+      "dump_name": "enc_q_enc_res_skip_layers_0",
+      "module_path": "enc_q_enc_res_skip_layers_0",
+      "op": "captured_layer"
+    },
+    {
+      "order": 40,
+      "dump_name": "enc_q_enc_res_skip_layers_10",
+      "module_path": "enc_q_enc_res_skip_layers_10",
+      "op": "captured_layer"
+    },
+    {
+      "order": 41,
+      "dump_name": "enc_q_enc_res_skip_layers_11",
+      "module_path": "enc_q_enc_res_skip_layers_11",
+      "op": "captured_layer"
+    },
+    {
+      "order": 42,
+      "dump_name": "enc_q_enc_res_skip_layers_12",
+      "module_path": "enc_q_enc_res_skip_layers_12",
+      "op": "captured_layer"
+    },
+    {
+      "order": 43,
+      "dump_name": "enc_q_enc_res_skip_layers_13",
+      "module_path": "enc_q_enc_res_skip_layers_13",
+      "op": "captured_layer"
+    },
+    {
+      "order": 44,
+      "dump_name": "enc_q_enc_res_skip_layers_14",
+      "module_path": "enc_q_enc_res_skip_layers_14",
+      "op": "captured_layer"
+    },
+    {
+      "order": 45,
+      "dump_name": "enc_q_enc_res_skip_layers_15",
+      "module_path": "enc_q_enc_res_skip_layers_15",
+      "op": "captured_layer"
+    },
+    {
+      "order": 46,
+      "dump_name": "enc_q_enc_res_skip_layers_1",
+      "module_path": "enc_q_enc_res_skip_layers_1",
+      "op": "captured_layer"
+    },
+    {
+      "order": 47,
+      "dump_name": "enc_q_enc_res_skip_layers_2",
+      "module_path": "enc_q_enc_res_skip_layers_2",
+      "op": "captured_layer"
+    },
+    {
+      "order": 48,
+      "dump_name": "enc_q_enc_res_skip_layers_3",
+      "module_path": "enc_q_enc_res_skip_layers_3",
+      "op": "captured_layer"
+    },
+    {
+      "order": 49,
+      "dump_name": "enc_q_enc_res_skip_layers_4",
+      "module_path": "enc_q_enc_res_skip_layers_4",
+      "op": "captured_layer"
+    },
+    {
+      "order": 50,
+      "dump_name": "enc_q_enc_res_skip_layers_5",
+      "module_path": "enc_q_enc_res_skip_layers_5",
+      "op": "captured_layer"
+    },
+    {
+      "order": 51,
+      "dump_name": "enc_q_enc_res_skip_layers_6",
+      "module_path": "enc_q_enc_res_skip_layers_6",
+      "op": "captured_layer"
+    },
+    {
+      "order": 52,
+      "dump_name": "enc_q_enc_res_skip_layers_7",
+      "module_path": "enc_q_enc_res_skip_layers_7",
+      "op": "captured_layer"
+    },
+    {
+      "order": 53,
+      "dump_name": "enc_q_enc_res_skip_layers_8",
+      "module_path": "enc_q_enc_res_skip_layers_8",
+      "op": "captured_layer"
+    },
+    {
+      "order": 54,
+      "dump_name": "enc_q_enc_res_skip_layers_9",
+      "module_path": "enc_q_enc_res_skip_layers_9",
+      "op": "captured_layer"
+    },
+    {
+      "order": 55,
+      "dump_name": "enc_q",
+      "module_path": "enc_q",
+      "op": "captured_layer"
+    },
+    {
+      "order": 56,
+      "dump_name": "enc_q_pre",
+      "module_path": "enc_q_pre",
+      "op": "captured_layer"
+    },
+    {
+      "order": 57,
+      "dump_name": "enc_q_proj",
+      "module_path": "enc_q_proj",
+      "op": "captured_layer"
+    },
+    {
+      "order": 58,
+      "dump_name": "flow_flows_0_enc",
+      "module_path": "flow_flows_0_enc",
+      "op": "captured_layer"
+    },
+    {
+      "order": 59,
+      "dump_name": "flow_flows_0",
+      "module_path": "flow_flows_0",
+      "op": "captured_layer"
+    },
+    {
+      "order": 60,
+      "dump_name": "flow_flows_0_post",
+      "module_path": "flow_flows_0_post",
+      "op": "captured_layer"
+    },
+    {
+      "order": 61,
+      "dump_name": "flow_flows_0_pre",
+      "module_path": "flow_flows_0_pre",
+      "op": "captured_layer"
+    },
+    {
+      "order": 62,
+      "dump_name": "flow_flows_1",
+      "module_path": "flow_flows_1",
+      "op": "captured_layer"
+    },
+    {
+      "order": 63,
+      "dump_name": "flow_flows_2_enc",
+      "module_path": "flow_flows_2_enc",
+      "op": "captured_layer"
+    },
+    {
+      "order": 64,
+      "dump_name": "flow_flows_2",
+      "module_path": "flow_flows_2",
+      "op": "captured_layer"
+    },
+    {
+      "order": 65,
+      "dump_name": "flow_flows_2_post",
+      "module_path": "flow_flows_2_post",
+      "op": "captured_layer"
+    },
+    {
+      "order": 66,
+      "dump_name": "flow_flows_2_pre",
+      "module_path": "flow_flows_2_pre",
+      "op": "captured_layer"
+    },
+    {
+      "order": 67,
+      "dump_name": "flow_flows_3",
+      "module_path": "flow_flows_3",
+      "op": "captured_layer"
+    },
+    {
+      "order": 68,
+      "dump_name": "flow_flows_4_enc",
+      "module_path": "flow_flows_4_enc",
+      "op": "captured_layer"
+    },
+    {
+      "order": 69,
+      "dump_name": "flow_flows_4",
+      "module_path": "flow_flows_4",
+      "op": "captured_layer"
+    },
+    {
+      "order": 70,
+      "dump_name": "flow_flows_4_post",
+      "module_path": "flow_flows_4_post",
+      "op": "captured_layer"
+    },
+    {
+      "order": 71,
+      "dump_name": "flow_flows_4_pre",
+      "module_path": "flow_flows_4_pre",
+      "op": "captured_layer"
+    },
+    {
+      "order": 72,
+      "dump_name": "flow_flows_5",
+      "module_path": "flow_flows_5",
+      "op": "captured_layer"
+    },
+    {
+      "order": 73,
+      "dump_name": "flow_flows_6_enc",
+      "module_path": "flow_flows_6_enc",
+      "op": "captured_layer"
+    },
+    {
+      "order": 74,
+      "dump_name": "flow_flows_6",
+      "module_path": "flow_flows_6",
+      "op": "captured_layer"
+    },
+    {
+      "order": 75,
+      "dump_name": "flow_flows_6_post",
+      "module_path": "flow_flows_6_post",
+      "op": "captured_layer"
+    },
+    {
+      "order": 76,
+      "dump_name": "flow_flows_6_pre",
+      "module_path": "flow_flows_6_pre",
+      "op": "captured_layer"
+    },
+    {
+      "order": 77,
+      "dump_name": "flow_flows_7",
+      "module_path": "flow_flows_7",
+      "op": "captured_layer"
+    },
+    {
+      "order": 78,
+      "dump_name": "flow",
+      "module_path": "flow",
+      "op": "captured_layer"
+    }
+  ]
+}
