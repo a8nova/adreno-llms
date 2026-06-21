@@ -72,6 +72,15 @@ public:
     nnopt_qcom_rec::fn_enqueue_t rec_fn_enqueue() const { return rec_fn_enqueue_; }
     bool recordable_queues_supported() const { return rec_fn_new_ != nullptr && recordable_queue_ != nullptr; }
 
+    // Drain the GPU queue and briefly sleep so the foreground compositor can
+    // grab the Adreno's single CU between bursts of compute. Without this, long
+    // GPU passes (the SigLIP vision tower + the LM prefill of ~1300 image
+    // tokens) saturate the GPU for ~1-2 min and the app's UI thread starves →
+    // ANR ("isn't responding"). Gated by NNOPT_GPU_YIELD env (unset in bench
+    // builds for max throughput). Cost: blocks the caller for `sleep_ms`; call
+    // once per layer, not per kernel. Ported from smolvlm-256m-instruct.
+    void yield_for_compositor(int sleep_ms = 12);
+
     // Device info
     std::string device_name() const;
     size_t max_work_group_size() const;

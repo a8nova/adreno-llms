@@ -1,0 +1,9 @@
+{"t_ms": -1, "raw": "Loaded 75521280 bytes, 167 tensors", "type": "LOG"}
+{"t_ms": -1, "raw": "STREAM: ready \u2014 feed 16kHz mono float32 PCM on stdin (vad_threshold=0.0060 step=700ms hangover=1400ms cap=96 tok)", "type": "READY"}
+{"t_ms": 6335, "raw": "STREAM_TIMING win=0.93 proc=4.82 rtf=5.18 ntok=10", "type": "TIMING"}
+{"t_ms": 6335, "raw": "PARTIAL [0.60-1.53]:  the Quilter is the", "type": "PARTIAL", "t0": 0.6, "t1": 1.53, "text": "the Quilter is the"}
+{"t_ms": 8666, "raw": "STREAM_TIMING win=4.80 proc=2.33 rtf=0.49 ntok=26", "type": "TIMING"}
+{"t_ms": 8666, "raw": "PARTIAL [0.60-5.40]:  Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.", "type": "PARTIAL", "t0": 0.6, "t1": 5.4, "text": "Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel."}
+{"t_ms": 11237, "raw": "STREAM_TIMING win=6.18 proc=2.57 rtf=0.42 ntok=26", "type": "TIMING"}
+{"t_ms": 11237, "raw": "FINAL [0.60-6.78]:  Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.", "type": "FINAL", "t0": 0.6, "t1": 6.78, "text": "Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel."}
+{"t_ms": 11238, "raw": "STREAM: end (stdin EOF)", "type": "LOG"}

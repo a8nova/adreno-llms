@@ -353,16 +353,21 @@ bool Tokenizer::load(const std::string& vocab_path) {
 // will diverge from HuggingFace's BPE / SentencePiece / WordPiece tokenizers
 // on edge cases. Iterate on this method as the model family requires; the
 // reference signal is reference/reference_tokens.json::input_ids.
-std::vector<int32_t> Tokenizer::encode(const std::string& text) const {
+std::vector<int32_t> Tokenizer::encode(const std::string& text, bool add_bos) const {
     // LFM2.5 tokenizer has add_prefix_space=true and a TemplateProcessing
     // post-processor that prepends <|startoftext|> (id=1) to single sequences.
     // Without these, the model receives a non-canonical prompt and decoding
     // collapses into repetitive token loops within ~10 tokens.
-    std::string with_prefix_space = " " + text;
+    //
+    // In chat mode (add_bos=false) we skip BOTH: the ChatML scaffold supplies a
+    // single BOS up front as a raw id, and role text follows a special token
+    // (<|im_start|>) with no leading space — so a per-segment prefix space here
+    // would inject spurious Ġ tokens into the template.
+    std::string with_prefix_space = add_bos ? (" " + text) : text;
     const std::string encoded = bytelevel_encode_bytes(with_prefix_space);
     std::vector<int32_t> out;
     out.reserve(encoded.size() + 1);
-    out.push_back(1);  // <|startoftext|> BOS
+    if (add_bos) out.push_back(1);  // <|startoftext|> BOS
     size_t i = 0;
     while (i < encoded.size()) {
         // Greedy longest match against vocab.

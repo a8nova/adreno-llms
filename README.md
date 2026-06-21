@@ -8,13 +8,15 @@
 https://github.com/user-attachments/assets/c5723e58-6bc7-4fbc-921b-59388e26f2c9
 
 
-## ✨ NEW: three new modalities on-device — Vision, Speech & Listening
+## ✨ NEW: five new modalities on-device — Vision, Speech, Listening, Music & Translation
 
-Beyond text generation, three new model types now run **fully on-device** on Adreno 6xx:
+Beyond text generation, five new model types now run **fully on-device** on Adreno 6xx:
 
 - **👁️ Vision (VLM)** — [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) and [LFM2.5-VL-450M](src/models/lfm2-5-vl-450m/): image + text in, text out.
-- **🗣️ Speech (TTS)** — [MMS-TTS](src/models/mms-tts/): text in, speech out, across ~1100 languages (VITS + HiFi-GAN).
+- **🗣️ Speech (TTS)** — [MMS-TTS](src/models/mms-tts/) and [Kokoro-82M](src/models/kokoro-82m/): text in, speech out.
 - **🎧 Listening (ASR)** — [Whisper-tiny](src/models/whisper-tiny/): speech in, text out, with real-time streaming transcription.
+- **🎵 Music (text→music)** — [MusicGen-small](src/models/musicgen-small/): text prompt in, music out.
+- **🌐 Translation (S2ST/S2TT)** — [SeamlessM4T UnitY-small](src/models/seamless-m4t-unity-small/): speech in → translated speech or text out (English/Spanish/Portuguese/Hindi/Russian).
 
 The **[See & Say](examples/see-and-say/)** example app ties the vision and speech models together into a single sideloadable APK.
 
@@ -43,12 +45,12 @@ Decode tok/s = warm 3-run median, greedy (`--temperature 0`), 32-token generatio
 | [Mamba-130M](src/models/mamba-130m/) | fp16 | 130M | SSM | 21.52 | 1.62 | 686 | No attention |
 | [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | fp16 | 135M | LLaMA + GQA | **24.40** | 1.67 | 923 | Instruct-tuned; 61% of ceiling |
 | [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | **int8** | 135M | LLaMA + GQA | 24.21 | **0.91** | **670** | Per-row symmetric int8; −27% memory at tied tok/s |
-| [OpenELM-270M](src/models/openelm-270m/) | fp16 | 270M | LLaMA-style + tied lm_head | 14.65 | 2.00 | 1371 | 78.9% of 10 GB/s ceiling |
-| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | fp16 | 350M | Hybrid conv+attn | 11.43 | 2.21 | 1666 | Liquid AI hybrid; 58% of texture ceiling |
-| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | **int8** | 350M | Hybrid conv+attn | 13.67 | **0.81** | 1015 | +19.6% vs fp16 |
-| [LFM2.5-350M-Base](src/models/lfm2-5-350m/) | **Q4** | 350M | Hybrid conv+attn | **14.54** | **0.79** | **719** | +27.2% vs fp16; ALU-bound nibble unpack |
-| [Granite-4.0-350M](src/models/granite-4-0-350m/) | fp16 | 350M | Dense decoder + GQA | 10.19 | 2.41 | 2580 | IBM Granite; 71% of 10 GB/s ceiling |
-| [Qwen2.5-0.5B](src/models/qwen2-5-0-5b/) | fp16 | 500M | LLaMA + GQA | 10.36 | 3.66 | 2720 | Largest in the repo; 70% of 14 GB/s ceiling |
+| [OpenELM-270M-Instruct](src/models/openelm-270m/) | fp16 | 270M | LLaMA-style + tied lm_head | 14.65 | 2.00 | 1371 | 78.9% of 10 GB/s ceiling |
+| [LFM2.5-350M](src/models/lfm2-5-350m/) | fp16 | 350M | Hybrid conv+attn | 11.43 | 2.21 | 1666 | Liquid AI hybrid; 58% of texture ceiling |
+| [LFM2.5-350M](src/models/lfm2-5-350m/) | **int8** | 350M | Hybrid conv+attn | 13.67 | **0.81** | 1015 | +19.6% vs fp16 |
+| [LFM2.5-350M](src/models/lfm2-5-350m/) | **Q4** | 350M | Hybrid conv+attn | **14.54** | **0.79** | **719** | +27.2% vs fp16; ALU-bound nibble unpack |
+| [Granite-4.0-350M](src/models/granite-4-0-350m/) | fp16 | 350M | Dense decoder + GQA | 10.19 | 2.41 | 2580 | IBM Granite (instruct); 71% of 10 GB/s ceiling |
+| [Qwen2.5-0.5B-Instruct](src/models/qwen2-5-0-5b/) | fp16 | 500M | LLaMA + GQA | 10.36 | 3.66 | 2720 | Largest in the repo; 70% of 14 GB/s ceiling |
 
 ### Vision-language
 
@@ -63,11 +65,12 @@ Workload: `"Describe this image."` + sample JPEG. TTFT includes image preprocess
 
 ### Text-to-speech
 
-RTF = wall time / audio duration (lower is better; RTF ≤ 1.0 = real-time). Measured 2026-05-20.
+RTF = wall time / audio duration (lower is better; RTF ≤ 1.0 = real-time). Measured 2026-06-08 (Kokoro streaming), 2026-05-20 (MMS-TTS).
 
 | Model | Precision | Params | Architecture | RTF | Audio | Wall (s) | Peak CPU mem (MB) | Notes |
 |---|:-:|---:|---|---:|---:|---:|---:|---|
 | [MMS-TTS](src/models/mms-tts/) | fp16 | 36M | VITS (enc + flow + HiFi-GAN) | **1.3** | 7.8 s | ~10.1 | 686 | ~1100 languages; per-op cosine ≥ 0.996 vs HF reference |
+| [Kokoro-82M](src/models/kokoro-82m/) | fp16 | 82M | StyleTTS2 (text enc + duration + iSTFT decoder) | **0.93** | 2.0 s | ~2.1 | 783 | warm `--stream` / `--serve` streaming **faster than real-time** — sustained RTF **0.92–1.01** (int8 dot8 paths default-on, gapless); cold single-shot ~1.05 RTF (~2.1 s wall) |
 
 ### Speech-to-text (ASR)
 
@@ -76,6 +79,22 @@ RTF = processing time / audio duration (lower is better; < 1.0 = faster than rea
 | Model | Precision | Params | Architecture | RTF | Audio | Wall (s) | Peak CPU mem (MB) | Notes |
 |---|:-:|---:|---|---:|---:|---:|---:|---|
 | [Whisper-tiny](src/models/whisper-tiny/) | fp16 | 37M | Whisper encoder-decoder (4 enc + 4 dec, d=384) | **0.53** | 109.8 s | ~58.2 | 458 | faster than real time; 9/10 byte-exact; long clips (18–29 s) ~0.40; live streaming + VAD mode |
+
+### Music generation
+
+> The heaviest model in the repo — a 590M composite (T5 + token LM + EnCodec). After mega-layer fusion + an fp16 texture GEMV path it decodes at **~11 tok/s**, but at **RTF ~6.9×** it's still ~7× slower than real time on the Adreno 620 (the entry tier); faster Adreno tiers close the gap.
+
+| Model | Precision | Params | Architecture | Decode tok/s | Output | Notes |
+|---|:-:|---:|---|---:|---|---|
+| [MusicGen-small](src/models/musicgen-small/) | fp16 | ~590M | T5 enc + 24-layer token LM + EnCodec | **11.0** | 32 kHz mono | RTF ~6.9× (a 5 s clip ≈ 34 s wall); peak ~2.7 GB; mega-fused decode + fp16 texture path |
+
+### Speech translation (S2ST / S2TT)
+
+> A multi-stage **cascade**, not a single forward pass: fbank → Conformer encoder → text decoder (beam-5) → T2U synthesizer → unit decoder (greedy) → CodeHiFiGAN vocoder. Speech in → translated speech (S2ST) or text (S2TT / ASR) out. On a realistic **6.0 s** English clip (warm): **S2ST RTF ~2.9×** (full cascade, ~17.7 s) and **S2TT / ASR RTF ~1.5×** (~9.2 s) — the text modes stop after the text decoder, skipping the T2U → unit-decoder → vocoder synthesis half (~8 s of the wall). Correctness held fixed: units bit-exact (211/211), waveform cos ≥ 0.999999 vs the `.ptl` reference.
+
+| Model | Precision | Params | Architecture | RTF (warm) | Modes | Notes |
+|---|:-:|---:|---|---:|---|---|
+| [SeamlessM4T UnitY-small](src/models/seamless-m4t-unity-small/) | fp16 | ~323M | Conformer enc + text dec (beam-5) + T2U + unit dec + CodeHiFiGAN | **2.9** / **1.5** | s2s / s2tt / asr | 6.0 s input, warm: **S2ST 2.9×** (speech out, ~17.7 s) vs **S2TT/ASR 1.5×** (text out, ~9.2 s) — text modes skip T2U+unit-decoder+vocoder; eng/spa/por/hin/rus output |
 
 
 State-of-the-art small language models running on **Adreno 6xx GPUs** — the GPU class found in mid-range Android phones. Pure C++/OpenCL inference, cross-compiled on macOS, deployed via `adb` to `/data/local/tmp/`.
@@ -167,7 +186,8 @@ adreno-llms/
 ├── README.md, LICENSE, .gitignore
 ├── scripts/
 │   ├── fetch_weights.sh          # downloads converted weights for one model
-│   ├── fetch_openelm_weights.sh  # special: pulls + converts from apple/OpenELM-270M
+│   ├── fetch_openelm_weights.sh  # special: pulls + converts from apple/OpenELM-270M-Instruct
+│   ├── convert_hf_to_bin.py      # universal HF safetensors → fp16 .bin + meta.json converter
 │   └── verify_clean_checkout.sh  # pre-push leak scanner
 └── src/models/<model>/
     ├── README.md                 # per-model quickstart
@@ -198,5 +218,5 @@ For decoder-only LMs and vision-language models, each model size needs its own k
 - **Weights:** carry their own upstream licenses, listed per-model:
   - mamba / mamba2 / Qwen2.5 / SmolLM2 / SmolVLM / Granite — Apache 2.0
   - LFM2.5 — Liquid AI's open license
-  - MMS-TTS — CC-BY-NC 4.0 (Facebook)
+  - MMS-TTS / SeamlessM4T — CC-BY-NC 4.0 (Meta; non-commercial)
   - **OpenELM — Apple Sample Code License (NOT redistributed in this repo; fetch script pulls from Apple's HF repo)**

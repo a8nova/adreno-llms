@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Tier-1 CI: device-free checks that run on every PR. The real on-device
+# correctness/perf suite runs on a self-hosted runner (see TESTING.md), not here
+# — GitHub-hosted runners have no Adreno GPU.
+
+jobs:
+  # ── Static invariants on the per-model build/deploy/run scripts ──────────
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Lint model scripts
+        run: bash scripts/ci/lint_scripts.sh
+
+  # ── Cross-compile every model for Android arm64 (compile/link only) ──────
+  build:
+    needs: lint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        model:
+          - granite-4-0-350m
+          - lfm2-5-350m
+          - lfm2-5-vl-450m
+          - mamba-130m
+          - mamba2-130m
+          - mms-tts
+          - openelm-270m
+          - qwen2-5-0-5b
+          - smollm2-135m-instruct
+          - smolvlm-256m-instruct
+          - whisper-tiny
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache OpenCL deps (headers + ICD-loader stub)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/adreno-llms/opencl
+          key: opencl-deps-v2024.10.24
+
+      - name: Set up OpenCL deps (device-free)
+        run: ANDROID_NDK="$ANDROID_NDK_LATEST_HOME" bash scripts/ci/setup_opencl_stub.sh
+
+      - name: Build ${{ matrix.model }} (fp16 release)
+        run: |
+          cd "src/models/${{ matrix.model }}"
+          ANDROID_NDK="$ANDROID_NDK_LATEST_HOME" ./scripts/build.sh --release
+
+      - name: Verify a binary was produced
+        run: |
+          bin=$(find "src/models/${{ matrix.model }}/build/fp16" -maxdepth 1 -type f -name '*_inference_fp16' | head -1)
+          test -n "$bin" || { echo "no fp16 binary produced"; exit 1; }
+          file "$bin" | grep -q 'ARM aarch64' || { echo "binary is not arm64"; file "$bin"; exit 1; }
+          echo "OK: $bin"

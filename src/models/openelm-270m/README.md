@@ -1,13 +1,15 @@
-# OpenELM-270M on Adreno (Android)
+# OpenELM-270M-Instruct on Adreno (Android)
 
-Apple's OpenELM (LLaMA-style efficient transformer) ported to C++/OpenCL for Adreno 6xx GPUs on non-flagship Android. Verified on Motorola Razr 2020 (Adreno 620 / Snapdragon 765G).
+Apple's OpenELM-270M-Instruct (LLaMA-style efficient transformer, instruction-tuned) ported to C++/OpenCL for Adreno 6xx GPUs on non-flagship Android. Verified on Motorola Razr 2020 (Adreno 620 / Snapdragon 765G).
 
-- **Upstream:** [apple/OpenELM-270M](https://huggingface.co/apple/OpenELM-270M)
+- **Upstream:** [apple/OpenELM-270M-Instruct](https://huggingface.co/apple/OpenELM-270M-Instruct)
 - **Parameters:** 270M
-- **Architecture:** LLaMA-style transformer (depthwise-scaled)
+- **Architecture:** LLaMA-style transformer (depthwise-scaled), instruction-tuned
 - **Precision:** fp16
 
-> **Weights are NOT redistributed in this repo.** OpenELM ships under the [Apple Sample Code License](https://huggingface.co/apple/OpenELM-270M/blob/main/LICENSE), which restricts redistribution. Use the per-model fetch script below — it pulls the upstream safetensors from `apple/OpenELM-270M` directly under Apple's terms and converts locally.
+> **Weights are NOT redistributed in this repo.** OpenELM ships under the [Apple Sample Code License](https://huggingface.co/apple/OpenELM-270M-Instruct/blob/main/LICENSE), which restricts redistribution. Use the per-model fetch script below — it pulls the upstream safetensors from `apple/OpenELM-270M-Instruct` directly under Apple's terms and converts locally (the tokenizer companions come from the project repo).
+>
+> **Chat:** OpenELM-270M-Instruct ships no official chat template (Apple drives it with plain prompts), so `--chat` feeds the prompt as-is (BOS + text, optional `--system "<text>"` prefix) rather than inventing a template the 270M model was never tuned on. The flag exists so the app can call every model uniformly.
 
 ## Quickstart
 

@@ -327,10 +327,13 @@ int nnopt_run_stream(OpenCLContext& cl_ctx, Model& model, Tokenizer& tok, bool t
         bool in_speech = false;
         int speech_run = 0, silence_run = 0;
         size_t stream_off = 0;               // total samples consumed from stdin (frame-granular)
-        while (true) {
-            const size_t got = std::fread(rd.data(), sizeof(float), rd.size(), stdin);
-            if (got == 0) { eof.store(true); break; }
-            framebuf.insert(framebuf.end(), rd.begin(), rd.begin() + got);
+        // Finite sentinel that never occurs in normalized [-1,1] PCM. The host writes it to flush the
+        // in-progress phrase + reset streaming state WITHOUT closing stdin, so the model stays loaded
+        // (warm) between dictation sessions. 1e30f has one exact IEEE-754 single representation, so the
+        // host's Float(1e30f) bit-matches this — a plain value compare works (it's finite, not NaN).
+        const float NNOPT_STREAM_RESET = 1.0e30f;
+        // Process every COMPLETE frame currently buffered (VAD → phrase accumulation → FINAL on a pause).
+        auto process_framebuf = [&]() {
             size_t off = 0;
             while (framebuf.size() - off >= (size_t)frame) {
                 double e = 0.0;
@@ -370,6 +373,33 @@ int nnopt_run_stream(OpenCLContext& cl_ctx, Model& model, Tokenizer& tok, bool t
                 stream_off += (size_t)frame;
             }
             framebuf.erase(framebuf.begin(), framebuf.begin() + off);
+        };
+        // Flush the in-progress phrase as a FINAL and clear accumulation state, so the next dictation
+        // session doesn't append to the last one's phrase. The model stays loaded; stream_off keeps
+        // counting (the host ignores timestamps anyway).
+        auto reset_stream = [&]() {
+            std::lock_guard<std::mutex> lk(mtx);
+            if (cur.size() >= min_phrase_samps) {
+                const double t1 = cur_t0 + (double)cur.size() / (double)SR;
+                finals.push_back(Phrase{std::move(cur), cur_t0, t1});
+            }
+            cur.clear(); cur_voiced = 0;
+            framebuf.clear(); in_speech = false; speech_run = 0; silence_run = 0;
+        };
+        while (true) {
+            const size_t got = std::fread(rd.data(), sizeof(float), rd.size(), stdin);
+            if (got == 0) { eof.store(true); break; }
+            size_t seg = 0;
+            for (size_t k = 0; k < got; ++k) {
+                if (rd[k] == NNOPT_STREAM_RESET) {
+                    framebuf.insert(framebuf.end(), rd.begin() + seg, rd.begin() + k);
+                    process_framebuf();   // drain audio fed before the marker
+                    reset_stream();       // flush phrase + clear state (model stays warm)
+                    seg = k + 1;          // skip the marker sample
+                }
+            }
+            framebuf.insert(framebuf.end(), rd.begin() + seg, rd.begin() + got);
+            process_framebuf();
         }
     });
 

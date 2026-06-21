@@ -1,0 +1,20 @@
+{
+  "prompt": "The teacher worked at the ",
+  "max_new_tokens": 7,
+  "model_id": "hexgrad/Kokoro-82M",
+  "produced_by": "_run_reference.py",
+  "produced_via": "llm_inference_call",
+  "inference_call": "list(KPipeline(lang_code='a', model=model)(prompt, voice='af_heart'))",
+  "result_descriptor": {
+    "type": "list",
+    "length": 1
+  },
+  "input_ids": [
+    0
+  ],
+  "generated_ids": [
+    0
+  ],
+  "generated_text": "",
+  "reference_text": ""
+}

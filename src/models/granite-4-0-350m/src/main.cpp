@@ -37,11 +37,39 @@ static std::vector<int> load_token_ids_from_file(const std::string& path) {
     return ids;
 }
 
+// A prior conversation turn (multi-turn memory), loaded from --history.
+struct ChatTurn { char role; std::string content; };  // role: 'U' user, 'A' assistant
+
+// History file format, one record per prior turn:
+//   <role 'U'|'A'> <byte-length>\n<content bytes>\n
+// Length-delimited so message content (newlines, quotes, braces — anything) needs
+// no escaping. Empty path / unreadable file ⇒ no history (single-turn behavior).
+static std::vector<ChatTurn> load_history(const std::string& path) {
+    std::vector<ChatTurn> turns;
+    if (path.empty()) return turns;
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return turns;
+    while (true) {
+        int role = fgetc(f);
+        while (role == '\n' || role == '\r' || role == ' ') role = fgetc(f);  // skip separators
+        if (role == EOF) break;
+        long len = -1;
+        if (fscanf(f, "%ld", &len) != 1 || len < 0) break;
+        fgetc(f);  // consume the single '\n' before the content bytes
+        std::string content((size_t)len, '\0');
+        if (len > 0 && fread(&content[0], 1, (size_t)len, f) != (size_t)len) break;
+        turns.push_back({ (char)role, content });
+    }
+    fclose(f);
+    return turns;
+}
+
 static void print_usage(const char* prog) {
     std::cerr << "Usage: " << prog
               << " <prompt> [max_tokens]"
               << " [--temperature T] [--top-k K] [--top-p P]"
               << " [--repetition-penalty R] [--seed S]"
+              << " [--chat] [--system \"<text>\"] [--history <file>]"
               << " [--token-ids <file>]"
               << std::endl;
 }
@@ -65,6 +93,10 @@ int main(int argc, char* argv[]) {
     int max_tokens = 64;
     SamplerConfig sampler_config;
     std::string token_ids_file;
+    bool chat_mode = false;
+    bool serve_mode = false;    // --serve: stay resident, stream replies per stdin request (warm model)
+    std::string system_prompt;  // optional system turn (chat mode); empty = none
+    std::string history_file;   // optional prior-turns file (multi-turn memory); empty = none
 
     // Parse positional and optional args
     int arg_idx = 2;
@@ -73,6 +105,8 @@ int main(int argc, char* argv[]) {
     }
     while (arg_idx < argc) {
         std::string flag = argv[arg_idx++];
+        if (flag == "--chat") { chat_mode = true; continue; }  // bare flag, no value
+        if (flag == "--serve") { serve_mode = true; continue; } // bare flag, no value
         if (arg_idx >= argc) { print_usage(argv[0]); return 1; }
         if (flag == "--temperature")       sampler_config.temperature = std::stof(argv[arg_idx++]);
         else if (flag == "--top-k")        sampler_config.top_k = std::stoi(argv[arg_idx++]);
@@ -80,6 +114,8 @@ int main(int argc, char* argv[]) {
         else if (flag == "--repetition-penalty") sampler_config.repetition_penalty = std::stof(argv[arg_idx++]);
         else if (flag == "--seed")         sampler_config.seed = static_cast<uint32_t>(std::stoul(argv[arg_idx++]));
         else if (flag == "--token-ids")    token_ids_file = argv[arg_idx++];
+        else if (flag == "--system")       system_prompt = argv[arg_idx++];
+        else if (flag == "--history")      history_file = argv[arg_idx++];
         else { std::cerr << "Unknown flag: " << flag << std::endl; print_usage(argv[0]); return 1; }
     }
 
@@ -138,6 +174,73 @@ int main(int argc, char* argv[]) {
     }
     NNOPT_CHECKPOINT("model created");
 
+    // ── Persistent serve mode (warm model) — port of the qwen --serve REPL ──────
+    // OpenCL init + weight upload + kernel compile run ONCE; --serve then loops reading
+    // requests from stdin so query 2+ skip the cold load. Protocol (identical to qwen):
+    //   "GEN <max> <temp> <top_k> <top_p> <rep_pen> <sys_nbytes> <prompt_nbytes> <use_history>\n"
+    //   then system + prompt bytes; use_history=1 ⇒ read prior turns from "history.bin".
+    // Reply streams to stdout, ending with a single 0x1E byte; per-reply BENCHMARK lines on stderr.
+    if (serve_mode) {
+        std::cerr << "SERVE_READY" << std::endl;
+        std::string header;
+        while (std::getline(std::cin, header)) {
+            if (header.empty()) continue;
+            int rq_max = 256, rq_topk = 40, rq_usehist = 0;
+            float rq_temp = 0.7f, rq_topp = 0.95f, rq_rep = 1.1f;
+            unsigned long rq_sysn = 0, rq_promptn = 0;
+            if (std::sscanf(header.c_str(), "GEN %d %f %d %f %f %lu %lu %d",
+                            &rq_max, &rq_temp, &rq_topk, &rq_topp, &rq_rep,
+                            &rq_sysn, &rq_promptn, &rq_usehist) != 8) {
+                std::cerr << "serve: bad request header: " << header << std::endl;
+                std::cout << '\x1e' << std::flush; continue;
+            }
+            std::string rq_system(rq_sysn, '\0');
+            if (rq_sysn) std::cin.read(&rq_system[0], (std::streamsize)rq_sysn);
+            std::string rq_prompt(rq_promptn, '\0');
+            if (rq_promptn) std::cin.read(&rq_prompt[0], (std::streamsize)rq_promptn);
+            if (!std::cin) break;
+
+            // Granite role template: <|start_of_role|>{role}<|end_of_role|>{content}<|end_of_text|> — same as --chat.
+            std::vector<int> ids;
+            constexpr int START_OF_ROLE = 100264, END_OF_ROLE = 100265, END_OF_TEXT = 100257;
+            auto add = [&](const std::string& s){ auto e = tokenizer.encode(s); ids.insert(ids.end(), e.begin(), e.end()); };
+            auto turn = [&](const std::string& role, const std::string& content){
+                ids.push_back(START_OF_ROLE); add(role); ids.push_back(END_OF_ROLE);
+                add(content); ids.push_back(END_OF_TEXT);
+            };
+            if (!rq_system.empty()) turn("system", rq_system);
+            if (rq_usehist) for (const auto& t : load_history("history.bin")) turn(t.role == 'U' ? "user" : "assistant", t.content);
+            turn("user", rq_prompt);
+            ids.push_back(START_OF_ROLE); add("assistant"); ids.push_back(END_OF_ROLE);
+
+            SamplerConfig sc;
+            sc.temperature = rq_temp; sc.top_k = rq_topk; sc.top_p = rq_topp;
+            sc.repetition_penalty = rq_rep; sc.eos_token_id = END_OF_TEXT;
+
+            std::vector<int32_t> stream_buf; size_t streamed_chars = 0;
+            const size_t prompt_toks = ids.size();
+            const auto t_req = std::chrono::steady_clock::now();
+            std::chrono::steady_clock::time_point t_first; bool got_first = false; int gen_n = 0;
+            Model::TokenCallback on_token = [&](int32_t t) {
+                if (!got_first) { got_first = true; t_first = std::chrono::steady_clock::now(); }
+                ++gen_n;
+                stream_buf.push_back(t);
+                std::string text = tokenizer.decode(stream_buf);
+                if (text.size() > streamed_chars) { std::cout << text.substr(streamed_chars) << std::flush; streamed_chars = text.size(); }
+            };
+            model.generate(ids, rq_max, sc, on_token);
+            const auto t_end = std::chrono::steady_clock::now();
+            auto secs = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b){ return std::chrono::duration<double>(b - a).count(); };
+            const double ttft = got_first ? secs(t_req, t_first) : 0.0;
+            const double dec_s = got_first ? secs(t_first, t_end) : 0.0;
+            if (ttft > 0.0) { std::cerr << "BENCHMARK time_to_first_token_sec: " << ttft << "\n"; std::cerr << "BENCHMARK prefill_tokens_per_sec: " << (prompt_toks / ttft) << "\n"; }
+            if (dec_s > 0.0 && gen_n > 1) std::cerr << "BENCHMARK decode_tokens_per_sec: " << ((gen_n - 1) / dec_s) << "\n";
+            std::cerr << std::flush;
+            std::cout << '\x1e' << std::flush;  // end-of-reply sentinel
+        }
+        return 0;
+    }
+
     // Baseline benchmark instrumentation (emits BENCHMARK <key>: <value>
     // lines on stderr; parsed by runUtils.ts parseInferenceMetrics).
     //   inference_start = BEFORE tokenize  — TTFT numerator (matches vLLM / MLPerf / llama-bench:
@@ -160,6 +263,37 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         std::cerr << "Loaded " << input_ids.size() << " token IDs from file (tokenizer bypass)" << std::endl;
+    } else if (chat_mode) {
+        // Granite 4.0 chat template (IBM ibm-granite/granite-4.0-350m). Each turn is
+        //   <|start_of_role|>{role}<|end_of_role|>{content}<|end_of_text|>
+        // role markers go in as raw IDs (BPE treats them as substrings); the role
+        // label + content go through encode(). The full conversation is built as:
+        //   [system?] + [prior turns from --history] + [current user] + assistant opener
+        // The binary streams only the assistant's reply (no template echo), so the
+        // host needs no marker stripping — this is robust for any number of turns.
+        constexpr int START_OF_ROLE = 100264;  // <|start_of_role|>
+        constexpr int END_OF_ROLE   = 100265;  // <|end_of_role|>
+        constexpr int END_OF_TEXT   = 100257;  // <|end_of_text|> (turn/eos terminator)
+        auto append_text = [&](const std::string& s) {
+            auto ids = tokenizer.encode(s);
+            input_ids.insert(input_ids.end(), ids.begin(), ids.end());
+        };
+        auto append_turn = [&](const std::string& role, const std::string& content) {
+            input_ids.push_back(START_OF_ROLE); append_text(role); input_ids.push_back(END_OF_ROLE);
+            append_text(content);               input_ids.push_back(END_OF_TEXT);
+        };
+        // system turn — kept off the user turn so the model treats it as instructions
+        // (concatenating it into the user turn makes Granite go meta / refuse).
+        if (!system_prompt.empty()) append_turn("system", system_prompt);
+        // prior conversation turns (multi-turn memory): 'U' = user, 'A' = assistant
+        for (const auto& t : load_history(history_file))
+            append_turn(t.role == 'U' ? "user" : "assistant", t.content);
+        // current user turn
+        append_turn("user", prompt);
+        // assistant opener — the model continues from here
+        input_ids.push_back(START_OF_ROLE); append_text("assistant"); input_ids.push_back(END_OF_ROLE);
+        // Stop generation at <|end_of_text|> (the assistant's turn-end marker).
+        sampler_config.eos_token_id = END_OF_TEXT;
     } else {
         input_ids = tokenizer.encode(prompt);
         // Tokenizer round-trip sanity print: encode the prompt, then decode the
@@ -306,6 +440,10 @@ int main(int argc, char* argv[]) {
     size_t streamed_chars = 0;
     Model::TokenCallback on_token = nullptr;
     if (tokenizer_ok && stream_enabled) {
+        // Stream ONLY the generated reply (stream_buf starts empty). We deliberately
+        // do NOT echo the decoded prompt template — the host shows the user's message
+        // itself and just streams whatever the binary prints, which keeps multi-turn
+        // robust (no "assistant\n" marker to disambiguate across many history turns).
         on_token = [&](int32_t t) {
             stream_buf.push_back(t);
             std::string text = tokenizer.decode(stream_buf);

@@ -615,11 +615,14 @@ std::vector<int32_t> Model::generate(const std::vector<int32_t>& prompt_ids, int
   ids.push_back(next_token);
   generated.push_back(next_token);
   NNOPT_BENCH_FIRST_TOKEN();
-  if (on_token) on_token(next_token, ids);
+  // Check EOS BEFORE emitting: the stop token (<|im_end|>) must terminate the turn, not be streamed
+  // as text. Emitting first then breaking leaked the literal "<|im_end|>" into the reply (and, once
+  // saved to chat history, poisoned every later turn). See the decode loops below for the same fix.
   if (sampler_config.eos_token_id >= 0 && next_token == sampler_config.eos_token_id) {
     NNOPT_CHECKPOINT("generate() complete (eos at first token)");
     return ids;
   }
+  if (on_token) on_token(next_token, ids);
 
   // Step 10 fast path: pipelined chained decode. Embedding reads its single
   // input token directly from argmax_out_idx_ (written by the previous
@@ -667,9 +670,11 @@ std::vector<int32_t> Model::generate(const std::vector<int32_t>& prompt_ids, int
         int32_t t = host_int[prev_slot];
         ids.push_back(t);
         generated.push_back(t);
-        if (on_token) on_token(t, ids);
+        // EOS check BEFORE emit (see first-token note): stop on <|im_end|> without streaming its text.
         if (sampler_config.eos_token_id >= 0 && t == sampler_config.eos_token_id) {
           eos_seen = true;
+        } else if (on_token) {
+          on_token(t, ids);
         }
       }
       prev_slot = cur_slot;
@@ -705,9 +710,9 @@ std::vector<int32_t> Model::generate(const std::vector<int32_t>& prompt_ids, int
     }
     ids.push_back(next_token);
     generated.push_back(next_token);
-    if (on_token) on_token(next_token, ids);
-
+    // EOS check BEFORE emit (see first-token note): stop on <|im_end|> without streaming its text.
     if (sampler_config.eos_token_id >= 0 && next_token == sampler_config.eos_token_id) break;
+    if (on_token) on_token(next_token, ids);
   }
 
   NNOPT_CHECKPOINT("generate() complete");

@@ -1,0 +1,3 @@
+TRANSCRIPT:  Nor is Mr. Quilters' manner less interesting than his matter.
+GENERATED_TEXT:  Nor is Mr. Quilters' manner less interesting than his matter.
+RTF: 1.467  (audio=4.82s proc=7.07s mel=0.138s)

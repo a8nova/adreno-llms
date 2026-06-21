@@ -1,10 +1,10 @@
-# LFM2.5-350M-Base on Adreno (Android)
+# LFM2.5-350M on Adreno (Android)
 
-Liquid AI's hybrid conv+attention foundation model, ported to C++/OpenCL for Adreno 6xx GPUs on non-flagship Android devices. Verified on Motorola Razr 2020 (Adreno 620 / Snapdragon 765G) and Samsung Galaxy Tab A9+ (Adreno 619 v2 / Snapdragon 695).
+Liquid AI's hybrid conv+attention model (the post-trained / chat-tuned LFM2.5-350M), ported to C++/OpenCL for Adreno 6xx GPUs on non-flagship Android devices. Verified on Motorola Razr 2020 (Adreno 620 / Snapdragon 765G) and Samsung Galaxy Tab A9+ (Adreno 619 v2 / Snapdragon 695).
 
-- **Upstream:** [LiquidAI/LFM2.5-350M-Base](https://huggingface.co/LiquidAI/LFM2.5-350M-Base)
+- **Upstream:** [LiquidAI/LFM2.5-350M](https://huggingface.co/LiquidAI/LFM2.5-350M) (instruction/chat-tuned; the `-Base` repo is the pre-trained base)
 - **Parameters:** 350M
-- **Architecture:** Hybrid LFM2 (interleaved short conv + grouped attention, 16 layers, GQA)
+- **Architecture:** Hybrid LFM2 (interleaved short conv + grouped attention, 16 layers, GQA), instruction-tuned (ChatML)
 - **Precisions:** fp16, int8 (per-row symmetric), Q4 (block-32 symmetric, 4-bit)
 
 ## Choose a variant
@@ -43,9 +43,17 @@ NNOPT_DTYPE=fp16 ./scripts/deploy_android.sh
 NNOPT_DTYPE=fp16                  ./scripts/run_android.sh "Hello, I am a language model" 32 --temperature 0
 NNOPT_DTYPE=fp16 NNOPT_QUANT=int8 ./scripts/run_android.sh "Hello, I am a language model" 32 --temperature 0
 NNOPT_DTYPE=fp16 NNOPT_QUANT=q4   ./scripts/run_android.sh "Hello, I am a language model" 32 --temperature 0
+
+# 4b. Chat (instruct, ChatML) — pass --chat, optionally --system "<text>"
+NNOPT_DTYPE=fp16 ./scripts/run_android.sh "What is the capital of France?" 40 --chat
 ```
 
 Same binary handles all three precisions — pick via `NNOPT_QUANT` at run-time.
+
+**Chat:** `--chat` wraps the prompt in the LFM2.5 ChatML template
+(`<|im_start|>{role}\n…<|im_end|>`) and stops at `<|im_end|>`. Add
+`--system "<text>"` for a system turn. (Multi-word `--system` values need a
+direct binary call — `run_android.sh` doesn't re-quote extra args.)
 
 ### Alternative: generate the quantized bundles locally
 

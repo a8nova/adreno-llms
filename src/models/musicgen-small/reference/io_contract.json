@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "model_class": "MusicgenForConditionalGeneration",
+  "sample_rate_hz": 32000,
+  "input_fixtures": [
+    {
+      "name": "test_input_ids",
+      "shape": [
+        1,
+        11
+      ],
+      "dtype": "int32",
+      "source": "tokenizer(prompt, return_tensors='pt')['input_ids']",
+      "deploy_path": "assets/test_input_ids.bin"
+    }
+  ],
+  "output_artifact": {
+    "kind": "text",
+    "sample_rate_hz": 32000
+  },
+  "rng_seeds": {
+    "deterministic": true
+  },
+  "exact_input_sequence": [
+    6899,
+    18,
+    89,
+    23,
+    723,
+    28,
+    3,
+    9,
+    21785,
+    27832,
+    1
+  ],
+  "_nnport_capture_version": "2026-06-03-encdec-generic-forward-v4-waveform-capture"
+}

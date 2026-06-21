@@ -1,0 +1,24 @@
+{"t_ms": -1, "raw": "Loaded 75521280 bytes, 167 tensors", "type": "LOG"}
+{"t_ms": -1, "raw": "STREAM: ready \u2014 feed 16kHz mono float32 PCM on stdin (vad_threshold=0.0060 step=700ms hangover=1400ms cap=96 tok)", "type": "READY"}
+{"t_ms": 6248, "raw": "STREAM_TIMING win=0.93 proc=4.72 rtf=5.07 ntok=8", "type": "TIMING"}
+{"t_ms": 6249, "raw": "PARTIAL [0.60-1.53]:  and else picture.", "type": "PARTIAL", "t0": 0.6, "t1": 1.53, "text": "and else picture."}
+{"t_ms": 8491, "raw": "STREAM_TIMING win=5.52 proc=2.24 rtf=0.41 ntok=25", "type": "TIMING"}
+{"t_ms": 8491, "raw": "PARTIAL [0.60-6.12]:  All in ills, pictures, are sort of upguards and atom paintings and mausons.", "type": "PARTIAL", "t0": 0.6, "t1": 6.12, "text": "All in ills, pictures, are sort of upguards and atom paintings and mausons."}
+{"t_ms": 10403, "raw": "STREAM_SEG soft phrase=9.8s (long speech: clause cut)", "type": "SEG"}
+{"t_ms": 12138, "raw": "STREAM_TIMING win=7.83 proc=3.64 rtf=0.47 ntok=45", "type": "TIMING"}
+{"t_ms": 12138, "raw": "PARTIAL [0.60-8.43]:  All in ills, pictures are sort of upguards and atom paintings, and Masons' exquisite Idols are a national national national nationals, national national, national national nationals.", "type": "PARTIAL", "t0": 0.6, "t1": 8.43, "text": "All in ills, pictures are sort of upguards and atom paintings, and Masons' exquisite Idols are a national national national nationals, national national, national national nationals."}
+{"t_ms": 15587, "raw": "STREAM_TIMING win=9.75 proc=3.45 rtf=0.35 ntok=37", "type": "TIMING"}
+{"t_ms": 15589, "raw": "FINAL [0.60-10.35]:  All in ill's pictures are sort of upguards and atom paintings and Masons' exquisite Idols' Eras' National as a Jingo poem.", "type": "FINAL", "t0": 0.6, "t1": 10.35, "text": "All in ill's pictures are sort of upguards and atom paintings and Masons' exquisite Idols' Eras' National as a Jingo poem."}
+{"t_ms": 17349, "raw": "STREAM_TIMING win=4.35 proc=1.76 rtf=0.40 ntok=18", "type": "TIMING"}
+{"t_ms": 17349, "raw": "PARTIAL [11.01-15.36]:  Mr. Burke and Foster's landscapes smile at one much in the same", "type": "PARTIAL", "t0": 11.01, "t1": 15.36, "text": "Mr. Burke and Foster's landscapes smile at one much in the same"}
+{"t_ms": 19103, "raw": "STREAM_SEG soft phrase=8.0s (long speech: clause cut)", "type": "SEG"}
+{"t_ms": 19583, "raw": "STREAM_TIMING win=5.91 proc=2.23 rtf=0.38 ntok=25", "type": "TIMING"}
+{"t_ms": 19583, "raw": "PARTIAL [11.01-16.92]:  Mr. Birk and Foster's landscapes smile at one much in the same way that Mr. Carker", "type": "PARTIAL", "t0": 11.01, "t1": 16.92, "text": "Mr. Birk and Foster's landscapes smile at one much in the same way that Mr. Carker"}
+{"t_ms": 27476, "raw": "STREAM_TIMING win=8.04 proc=7.89 rtf=0.98 ntok=96", "type": "TIMING"}
+{"t_ms": 27478, "raw": "STREAM_REDO loop detected in FINAL \u2014 re-decoding with 30s pad", "type": "LOG"}
+{"t_ms": 29404, "raw": "STREAM_SEG soft phrase=9.5s (long speech: clause cut)", "type": "SEG"}
+{"t_ms": 32434, "raw": "STREAM_TIMING win=8.04 proc=4.96 rtf=0.62 ntok=31", "type": "TIMING"}
+{"t_ms": 32435, "raw": "FINAL [11.01-19.05]:  Mr. Birk and Foster's landscapes smile at one much in the same way that Mr. Carker used to flash his teeth.", "type": "FINAL", "t0": 11.01, "t1": 19.05, "text": "Mr. Birk and Foster's landscapes smile at one much in the same way that Mr. Carker used to flash his teeth."}
+{"t_ms": 35334, "raw": "STREAM_TIMING win=9.54 proc=2.90 rtf=0.30 ntok=30", "type": "TIMING"}
+{"t_ms": 35336, "raw": "FINAL [19.83-29.37]:  Mr. John Collier gives his sitter a cheerful slap on the back before he says like a shampoo and a Turkish bath next man", "type": "FINAL", "t0": 19.83, "t1": 29.37, "text": "Mr. John Collier gives his sitter a cheerful slap on the back before he says like a shampoo and a Turkish bath next man"}
+{"t_ms": 35337, "raw": "STREAM: end (stdin EOF)", "type": "LOG"}

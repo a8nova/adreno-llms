@@ -31,11 +31,38 @@ static std::vector<int> load_token_ids_from_file(const std::string& path) {
     return ids;
 }
 
+// A prior conversation turn (multi-turn memory), loaded from --history.
+struct ChatTurn { char role; std::string content; };  // role: 'U' user, 'A' assistant
+
+// History file format, one record per prior turn:
+//   <role 'U'|'A'> <byte-length>\n<content bytes>\n
+// Length-delimited so message content needs no escaping. Empty/unreadable ⇒ single-turn.
+static std::vector<ChatTurn> load_history(const std::string& path) {
+    std::vector<ChatTurn> turns;
+    if (path.empty()) return turns;
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return turns;
+    while (true) {
+        int role = fgetc(f);
+        while (role == '\n' || role == '\r' || role == ' ') role = fgetc(f);  // skip separators
+        if (role == EOF) break;
+        long len = -1;
+        if (fscanf(f, "%ld", &len) != 1 || len < 0) break;
+        fgetc(f);  // consume the single '\n' before the content bytes
+        std::string content((size_t)len, '\0');
+        if (len > 0 && fread(&content[0], 1, (size_t)len, f) != (size_t)len) break;
+        turns.push_back({ (char)role, content });
+    }
+    fclose(f);
+    return turns;
+}
+
 static void print_usage(const char* prog) {
     std::cerr << "Usage: " << prog
               << " <prompt> [max_tokens]"
               << " [--temperature T] [--top-k K] [--top-p P]"
               << " [--repetition-penalty R] [--seed S]"
+              << " [--chat] [--system \"<text>\"]"
               << " [--token-ids <file>]"
               << std::endl;
 }
@@ -59,6 +86,10 @@ int main(int argc, char* argv[]) {
     int max_tokens = 64;
     SamplerConfig sampler_config;
     std::string token_ids_file;
+    bool chat_mode = false;
+    bool serve_mode = false;    // --serve: stay resident, stream replies per stdin request (warm model)
+    std::string system_prompt;  // optional system instruction (chat mode)
+    std::string history_file;   // optional prior-turns file (multi-turn memory); empty = none
 
     // Parse positional and optional args
     int arg_idx = 2;
@@ -67,7 +98,11 @@ int main(int argc, char* argv[]) {
     }
     while (arg_idx < argc) {
         std::string flag = argv[arg_idx++];
+        if (flag == "--chat") { chat_mode = true; continue; }  // bare flag, no value
+        if (flag == "--serve") { serve_mode = true; continue; } // bare flag, no value
         if (arg_idx >= argc) { print_usage(argv[0]); return 1; }
+        if (flag == "--system") { system_prompt = argv[arg_idx++]; continue; }
+        if (flag == "--history") { history_file = argv[arg_idx++]; continue; }
         if (flag == "--temperature")       sampler_config.temperature = std::stof(argv[arg_idx++]);
         else if (flag == "--top-k")        sampler_config.top_k = std::stoi(argv[arg_idx++]);
         else if (flag == "--top-p")        sampler_config.top_p = std::stof(argv[arg_idx++]);
@@ -132,6 +167,69 @@ int main(int argc, char* argv[]) {
     }
     NNOPT_CHECKPOINT("model created");
 
+    // ── Persistent serve mode (warm model) — port of the qwen --serve REPL ──────
+    // OpenCL init + weight upload + kernel compile run ONCE; --serve then loops reading
+    // requests from stdin so query 2+ skip the cold load. Protocol (identical to qwen):
+    //   "GEN <max> <temp> <top_k> <top_p> <rep_pen> <sys_nbytes> <prompt_nbytes> <use_history>\n"
+    //   then system + prompt bytes; use_history=1 ⇒ read prior turns from "history.bin".
+    // Reply streams to stdout, ending with a single 0x1E byte; per-reply BENCHMARK lines on stderr.
+    if (serve_mode) {
+        const int chat_eos = tokenizer_ok ? tokenizer.eos_token_id() : -1;
+        std::cerr << "SERVE_READY" << std::endl;
+        std::string header;
+        while (std::getline(std::cin, header)) {
+            if (header.empty()) continue;
+            int rq_max = 256, rq_topk = 40, rq_usehist = 0;
+            float rq_temp = 0.7f, rq_topp = 0.95f, rq_rep = 1.1f;
+            unsigned long rq_sysn = 0, rq_promptn = 0;
+            if (std::sscanf(header.c_str(), "GEN %d %f %d %f %f %lu %lu %d",
+                            &rq_max, &rq_temp, &rq_topk, &rq_topp, &rq_rep,
+                            &rq_sysn, &rq_promptn, &rq_usehist) != 8) {
+                std::cerr << "serve: bad request header: " << header << std::endl;
+                std::cout << '\x1e' << std::flush; continue;
+            }
+            std::string rq_system(rq_sysn, '\0');
+            if (rq_sysn) std::cin.read(&rq_system[0], (std::streamsize)rq_sysn);
+            std::string rq_prompt(rq_promptn, '\0');
+            if (rq_promptn) std::cin.read(&rq_prompt[0], (std::streamsize)rq_promptn);
+            if (!std::cin) break;
+
+            // OpenELM has NO chat template — plain concatenation (Llama-2 BOS via encode), same as --chat.
+            std::string text;
+            if (!rq_system.empty()) text += rq_system + "\n\n";
+            std::vector<ChatTurn> hist = rq_usehist ? load_history("history.bin") : std::vector<ChatTurn>{};
+            for (const auto& t : hist) text += (t.role == 'A' ? "Assistant: " : "User: ") + t.content + "\n";
+            text += (hist.empty() ? rq_prompt : ("User: " + rq_prompt + "\nAssistant:"));
+            std::vector<int> ids = tokenizer.encode(text);
+
+            SamplerConfig sc;
+            sc.temperature = rq_temp; sc.top_k = rq_topk; sc.top_p = rq_topp;
+            sc.repetition_penalty = rq_rep; sc.eos_token_id = chat_eos;
+
+            std::vector<int32_t> stream_buf; size_t streamed_chars = 0;
+            const size_t prompt_toks = ids.size();
+            const auto t_req = std::chrono::steady_clock::now();
+            std::chrono::steady_clock::time_point t_first; bool got_first = false; int gen_n = 0;
+            Model::TokenCallback on_token = [&](int32_t t) {
+                if (!got_first) { got_first = true; t_first = std::chrono::steady_clock::now(); }
+                ++gen_n;
+                stream_buf.push_back(t);
+                std::string s = tokenizer.decode(stream_buf);
+                if (s.size() > streamed_chars) { std::cout << s.substr(streamed_chars) << std::flush; streamed_chars = s.size(); }
+            };
+            model.generate(ids, rq_max, sc, on_token);
+            const auto t_end = std::chrono::steady_clock::now();
+            auto secs = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b){ return std::chrono::duration<double>(b - a).count(); };
+            const double ttft = got_first ? secs(t_req, t_first) : 0.0;
+            const double dec_s = got_first ? secs(t_first, t_end) : 0.0;
+            if (ttft > 0.0) { std::cerr << "BENCHMARK time_to_first_token_sec: " << ttft << "\n"; std::cerr << "BENCHMARK prefill_tokens_per_sec: " << (prompt_toks / ttft) << "\n"; }
+            if (dec_s > 0.0 && gen_n > 1) std::cerr << "BENCHMARK decode_tokens_per_sec: " << ((gen_n - 1) / dec_s) << "\n";
+            std::cerr << std::flush;
+            std::cout << '\x1e' << std::flush;  // end-of-reply sentinel
+        }
+        return 0;
+    }
+
     // Baseline benchmark instrumentation (emits BENCHMARK <key>: <value>
     // lines on stderr; parsed by runUtils.ts parseInferenceMetrics).
     //   inference_start = BEFORE tokenize  — TTFT numerator (matches vLLM / MLPerf / llama-bench:
@@ -154,6 +252,22 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         std::cerr << "Loaded " << input_ids.size() << " token IDs from file (tokenizer bypass)" << std::endl;
+    } else if (chat_mode) {
+        // OpenELM-270M-Instruct ships NO official chat template — Apple's model
+        // card drives the instruct model with plain prompts (Llama-2 tokenizer,
+        // add_bos_token=true). We honor that: --chat feeds the prompt as-is
+        // (encode() already prepends BOS), optionally prefixing a system
+        // instruction. This keeps the flag uniform across the APK's models
+        // without inventing a template the 270M model was never tuned on.
+        // No official template — concatenate plainly. System first, then prior turns
+        // (multi-turn memory via --history) as "role: content" lines, then the new prompt.
+        std::string text;
+        if (!system_prompt.empty()) text += system_prompt + "\n\n";
+        for (const auto& t : load_history(history_file)) {
+            text += (t.role == 'A' ? "Assistant: " : "User: ") + t.content + "\n";
+        }
+        text += (history_file.empty() ? prompt : ("User: " + prompt + "\nAssistant:"));
+        input_ids = tokenizer.encode(text);
     } else {
         input_ids = tokenizer.encode(prompt);
         // Dump encode result so FinalizePort can diff C++ tokenizer output

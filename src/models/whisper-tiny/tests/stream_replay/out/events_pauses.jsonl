@@ -1,0 +1,15 @@
+{"t_ms": -1, "raw": "Loaded 75521280 bytes, 167 tensors", "type": "LOG"}
+{"t_ms": -1, "raw": "STREAM: ready \u2014 feed 16kHz mono float32 PCM on stdin (vad_threshold=0.0060 step=700ms hangover=1400ms cap=96 tok)", "type": "READY"}
+{"t_ms": 6297, "raw": "STREAM_TIMING win=0.93 proc=4.78 rtf=5.14 ntok=10", "type": "TIMING"}
+{"t_ms": 6299, "raw": "PARTIAL [0.60-1.53]:  the Quilter is the", "type": "PARTIAL", "t0": 0.6, "t1": 1.53, "text": "the Quilter is the"}
+{"t_ms": 8627, "raw": "STREAM_TIMING win=4.80 proc=2.32 rtf=0.48 ntok=26", "type": "TIMING"}
+{"t_ms": 8628, "raw": "PARTIAL [0.60-5.40]:  Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.", "type": "PARTIAL", "t0": 0.6, "t1": 5.4, "text": "Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel."}
+{"t_ms": 11259, "raw": "STREAM_TIMING win=6.18 proc=2.63 rtf=0.43 ntok=26", "type": "TIMING"}
+{"t_ms": 11261, "raw": "FINAL [0.60-6.78]:  Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.", "type": "FINAL", "t0": 0.6, "t1": 6.78, "text": "Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel."}
+{"t_ms": 12529, "raw": "STREAM_TIMING win=2.73 proc=1.27 rtf=0.47 ntok=15", "type": "TIMING"}
+{"t_ms": 12529, "raw": "PARTIAL [8.25-10.98]:  Nor is Mr. Quilter's manner less interesting", "type": "PARTIAL", "t0": 8.25, "t1": 10.98, "text": "Nor is Mr. Quilter's manner less interesting"}
+{"t_ms": 14066, "raw": "STREAM_TIMING win=3.75 proc=1.54 rtf=0.41 ntok=19", "type": "TIMING"}
+{"t_ms": 14066, "raw": "PARTIAL [8.25-12.00]:  Nor is Mr. Quilter's manner less interesting than his matter.", "type": "PARTIAL", "t0": 8.25, "t1": 12.0, "text": "Nor is Mr. Quilter's manner less interesting than his matter."}
+{"t_ms": 16149, "raw": "STREAM_TIMING win=5.13 proc=2.08 rtf=0.41 ntok=19", "type": "TIMING"}
+{"t_ms": 16149, "raw": "FINAL [8.25-13.38]:  Nor is Mr. Quilter's manner less interesting than his matter.", "type": "FINAL", "t0": 8.25, "t1": 13.38, "text": "Nor is Mr. Quilter's manner less interesting than his matter."}
+{"t_ms": 16149, "raw": "STREAM: end (stdin EOF)", "type": "LOG"}

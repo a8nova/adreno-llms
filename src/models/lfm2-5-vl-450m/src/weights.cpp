@@ -147,6 +147,25 @@ static inline size_t _nnopt_bytes_per_element(const std::string& dtype) {
     return 4;  // float32 default
 }
 
+void Weights::advise_dontneed(size_t offset, size_t nbytes) {
+    // Only safe on a real file-backed mmap — on the malloc fallback MADV_DONTNEED zeroes the pages.
+    if (!mmap_backed_ || mapped_ == nullptr || mapped_ == MAP_FAILED || nbytes == 0) return;
+    const long ps = sysconf(_SC_PAGESIZE);
+    if (ps <= 0) return;
+    const size_t page_sz = (size_t)ps;
+    const uintptr_t start = (uintptr_t)mapped_ + offset;
+    const uintptr_t end   = start + nbytes;
+    // Round INWARD: skip partial pages so a tensor whose region overlaps an adjacent tensor's page
+    // doesn't accidentally evict the neighbour.
+    const uintptr_t aligned_start = (start + page_sz - 1) & ~(page_sz - 1);
+    const uintptr_t aligned_end   =  end                   & ~(page_sz - 1);
+    if (aligned_end > aligned_start) {
+        // Best-effort hint; failure is non-fatal (we still hold the cl_mem, and on re-access the
+        // page faults back in from the file).
+        (void)madvise((void*)aligned_start, aligned_end - aligned_start, MADV_DONTNEED);
+    }
+}
+
 Weights::~Weights() {
     if (mapped_ != nullptr && mapped_ != MAP_FAILED) {
         munmap(mapped_, mapped_size_);
@@ -209,6 +228,7 @@ bool Weights::load(const std::string& bin_path, const std::string& meta_path, cl
     } else {
         // Tensor reads are sparse and order-independent — tell the kernel.
         madvise(mapped_, mapped_size_, MADV_RANDOM);
+        mmap_backed_ = true;  // safe to MADV_DONTNEED per-tensor after GPU upload
     }
     NNOPT_CHECKPOINT("weights: mmap complete (resident set will grow on demand)");
 
@@ -512,6 +532,10 @@ cl_mem Weights::get_buffer(const std::string& key, bool optional) {
         }
         _nnopt_roundtrip_verified_once = true;
     }
+
+    // The tensor now lives in the GPU buffer; drop its host page so RSS doesn't carry a redundant
+    // copy. If a later get_host()/get_host_vec() needs it, the file-backed page just faults back in.
+    advise_dontneed(meta.offset, meta.size_bytes);
 
     return meta.buffer;
 }

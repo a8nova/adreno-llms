@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "model_class": "RecursiveScriptModule",
+  "nodes": [
+    {
+      "module_path": "model",
+      "dump_name": "model",
+      "op": "RecursiveScriptModule",
+      "order": 0,
+      "control_flow": "feed_forward",
+      "param_tensors": 519
+    },
+    {
+      "module_path": "generator",
+      "dump_name": "generator",
+      "op": "RecursiveScriptModule",
+      "order": 1,
+      "control_flow": "autoregressive",
+      "param_tensors": 611
+    },
+    {
+      "module_path": "vocoder",
+      "dump_name": "vocoder",
+      "op": "RecursiveScriptModule",
+      "order": 2,
+      "control_flow": "feed_forward",
+      "param_tensors": 207
+    },
+    {
+      "op": "TorchScriptE2E",
+      "dump_name": "e2e_out_1",
+      "module_path": null,
+      "output_shape": [
+        53
+      ],
+      "order": 3,
+      "weight_prefix": null,
+      "is_pre_hook": false
+    },
+    {
+      "op": "TorchScriptE2E",
+      "dump_name": "e2e_out_2",
+      "module_path": null,
+      "output_shape": [
+        16640
+      ],
+      "order": 4,
+      "weight_prefix": null,
+      "is_pre_hook": false
+    }
+  ],
+  "_note": "E2E captures + scaffold-synthesized pipeline stages. Extend reference coverage via EXTRA_CAPTURES in _run_reference.py using submodule calls from model_info/ptl_graph.json.",
+  "_nnport_capture_version": "torchscript_e2e_v1"
+}

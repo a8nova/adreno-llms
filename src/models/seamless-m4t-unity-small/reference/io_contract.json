@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "model_class": "RecursiveScriptModule",
+  "archive": "unity_on_device.ptl",
+  "sample_rate_hz": 16000,
+  "input_sample_rate_hz": 16000,
+  "forward_arg_types": [
+    "Tensor",
+    "str"
+  ],
+  "output_artifact": {
+    "kind": "wav",
+    "sample_rate_hz": 16000
+  },
+  "_nnport_capture_version": "torchscript_e2e_v1"
+}

@@ -1,0 +1,19 @@
+{"t_ms": -1, "raw": "Loaded 75521280 bytes, 167 tensors", "type": "LOG"}
+{"t_ms": -1, "raw": "STREAM: ready \u2014 feed 16kHz mono float32 PCM on stdin (vad_threshold=0.0060 step=700ms hangover=1400ms cap=96 tok)", "type": "READY"}
+{"t_ms": 4904, "type": "RESET", "fed_s": 6.51, "raw": "<app reset>"}
+{"t_ms": 6402, "raw": "STREAM_TIMING win=0.93 proc=4.87 rtf=5.24 ntok=8", "type": "TIMING"}
+{"t_ms": 6403, "raw": "PARTIAL [0.60-1.53]:  Nor is Mr.", "type": "PARTIAL", "t0": 0.6, "t1": 1.53, "text": "Nor is Mr."}
+{"t_ms": 8576, "raw": "STREAM_TIMING win=5.13 proc=2.17 rtf=0.42 ntok=19", "type": "TIMING"}
+{"t_ms": 8577, "raw": "FINAL [0.60-5.73]:  Nor is Mr. Quilter's manner less interesting than his matter.", "type": "FINAL", "t0": 0.6, "t1": 5.73, "text": "Nor is Mr. Quilter's manner less interesting than his matter."}
+{"t_ms": 10460, "raw": "STREAM_TIMING win=2.82 proc=1.88 rtf=0.67 ntok=24", "type": "TIMING"}
+{"t_ms": 10461, "raw": "PARTIAL [7.14-9.96]:  tells us that at this festive season of the year, he tells us, that at the festive season", "type": "PARTIAL", "t0": 7.14, "t1": 9.96, "text": "tells us that at this festive season of the year, he tells us, that at the festive season"}
+{"t_ms": 12275, "raw": "STREAM_TIMING win=4.83 proc=1.81 rtf=0.38 ntok=19", "type": "TIMING"}
+{"t_ms": 12275, "raw": "PARTIAL [7.14-11.97]:  He tells us that at this festive season of the year with Christmas and Rose", "type": "PARTIAL", "t0": 7.14, "t1": 11.97, "text": "He tells us that at this festive season of the year with Christmas and Rose"}
+{"t_ms": 14552, "raw": "STREAM_TIMING win=6.33 proc=2.28 rtf=0.36 ntok=26", "type": "TIMING"}
+{"t_ms": 14552, "raw": "PARTIAL [7.14-13.47]:  He tells us that at this festive season of the year with Christmas and roast beef, looming before us,", "type": "PARTIAL", "t0": 7.14, "t1": 13.47, "text": "He tells us that at this festive season of the year with Christmas and roast beef, looming before us,"}
+{"t_ms": 17312, "raw": "STREAM_SEG soft phrase=11.7s (long speech: clause cut)", "type": "SEG"}
+{"t_ms": 17531, "raw": "STREAM_TIMING win=8.97 proc=2.98 rtf=0.33 ntok=31", "type": "TIMING"}
+{"t_ms": 17531, "raw": "PARTIAL [7.14-16.11]:  He tells us that at this festive season of the year with Christmas and roast beef looming before us, similarly drawn from eating and its", "type": "PARTIAL", "t0": 7.14, "t1": 16.11, "text": "He tells us that at this festive season of the year with Christmas and roast beef looming before us, similarly drawn from eating and its"}
+{"t_ms": 21198, "raw": "STREAM_TIMING win=11.73 proc=3.67 rtf=0.31 ntok=40", "type": "TIMING"}
+{"t_ms": 21200, "raw": "FINAL [7.14-18.87]:  He tells us that at this festive season of the year, with Christmas and roast beef looming before us, similarly drawn from eating in its results occur most readily to the mind.", "type": "FINAL", "t0": 7.14, "t1": 18.87, "text": "He tells us that at this festive season of the year, with Christmas and roast beef looming before us, similarly drawn from eating in its results occur most readily to the mind."}
+{"t_ms": 21200, "raw": "STREAM: end (stdin EOF)", "type": "LOG"}
