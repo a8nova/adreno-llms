@@ -139,17 +139,15 @@ else()
         GIT_TAG 1.6.3
         GIT_SHALLOW TRUE
     )
-    # On Android the canonical pattern is: build CLBlast as a shared lib,
-    # deploy libclblast.so to $REMOTE_DIR/lib/, set LD_LIBRARY_PATH at run.
-    # Deploy auto-pushes any *.so under build/<dtype>/_deps/*-build/ to
-    # $REMOTE_DIR/lib/ — and run_android.sh prepends $REMOTE_DIR/lib to
-    # LD_LIBRARY_PATH. So shared-link "just works". On non-Android hosts
-    # we keep static-link to avoid runtime-loader path concerns.
-    if(ANDROID)
-        set(BUILD_SHARED_LIBS ON CACHE BOOL "Android: build CLBlast shared (deployed via Deploy)" FORCE)
-    else()
-        set(BUILD_SHARED_LIBS OFF CACHE BOOL "Host: link CLBlast statically" FORCE)
-    endif()
+    # Static-link CLBlast (both Android and host) so the binary is SELF-CONTAINED.
+    # Rationale: Edgi packages this binary into an APK whose jniLibs ship ONE shared
+    # libclblast.so built for the other models. A shared CLBlast here would leave the
+    # binary importing libc++ symbols (e.g. std::__throw_length_error) from THAT
+    # mismatched .so at runtime, failing with "cannot locate symbol … CANNOT LINK
+    # EXECUTABLE". Static CLBlast + static libc++ (ANDROID_STL=c++_static) makes the
+    # binary depend on nothing under jniLibs, so it runs against any APK layout. The
+    # adreno-llms standalone deploy still works (just nothing to push to $REMOTE/lib).
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "Static CLBlast: self-contained binary for APK packaging" FORCE)
     set(SAMPLES OFF CACHE BOOL "Disable samples" FORCE)
     set(TUNERS OFF CACHE BOOL "Disable tuners" FORCE)
     set(CLIENTS OFF CACHE BOOL "Disable clients" FORCE)

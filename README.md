@@ -103,7 +103,7 @@ RTF = processing time / audio duration (lower is better; < 1.0 = faster than rea
 
 | Model | Precision | Params | Architecture | RTF | Audio | Wall (s) | Peak CPU mem (MB) | Notes |
 |---|:-:|---:|---|---:|---:|---:|---:|---|
-| [OpenVoice V2](src/models/openvoice-v2/) | fp16 | ~32M | VITS converter (posterior enc + flow + HiFi-GAN dec) | **2.01** | 19.27 s | ~38.8 | 192 | fused single-pass clone; enc_q ~2.05 s / flow ~3.7 s / dec ~33 s; bit-exact vs reference (flow cos 1.0000, dec 0.9998); thermal swing 1.97–2.03× on the foldable; int8 (cl_qcom_dot_product8) is the next lever for a firm sub-2× |
+| [OpenVoice V2](src/models/openvoice-v2/) | fp16 | ~32M | VITS converter (posterior enc + flow + HiFi-GAN dec) | **2.01** | 19.27 s | ~38.8 | 192 | fused single-pass clone; enc_q ~2.05 s / flow ~3.7 s / dec ~33 s; bit-exact vs reference (flow cos 1.0000, dec 0.9998); thermal swing 1.97–2.03× on the foldable |
 
 
 State-of-the-art small language models running on **Adreno 6xx GPUs** — the GPU class found in mid-range Android phones. Pure C++/OpenCL inference, cross-compiled on macOS, deployed via `adb` to `/data/local/tmp/`.

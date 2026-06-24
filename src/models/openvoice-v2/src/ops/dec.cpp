@@ -2,6 +2,12 @@
 // conv_pre + cond → 4× [lrelu, ConvTranspose upsample, MRF (3 ResBlocks averaged)]
 // → lrelu(0.01) → conv_post → tanh. zero_g=True ⇒ g=ZEROS.
 #include "engine.h"
+#include "../ov_stft.h"     // CPU linear-spectrogram front-end (spectrogram_torch)
+#include "../load_wav.h"    // 16-bit PCM WAV -> mono f32 [-1,1]
+#include "../write_wav.h"   // f32 [-1,1] -> 16-bit PCM WAV
+#include <random>
+#include <string>
+#include <cstring>
 
 // ResBlock1: 3 (convs1,convs2) pairs, each indexed by d in dil[1,3,5].
 // convs1 dilation = dil[d] (pad=dil*(K-1)/2); convs2 dilation 1 (pad=(K-1)/2).
@@ -92,32 +98,109 @@ int run_dec_fast() {
 // NO stage dumps (dump=false). This is what ships; run_all/run_dec keep dumps for cos.
 // flow input is the reference posterior sample (z) so flow/dec stay bit-exact verifiable;
 // enc_q runs its real WaveNet forward for timing. zero_g=True (enc_q & dec g=0).
-int run_clone() {
+//
+// Two input paths, selected by whether --src is given:
+//   • --src ref.wav  → the REAL tool: STFT → enc_q.pre → WN → proj → reparam(z),
+//                      then flow(g_src)→flow(g_tgt,rev)→dec → --out re-voiced WAV.
+//   • no --src       → the legacy fused BENCHMARK: seeds enc_q input + z from the
+//                      gitignored reference/layers/*.bin fixtures (bit-exact, no WAV).
+// --g-src/--g-tgt override the baked assets/g_{src,tgt}.bin tone-color embeddings.
+// tau (posterior noise scale) defaults to OpenVoice's convert() value 0.3; set
+// NNOPT_TAU=0 for a deterministic (z=m) run when cosine-checking against upstream.
+int run_clone(int argc, char** argv) {
+    std::string src, out;
+    const char* g_src_path = "assets/g_src.bin";
+    const char* g_tgt_path = "assets/g_tgt.bin";
+    for (int i = 2; i < argc; i++) {
+        if (!std::strcmp(argv[i], "--src")   && i+1 < argc) src = argv[++i];
+        else if (!std::strcmp(argv[i], "--out")   && i+1 < argc) out = argv[++i];
+        else if (!std::strcmp(argv[i], "--g-src") && i+1 < argc) g_src_path = argv[++i];
+        else if (!std::strcmp(argv[i], "--g-tgt") && i+1 < argc) g_tgt_path = argv[++i];
+    }
+    float tau = 0.3f;
+    if (const char* e = getenv("NNOPT_TAU")) tau = (float)atof(e);
+
     OpenCLContext cl; Weights W; if(boot(cl,W)) return 1; Engine E(cl,W);
-    // enc_q content-encoder input (reference pre-output [192,T])
-    FILE* f=fopen("reference/layers/enc_q_pre_output.bin","rb");
-    if(!f){ printf("no enc_q_pre_output.bin\n"); return 1; }
-    fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
-    int n=sz/4; std::vector<float> ein(n); fread(ein.data(),4,n,f); fclose(f);
-    int H=192, Tenc=n/H;
-    Buf ex{E.alloc((size_t)H*Tenc),H,Tenc}; E.upload(ex.mem,ein);
-    Buf z = load_ref(E, "reference/layers/enc_q_output.bin", 192); if(!z.mem) return 1;
-    cl_mem g_src=load_g(E,"assets/g_src.bin"), g_tgt=load_g(E,"assets/g_tgt.bin");
+    const int H = 192;
+
+    // ── enc_q content-encoder input: ex [192,T] ──────────────────────────────
+    Buf ex; bool real_path = !src.empty();
+    if (real_path) {
+        // REAL front end: WAV → spectrogram_torch [513,T] → enc_q.pre (Conv1d 513→192).
+        std::vector<float> audio; nnopt::WavInfo wi;
+        if (!nnopt::read_wav_mono_f32(src, audio, wi, 22050)) {
+            printf("clone: cannot read --src %s\n", src.c_str()); return 1;
+        }
+        int Tspec = 0;
+        std::vector<float> spec = nnopt::ov_spectrogram(audio, &Tspec);   // [513, Tspec]
+        if (Tspec <= 0) { printf("clone: --src too short (%zu samples)\n", audio.size()); return 1; }
+        printf("clone: --src %s | %d samples @ %dHz → spec [513,%d]\n",
+               src.c_str(), (int)audio.size(), wi.sample_rate, Tspec);
+        Buf specbuf{E.alloc((size_t)513*Tspec), 513, Tspec}; E.upload(specbuf.mem, spec);
+        ex = E.conv1d(specbuf, "enc_q.pre", H, 1, 1, 1, 0);               // [192,Tspec]
+        E.rel(specbuf.mem);
+    } else {
+        // LEGACY bench: reference pre-output [192,T] from a cached fixture.
+        FILE* f=fopen("reference/layers/enc_q_pre_output.bin","rb");
+        if(!f){ printf("no enc_q_pre_output.bin (pass --src ref.wav for the real path)\n"); return 1; }
+        fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
+        int n=sz/4; std::vector<float> ein(n); fread(ein.data(),4,n,f); fclose(f);
+        int Tenc=n/H;
+        ex = Buf{E.alloc((size_t)H*Tenc),H,Tenc}; E.upload(ex.mem,ein);
+    }
+
+    cl_mem g_src=load_g(E,g_src_path), g_tgt=load_g(E,g_tgt_path);
     cl_mem g0=zero_g(E);
     if(getenv("NNOPT_WARMUP")) E.warmup();
-    // ---- timed: single process, no dumps ----
+
+    // ── enc_q: WN → proj (m|logs) ────────────────────────────────────────────
     double t0=now_ms();
     Buf enc_out = E.wn(ex, g0, H, 256, 16, 5, "enc_q.enc", "", false);
-    Buf stats   = E.conv1d(enc_out, "enc_q.proj", 384, 1, 1, 1, 0);   // m|logs (enc_q cost)
-    E.finish(); double t1=now_ms(); E.rel(enc_out.mem); E.rel(stats.mem);
-    Buf z_p   = E.flow(z,   g_src, 256, false);
+    Buf stats   = E.conv1d(enc_out, "enc_q.proj", 384, 1, 1, 1, 0);   // [384,T] = m|logs
+    E.finish(); double t1=now_ms(); E.rel(ex.mem); E.rel(enc_out.mem);
+
+    // ── reparam: z = m + eps·tau·exp(logs) ───────────────────────────────────
+    Buf z;
+    if (real_path) {
+        const int T = stats.T;
+        std::vector<float> st = E.download(stats.mem, stats.n());      // [384,T] channel-major
+        E.rel(stats.mem);
+        std::vector<float> zf((size_t)H*T);
+        std::mt19937 rng(1234); std::normal_distribution<float> nd(0.0f, 1.0f);
+        for (int c = 0; c < H; c++) {
+            const float* m  = &st[(size_t)c       * T];
+            const float* lg = &st[(size_t)(c + H) * T];
+            float* zc = &zf[(size_t)c * T];
+            for (int t = 0; t < T; t++) {
+                float eps = (tau > 0.0f) ? nd(rng) : 0.0f;
+                zc[t] = m[t] + eps * tau * std::exp(lg[t]);
+            }
+        }
+        z = Buf{E.alloc((size_t)H*T), H, T}; E.upload(z.mem, zf);
+    } else {
+        // bench: seed flow from the cached posterior sample so flow/dec stay bit-exact.
+        E.rel(stats.mem);
+        z = load_ref(E, "reference/layers/enc_q_output.bin", 192); if(!z.mem) return 1;
+    }
+
+    // ── flow (g_src fwd → g_tgt rev) → dec ───────────────────────────────────
+    Buf z_p   = E.flow(z,   g_src, 256, false); E.rel(z.mem);
     Buf z_hat = E.flow(z_p, g_tgt, 256, true);
     E.finish(); double t2=now_ms(); E.rel(z_p.mem);
     Buf o     = E.dec(z_hat, g0, 256, false);                        // NO stage dumps
-    E.finish(); double t3=now_ms();
+    E.finish(); double t3=now_ms(); E.rel(z_hat.mem);
     double audio_s = o.T/22050.0;
-    printf("CLONE (1 process, no dumps): waveform [%d,%d] = %.2fs audio | peak %.1f MB\n",
-        o.C, o.T, audio_s, E.peak_mb());
+
+    // ── write re-voiced WAV ──────────────────────────────────────────────────
+    if (!out.empty()) {
+        std::vector<float> wav = E.download(o.mem, o.n());           // [1, T*256] in [-1,1]
+        if (nnopt::write_wav(out, wav.data(), (int)wav.size(), 22050))
+            printf("clone: wrote %s (%.2fs @ 22050Hz, tau=%.2f)\n", out.c_str(), audio_s, tau);
+        else
+            printf("clone: FAILED to write %s\n", out.c_str());
+    }
+    printf("CLONE (%s): waveform [%d,%d] = %.2fs audio | peak %.1f MB\n",
+        real_path ? "real" : "bench", o.C, o.T, audio_s, E.peak_mb());
     printf("  enc_q %.1f ms | flow %.1f ms | dec %.1f ms | TOTAL %.1f ms | %.2fx realtime\n",
         t1-t0, t2-t1, t3-t2, t3-t0, (t3-t0)/1000.0/audio_s);
     return 0;

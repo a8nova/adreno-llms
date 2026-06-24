@@ -7,7 +7,8 @@
 // the real work lives in src/ops/*.cpp (run_clone is the shippable fused path;
 // the others are per-stage cosine-verification harnesses).
 //
-//   clone     (default) — fused enc_q -> flow -> dec in one process, no dumps
+//   clone     (default) — enc_q -> flow -> dec; --src WAV in, --out WAV out (real path)
+//   extract             — ref_enc tone-color extractor: --in ref.wav --out g.bin
 //   enc_q_wn            — posterior encoder (WaveNet) stage, cos check
 //   flow               — normalizing flow stage, cos check
 //   dec | decfast      — HiFi-GAN decoder stage, cos check
@@ -22,7 +23,8 @@
 #include <cstdio>
 #include <cstring>
 
-extern int run_clone();
+extern int run_clone(int argc, char** argv);
+extern int run_extract(int argc, char** argv);
 extern int run_enc_q_wn();
 extern int run_flow();
 extern int run_dec();
@@ -39,7 +41,8 @@ int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
     const char* mode = (argc > 1 && argv[1][0] != '-') ? argv[1] : "clone";
-    if (std::strcmp(mode, "clone")    == 0) return run_clone();
+    if (std::strcmp(mode, "clone")    == 0) return run_clone(argc, argv);
+    if (std::strcmp(mode, "extract")  == 0) return run_extract(argc, argv);
     if (std::strcmp(mode, "enc_q_wn") == 0) return run_enc_q_wn();
     if (std::strcmp(mode, "flow")     == 0) return run_flow();
     if (std::strcmp(mode, "dec")      == 0) return run_dec();
@@ -48,6 +51,6 @@ int main(int argc, char** argv) {
     if (std::strcmp(mode, "bench")    == 0) return run_bench();
     if (std::strcmp(mode, "hwprobe")  == 0) return run_hwprobe();
 
-    std::fprintf(stderr, "unknown mode: %s (expected: clone|enc_q_wn|flow|dec|decfast|all|bench|hwprobe)\n", mode);
+    std::fprintf(stderr, "unknown mode: %s (expected: clone|extract|enc_q_wn|flow|dec|decfast|all|bench|hwprobe)\n", mode);
     return 64;
 }

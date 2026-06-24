@@ -22,7 +22,9 @@ Each stage lives in `src/ops/` (`enc_q.cpp`, `flow.cpp`, `dec.cpp`); `src/ops/en
 
 Like the seamless-m4t cascade, there is no single `Model::forward()`. `src/main.cpp` is a thin selector that dispatches a stage by `argv[1]` (default **`clone`**), and each stage's `run_*()` lives in `src/ops/*.cpp` (`run_clone` in `dec.cpp`). One CMake binary (`openvoice_v2_inference_fp16`), built by the standard `build.sh` — CLBlast comes from CMake `FetchContent`. Modes: `clone` (fused enc_q→flow→dec), `enc_q_wn`, `flow`, `dec`, `decfast`, `all`, `bench`, `hwprobe`.
 
-> **Status — `clone` is a fused-compute benchmark, not yet a raw-audio→wav path.** `run_clone()` seeds enc_q from cached reference tensors (`reference/layers/enc_q_pre_output.bin` + `enc_q_output.bin`) rather than computing the content encoder from a source WAV, and it prints timing/peak rather than writing an output WAV. That is what makes it bit-exact (it starts from the reference latent). Those `reference/layers/*.bin` fixtures are gitignored, so a **clean checkout cannot run `clone` until they are regenerated** (via the cosine harness / upstream OpenVoice). A raw-audio-in → re-voiced-WAV-out front end (mel/STFT → content encoder → write WAV) is the remaining work to make this a standalone tool.
+> **Status — `clone` is a real raw-audio→WAV tool (with `--src`), and still a bit-exact benchmark (without).** Given `--src ref.wav` it runs the full front end on a 22.05 kHz mono WAV: CPU linear-spectrogram (`src/ov_stft.h`, mirrors `spectrogram_torch`, cosine 1.0) → `enc_q.pre` Conv1d (513→192) → WN → `proj` → posterior reparam `z = m + ε·τ·exp(logs)` → `flow(g_src)` → `flow(g_tgt, rev)` → `dec` → re-voiced `--out out.wav`. With no `--src` it falls back to seeding enc_q + `z` from the gitignored `reference/layers/*.bin` fixtures (bit-exact, no WAV) for cosine verification. Verified on device: STFT cosine 1.0 vs upstream; identity run (`g_src==g_tgt`, `NNOPT_TAU=0`) reconstructs the source at 0.992 mel-cosine. `--g-src`/`--g-tgt` override the baked embeddings; `NNOPT_TAU` (default 0.3) sets posterior noise. Input is assumed 22.05 kHz mono 16-bit PCM (resampling is the caller's job).
+>
+> The **`extract`** mode (`extract --in ref.wav --out g.bin`) computes a 256-d tone-color embedding from arbitrary reference audio via the `ref_enc` 2D-CNN+GRU (CPU/fp32, `src/ops/extract.cpp`) — so a clean checkout can now do the full standalone clone with self-extracted embeddings, no fixtures. Verified on device: extractor cosine 1.0 vs a torch `ReferenceEncoder` reference; end-to-end clone with self-extracted g_src/g_tgt preserves content (0.95 mel-cos) while shifting tone color (g_src·g_tgt cos 0.43).
 
 ## Quickstart
 
@@ -36,11 +38,28 @@ From this directory, with an Android device connected over `adb`:
 NNOPT_DTYPE=fp16 ./scripts/build.sh
 NNOPT_DTYPE=fp16 ./scripts/deploy_android.sh
 
-# 3. Run the fused clone (re-voices the source into the target tone color)
+# 3a. Bit-exact fused benchmark (seeds from reference fixtures, no WAV)
 NNOPT_DTYPE=fp16 ./scripts/run_android.sh clone     # also: enc_q_wn | flow | dec | all | bench
+
+# 3b. REAL audio→audio: re-voice a 22.05kHz mono WAV into the target tone color.
+#     run_android.sh forwards only the mode, so invoke the binary directly:
+REMOTE=/data/local/tmp/openvoice_v2_inference
+adb push my_source.wav $REMOTE/src.wav
+adb shell "cd $REMOTE && NNOPT_TAU=0.3 \
+  LD_LIBRARY_PATH=/vendor/lib64:$REMOTE/lib:/system/vendor/lib64 \
+  ./openvoice_v2_inference_fp16 clone --src src.wav --out out.wav \
+  --g-src assets/g_src.bin --g-tgt assets/g_tgt.bin"
+adb pull $REMOTE/out.wav .
+
+# 3c. Extract a tone-color embedding from any reference clip (on-device):
+adb push my_reference.wav $REMOTE/ref.wav
+adb shell "cd $REMOTE && \
+  LD_LIBRARY_PATH=/vendor/lib64:$REMOTE/lib:/system/vendor/lib64 \
+  ./openvoice_v2_inference_fp16 extract --in ref.wav --out g_tgt.bin"
+# → feed g_tgt.bin back into clone via --g-tgt for full standalone cloning.
 ```
 
-The source/target tone-color embeddings are `assets/g_src.bin` and `assets/g_tgt.bin` (extract your own from reference audio with the upstream OpenVoice `ToneColorConverter.extract_se`). See the status note above for the reference-tensor input dependency.
+The source/target tone-color embeddings are `assets/g_src.bin` and `assets/g_tgt.bin` (extract your own from reference audio with the upstream OpenVoice `ToneColorConverter.extract_se`, or — once `extract` mode lands — on-device). `--g-src`/`--g-tgt` override them per run.
 
 ## Performance
 
