@@ -44,6 +44,7 @@ Decode tok/s = 5-run warm median, fp16, greedy (`temperature=0, seed=42`), 32-to
 | `musicgen-small/model.fp16.bin` | [facebook/musicgen-small](https://huggingface.co/facebook/musicgen-small) | ~590M | text→music (see repo) | CC-BY-NC 4.0 |
 | `seamless-m4t-unity-small/model.fp16.bin` | [facebook/seamless-m4t-unity-small](https://huggingface.co/facebook/seamless-m4t-unity-small) | ~323M | S2ST/S2TT (see repo) | CC-BY-NC 4.0 |
 | `openelm-270m-instruct/` (companion files only) | [apple/OpenELM-270M-Instruct](https://huggingface.co/apple/OpenELM-270M-Instruct) | 270M | 4.47 | Apple ASCL — fetch + convert locally |
+| `openvoice-v2/model.fp16.bin` | [myshell-ai/OpenVoiceV2](https://huggingface.co/myshell-ai/OpenVoiceV2) | ~32M | voice cloning (see repo) | MIT |
 
 **OpenELM-270M-Instruct is partially hosted here.** Under `openelm-270m-instruct/` you'll find only the small companion files:
 

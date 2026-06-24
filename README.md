@@ -8,15 +8,16 @@
 https://github.com/user-attachments/assets/c5723e58-6bc7-4fbc-921b-59388e26f2c9
 
 
-## ✨ NEW: five new modalities on-device — Vision, Speech, Listening, Music & Translation
+## ✨ NEW: six new modalities on-device — Vision, Speech, Listening, Music, Translation & Voice cloning
 
-Beyond text generation, five new model types now run **fully on-device** on Adreno 6xx:
+Beyond text generation, six new model types now run **fully on-device** on Adreno 6xx:
 
 - **👁️ Vision (VLM)** — [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) and [LFM2.5-VL-450M](src/models/lfm2-5-vl-450m/): image + text in, text out.
 - **🗣️ Speech (TTS)** — [MMS-TTS](src/models/mms-tts/) and [Kokoro-82M](src/models/kokoro-82m/): text in, speech out.
 - **🎧 Listening (ASR)** — [Whisper-tiny](src/models/whisper-tiny/): speech in, text out, with real-time streaming transcription.
 - **🎵 Music (text→music)** — [MusicGen-small](src/models/musicgen-small/): text prompt in, music out.
 - **🌐 Translation (S2ST/S2TT)** — [SeamlessM4T UnitY-small](src/models/seamless-m4t-unity-small/): speech in → translated speech or text out (English/Spanish/Portuguese/Hindi/Russian).
+- **🎙️ Voice cloning (tone-color conversion)** — [OpenVoice V2](src/models/openvoice-v2/): speech in → the same speech re-voiced in a target speaker's tone color, fused single-pass clone at ~2× real-time.
 
 The **[See & Say](examples/see-and-say/)** example app ties the vision and speech models together into a single sideloadable APK.
 
@@ -95,6 +96,14 @@ RTF = processing time / audio duration (lower is better; < 1.0 = faster than rea
 | Model | Precision | Params | Architecture | RTF (warm) | Modes | Notes |
 |---|:-:|---:|---|---:|---|---|
 | [SeamlessM4T UnitY-small](src/models/seamless-m4t-unity-small/) | fp16 | ~323M | Conformer enc + text dec (beam-5) + T2U + unit dec + CodeHiFiGAN | **2.9** / **1.5** | s2s / s2tt / asr | 6.0 s input, warm: **S2ST 2.9×** (speech out, ~17.7 s) vs **S2TT/ASR 1.5×** (text out, ~9.2 s) — text modes skip T2U+unit-decoder+vocoder; eng/spa/por/hin/rus output |
+
+### Voice cloning (tone-color conversion)
+
+> Audio in → the same utterance re-voiced in a target speaker's tone color (the OpenVoice V2 converter, not the base TTS). A single fused forward — posterior encoder → normalizing flow → HiFi-GAN decoder — runs in one process with a shared weight/kernel cache (no per-stage disk dumps). The HiFi-GAN decoder is ~87% of the wall. RTF = wall / audio (lower better). Measured 2026-06-21 on a 19.27 s clip, warm 3-run median.
+
+| Model | Precision | Params | Architecture | RTF | Audio | Wall (s) | Peak CPU mem (MB) | Notes |
+|---|:-:|---:|---|---:|---:|---:|---:|---|
+| [OpenVoice V2](src/models/openvoice-v2/) | fp16 | ~32M | VITS converter (posterior enc + flow + HiFi-GAN dec) | **2.01** | 19.27 s | ~38.8 | 192 | fused single-pass clone; enc_q ~2.05 s / flow ~3.7 s / dec ~33 s; bit-exact vs reference (flow cos 1.0000, dec 0.9998); thermal swing 1.97–2.03× on the foldable |
 
 
 State-of-the-art small language models running on **Adreno 6xx GPUs** — the GPU class found in mid-range Android phones. Pure C++/OpenCL inference, cross-compiled on macOS, deployed via `adb` to `/data/local/tmp/`.

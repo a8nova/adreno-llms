@@ -35,6 +35,7 @@ jobs:
           - mamba2-130m
           - mms-tts
           - openelm-270m
+          - openvoice-v2
           - qwen2-5-0-5b
           - smollm2-135m-instruct
           - smolvlm-256m-instruct
@@ -62,3 +63,14 @@ jobs:
           test -n "$bin" || { echo "no fp16 binary produced"; exit 1; }
           file "$bin" | grep -q 'ARM aarch64' || { echo "binary is not arm64"; file "$bin"; exit 1; }
           echo "OK: $bin"
+
+      # Catches the "runs via adb, CANNOT LINK in-app" class: a binary that needs a
+      # shared lib the host app's jniLibs don't ship (libclblast.so / libc++_shared.so)
+      # or undefined libc++ symbols. App-embedded models (openvoice-v2) must be fully
+      # self-contained (--strict: static CLBlast + static libc++); the rest must at
+      # least not pull in libc++_shared.so or surprise deps.
+      - name: Check binary is app-linkable
+        run: |
+          bin=$(find "src/models/${{ matrix.model }}/build/fp16" -maxdepth 1 -type f -name '*_inference_fp16' | head -1)
+          strict=""; [ "${{ matrix.model }}" = "openvoice-v2" ] && strict="--strict"
+          ANDROID_NDK="$ANDROID_NDK_LATEST_HOME" bash scripts/ci/check_self_contained.sh "$bin" $strict

@@ -1,0 +1,19 @@
+{
+  "prompt": "Transcribe this audio.",
+  "max_new_tokens": 7,
+  "model_id": "myshell-ai/OpenVoiceV2",
+  "produced_by": "_run_reference.py",
+  "produced_via": "llm_inference_call",
+  "inference_call": "import torch, os\nfrom huggingface_hub import snapshot_download\n_d = snapshot_download('myshell-ai/OpenVoiceV2')\n_se = torch.load(os.path.join(_d, 'base_speakers', 'ses', 'en-au.pth'), map_location=torch.device(device))\n_out = os.path.join(output_dir, 'openvoice_v2_converted.wav')\nmodel.convert(audio_src_path=input_audio, src_se=_se, tgt_se=_se, output_path=_out)\nresult = _out",
+  "result_descriptor": {
+    "type": "str"
+  },
+  "input_ids": [
+    0
+  ],
+  "generated_ids": [
+    0
+  ],
+  "generated_text": "",
+  "reference_text": ""
+}
