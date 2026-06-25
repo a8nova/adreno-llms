@@ -6,8 +6,11 @@ name: Device reference tests
 # for runner setup and how the golden snapshots are captured.
 
 on:
-  pull_request:
-  workflow_dispatch:
+  # DISABLED: no self-hosted [self-hosted, android] runner is currently online, so the
+  # pull_request trigger is commented out — otherwise every PR would hang with a device
+  # job stuck "waiting for a runner". Re-enable by uncommenting once a runner is back.
+  # pull_request:
+  workflow_dispatch:   # manual only (won't auto-run on PRs)
 
 # One phone, one runner: never run two device jobs at once on the same device.
 concurrency:
@@ -16,6 +19,14 @@ concurrency:
 
 jobs:
   device-reference:
+    # SECURITY: this runs on a SELF-HOSTED runner (a personal Mac) and the repo is
+    # PUBLIC. Without this guard, anyone could fork the repo, edit a workflow/script,
+    # and open a PR that executes arbitrary code on the runner. This gate runs the job
+    # ONLY for manual dispatch or for PRs whose head branch lives in THIS repo (which
+    # only maintainers can push) — fork PRs are skipped and never touch the runner.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, android]   # label the runner with both (see TESTING.md)
     strategy:
       fail-fast: false                # one model failing must not mask the others
