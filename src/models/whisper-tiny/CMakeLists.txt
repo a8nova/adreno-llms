@@ -13,6 +13,17 @@ endif()
 project(whisper_tiny_inference CXX)
 
 set(CMAKE_CXX_STANDARD 17)
+
+# 16 KB page alignment for Google Play (Android 15 / API 35+). NDK r26 emits 4 KB
+# (0x1000) LOAD segments by default; force 0x4000 so BOTH the model binary and the
+# bundled libclblast.so load on 16 KB-page devices and pass Play's check. Set here
+# (before clblast FetchContent + add_executable) so it covers exe AND shared lib.
+# NDK r28+ does this by default. Behavior-neutral (segment alignment only).
+if(ANDROID)
+    string(APPEND CMAKE_EXE_LINKER_FLAGS " -Wl,-z,max-page-size=16384")
+    string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,-z,max-page-size=16384")
+endif()
+
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 

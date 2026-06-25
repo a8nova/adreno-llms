@@ -283,6 +283,12 @@ if(ANDROID)
         # — we still resolve OpenCL symbols against the stub at link
         # time, but the DT_NEEDED on it doesn't cascade.
         "-Wl,--no-copy-dt-needed-entries"
+        # 16 KB page alignment: Google Play requires apps targeting Android 15
+        # (API 35) to support 16 KB memory pages. NDK r26 still emits 4 KB-aligned
+        # (0x1000) LOAD segments by default; this forces 0x4000 so the binary loads
+        # on 16 KB-page devices and passes Play's pre-launch check. NDK r28+ does
+        # this by default. Behavior-neutral (segment alignment only, not codegen).
+        "-Wl,-z,max-page-size=16384"
         "-Wl,-rpath,/vendor/lib64:/vendor/lib:/system/lib64:/system/lib"
     )
     set_target_properties(pocket_tts_inference PROPERTIES

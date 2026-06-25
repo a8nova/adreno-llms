@@ -1,0 +1,57 @@
+name: Device reference tests
+
+# On-device fp16 golden regression suite. Runs on a SELF-HOSTED runner with a
+# physical Adreno phone attached via adb — GitHub-hosted runners have no Adreno
+# GPU, so the device-free build matrix lives in ci.yml instead. See docs/TESTING.md
+# for runner setup and how the golden snapshots are captured.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+# One phone, one runner: never run two device jobs at once on the same device.
+concurrency:
+  group: device-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  device-reference:
+    runs-on: [self-hosted, android]   # label the runner with both (see TESTING.md)
+    strategy:
+      fail-fast: false                # one model failing must not mask the others
+      max-parallel: 1                 # single attached device
+      matrix:
+        model:
+          - granite-4-0-350m
+          - lfm2-5-350m
+          - mamba-130m
+          - mamba2-130m
+          - openelm-270m
+          - qwen2-5-0-5b
+          - smollm2-135m-instruct
+          - lfm2-5-vl-450m
+          - smolvlm-256m-instruct
+          - whisper-tiny
+          - seamless-m4t-unity-small
+          - pocket-tts
+          - kokoro-82m
+          - mms-tts
+          - openvoice-v2
+          - musicgen-small
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm a device is attached
+        run: adb get-state
+
+      - name: Reference test ${{ matrix.model }}
+        run: |
+          set +e
+          bash scripts/ci/run_device_reference.sh "${{ matrix.model }}"
+          rc=$?
+          set -e
+          case $rc in
+            0) echo "::notice::${{ matrix.model }} reference test PASSED" ;;
+            2) echo "::warning::${{ matrix.model }} modality not yet implemented — skipped" ;;
+            *) echo "::error::${{ matrix.model }} reference test FAILED (rc=$rc)"; exit 1 ;;
+          esac
