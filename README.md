@@ -13,7 +13,7 @@ https://github.com/user-attachments/assets/c5723e58-6bc7-4fbc-921b-59388e26f2c9
 Beyond text generation, six new model types now run **fully on-device** on Adreno 6xx:
 
 - **👁️ Vision (VLM)** — [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) and [LFM2.5-VL-450M](src/models/lfm2-5-vl-450m/): image + text in, text out.
-- **🗣️ Speech (TTS)** — [MMS-TTS](src/models/mms-tts/) and [Kokoro-82M](src/models/kokoro-82m/): text in, speech out.
+- **🗣️ Speech (TTS)** — [MMS-TTS](src/models/mms-tts/), [Kokoro-82M](src/models/kokoro-82m/) and [Pocket-TTS](src/models/pocket-tts/): text in, speech out.
 - **🎧 Listening (ASR)** — [Whisper-tiny](src/models/whisper-tiny/): speech in, text out, with real-time streaming transcription.
 - **🎵 Music (text→music)** — [MusicGen-small](src/models/musicgen-small/): text prompt in, music out.
 - **🌐 Translation (S2ST/S2TT)** — [SeamlessM4T UnitY-small](src/models/seamless-m4t-unity-small/): speech in → translated speech or text out (English/Spanish/Portuguese/Hindi/Russian).
@@ -66,12 +66,13 @@ Workload: `"Describe this image."` + sample JPEG. TTFT includes image preprocess
 
 ### Text-to-speech
 
-RTF = wall time / audio duration (lower is better; RTF ≤ 1.0 = real-time). Measured 2026-06-08 (Kokoro streaming), 2026-05-20 (MMS-TTS).
+RTF = wall time / audio duration (lower is better; RTF ≤ 1.0 = real-time). Measured 2026-06-08 (Kokoro streaming), 2026-05-20 (MMS-TTS), 2026-06-25 (Pocket-TTS).
 
 | Model | Precision | Params | Architecture | RTF | Audio | Wall (s) | Peak CPU mem (MB) | Notes |
 |---|:-:|---:|---|---:|---:|---:|---:|---|
 | [MMS-TTS](src/models/mms-tts/) | fp16 | 36M | VITS (enc + flow + HiFi-GAN) | **1.3** | 7.8 s | ~10.1 | 686 | ~1100 languages; per-op cosine ≥ 0.996 vs HF reference |
 | [Kokoro-82M](src/models/kokoro-82m/) | fp16 | 82M | StyleTTS2 (text enc + duration + iSTFT decoder) | **0.93** | 2.0 s | ~2.1 | 783 | warm `--stream` / `--serve` streaming **faster than real-time** — sustained RTF **0.92–1.01** (int8 dot8 paths default-on, gapless); cold single-shot ~1.05 RTF (~2.1 s wall) |
+| [Pocket-TTS](src/models/pocket-tts/) | fp16 | ~100M | flow-matching (FlowLM backbone + flow_net denoiser + Mimi SEANet decoder) | **1.47** | 4.0 s | ~5.9 | 513 | 24 kHz; baked `audio_prompt` default + 8 selectable v1 voices; steady-state **115 ms / 80 ms frame**; host/dispatch-bound on CLBlast Mimi GEMMs; bit-exact vs fp32 reference (cos 1.0) |
 
 ### Speech-to-text (ASR)
 

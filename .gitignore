@@ -18,6 +18,7 @@ CMakeFiles/
 # Per-model dev artifacts (regenerable, large)
 .nnport/
 .nnopt/
+.src_download/
 .nnport_venv/
 .cache/
 .deploy_manifest.json

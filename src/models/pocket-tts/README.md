@@ -21,23 +21,17 @@ GPUs, running fully on-device. Verified on Motorola Razr 2020 (Adreno 620 v2).
 ## Build (default = fastest)
 
 ```bash
-NNOPT_DTYPE=fp16 ./scripts/build.sh        # Release + fp16: THE optimized binary. Always use this.
-```
-
-Variants you should rarely need:
-
-```bash
-NNOPT_DTYPE=fp32 ./scripts/build.sh         # fp32 binary (slow, A/B reference)
+./scripts/build.sh        # Release + fp16 (default): THE optimized binary. Always use this.
 ```
 
 > The NDK auto-discovery can pick the wrong toolchain; export it explicitly:
 > `export ANDROID_NDK="$HOME/Library/Android/sdk/ndk/android-ndk-r26d"`.
-> Before deploy, stage the CLBlast lib: `cp build/fp16/_deps/clblast-build/libclblast.so build/libclblast.so`.
+> CLBlast is statically linked into the binary — nothing extra to stage or deploy.
 
 ## Deploy & run
 
 ```bash
-NNOPT_DTYPE=fp16 ./scripts/deploy_android.sh        # push binary + libs + kernels + weights
+./scripts/deploy_android.sh        # push binary + libs + kernels + weights (fp16 default)
 
 # Generate speech (end-to-end, all on GPU). argv: <weights.bin> <meta.json> generate <in> <out> <n_frames> <noise_std> <token_ids>
 adb shell "cd /data/local/tmp/pocket_tts_inference && LD_LIBRARY_PATH=lib \
@@ -56,20 +50,33 @@ Env flags (perf/diagnostics, all default-off):
 
 ## Weights & voices
 
-Not in git. Convert + upload with the helper (needs `huggingface-cli login`; upstream is gated):
+The converted fp16 weights are **already published** on HuggingFace
+(`a8nova/adreno-llms-weights/pocket-tts`) — just **fetch** them, no conversion or gated
+access needed:
 
 ```bash
-python3 scripts/fetch_convert_push.py --out-dir /tmp/pocket_out \
-        --push-repo a8nova/adreno-llms-weights --repo-type model
+./scripts/fetch_weights.sh pocket-tts          # → weights/  (public mirror, no login)
 ```
 
-This produces `model.fp16.bin` (voice-agnostic), `model.fp16.meta.json`, `voices/<name>.fp16.bin`
-(per-voice `audio_prompt`), and copies the SentencePiece `tokenizer.model`.
+Published set (≈211 MB):
+- `model.fp16.bin` + `model.fp16.meta.json` — the English 6-layer model. The default
+  voice **alba** is baked in (single-voice works out of the box).
+- `tokenizer_vocab.bin` — SentencePiece unigram vocab (see `scripts/convert_tokenizer.py`).
+- `voices/<name>.fp16.bin` — the **8 selectable v1 voices** (alba, azelma, cosette, eponine,
+  fantine, javert, jean, marius), each a raw `audio_prompt` the runtime primes. Select one at
+  run time (`generate … <voice.fp16.bin>`, or the serve `@voice <path>` command).
+- NOT shipped: the v2/v3 voice sets. Their *pre-computed KV* was made by a different model
+  snapshot and is **silent** on `tts_b6369a24` (verified — the loader is correct; the data is
+  incompatible).
 
-## Edgi integration
+### Maintainer: regenerate + re-upload (gated source)
+Only needed to rebuild the published weights. `kyutai/pocket-tts` is GATED — `hf auth login`
+first and accept its terms, then:
 
-Registered as a TTS model (`task: speak`, `modality: tts`, `architecture: pocket-tts`) in
-`Edgi/app/src/main/assets/catalog.json` and `FakeEngine`'s supported set, alongside Kokoro and
-MMS-TTS. It surfaces in the Speak variant picker and runs through the generic `Engine.speak()`
-contract (text → 24 kHz `AudioPcm`). Update the catalog's `voices/`+`tokenizer.model` SHA-256s
-once the weights are uploaded to HuggingFace.
+```bash
+python3 scripts/download_pocket_src.py                              # raw model + voices + tokenizer
+python3 scripts/convert_voices.py --out-dir weights                # v1 audio_prompts → voices/
+python3 scripts/convert_tokenizer.py <tokenizer.model> weights/tokenizer_vocab.bin
+../../../scripts/upload_weights_to_hf.sh pocket-tts                 # push model + tokenizer + voices/
+```
+(`fetch_convert_push.py` is the older all-in-one converter; the split scripts above are current.)

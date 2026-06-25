@@ -3,6 +3,7 @@
 // generate loop → Mimi decode → 24kHz waveform. See .nnport/PORT_SPEC.md.
 #include "gpu_ops.h"
 #include <vector>
+#include <string>
 
 // Generate `n_frames` audio frames (1920 samples each). noise_std scales the
 // flow-matching Gaussian (0 ⇒ deterministic). Returns the concatenated fp32
@@ -13,7 +14,9 @@ std::vector<float> tts_generate(GpuOps& g, int n_frames, float noise_std,
                                 std::vector<float>* c_out = nullptr,            // collects [n_frames*1024]
                                 std::vector<float>* latent_out = nullptr,       // collects [n_frames*32]
                                 bool stop_on_eos = false,                       // serve: stop when eos logit fires
-                                float eos_threshold = 0.0f);                    // (n_frames is the MAX cap)
+                                float eos_threshold = 0.0f,                     // (n_frames is the MAX cap)
+                                const std::string& voice_path = "",             // v1 audio_prompt OR v3 KV file ("" = baked)
+                                bool voice_is_kv = false);                      // true ⇒ voice_path is a v3 KV cache
 
 // Decode a single latent [32] (normalized space) → 1920 fp32 samples. For
 // validating the Mimi decode path in isolation with a known-good latent.

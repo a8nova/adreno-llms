@@ -48,7 +48,7 @@ static void write_f32(const std::string& path, const std::vector<float>& v) {
 }
 
 int main(int argc, char** argv) {
-    // App entrypoint (Edgi ProcessEngine spawns `lib<key>.so --serve` from a workdir that
+    // App entrypoint (the host process spawns `lib<key>.so --serve` from a workdir that
     // holds weights/ + kernels/). Default the paths to cwd so no args are needed.
     std::string wbin, wmeta, op, inpath, outpath;
     if (argc >= 2 && std::string(argv[1]) == "--serve") {
@@ -198,7 +198,11 @@ int main(int argc, char** argv) {
                 if (c == std::string::npos) break; p = c + 1;
             }
         }
-        std::vector<float> wave = tts_generate(g, n_frames, noise_std, text_ids);
+        // optional: argv[9]=voice file, argv[10]="kv" (v3 KV) else v1 audio_prompt.
+        std::string vp = (argc > 9) ? argv[9] : "";
+        bool vkv = (argc > 10) && std::string(argv[10]) == "kv";
+        std::vector<float> wave = tts_generate(g, n_frames, noise_std, text_ids,
+                                               nullptr, nullptr, nullptr, false, 0.0f, vp, vkv);
         write_f32(outpath, wave);
         clFinish(ctx.queue());
         KernelProfiler::dump_summary();   // per-kernel GPU breakdown when NNOPT_PROFILE=1
@@ -229,6 +233,8 @@ int main(int argc, char** argv) {
         const int   kMaxFrames  = 180;      // ~14.4 s cap (KV CAP=512 headroom)
         const float kNoiseStd   = 0.6f;
         const float kEosThresh  = 0.0f;
+        std::string cur_voice = "";      // "" = baked voice; else a path
+        bool cur_voice_kv = false;       // true ⇒ v3 KV file, else v1 audio_prompt
         fprintf(stderr, "ready.\n"); fflush(stderr);
         std::string line;
         while (std::getline(std::cin, line)) {
@@ -237,9 +243,19 @@ int main(int argc, char** argv) {
             if (b == std::string::npos) continue;
             size_t e = line.find_last_not_of(" \t\r\n");
             std::string text = line.substr(b, e - b + 1);
+            // Voice select: "@voice <path> [kv]" — sets the voice for subsequent utterances.
+            if (text.rfind("@voice", 0) == 0) {
+                std::string rest = text.size() > 6 ? text.substr(7) : "";
+                size_t sp = rest.find(' ');
+                cur_voice = rest.substr(0, sp);
+                cur_voice_kv = (sp != std::string::npos) && rest.substr(sp + 1).find("kv") != std::string::npos;
+                fprintf(stderr, "voice set: '%s' kv=%d\n", cur_voice.c_str(), (int)cur_voice_kv); fflush(stderr);
+                continue;
+            }
             std::vector<int> ids = tok.encode(text);
             std::vector<float> wave = tts_generate(g, kMaxFrames, kNoiseStd, ids,
-                                                   nullptr, nullptr, nullptr, /*stop_on_eos=*/true, kEosThresh);
+                                                   nullptr, nullptr, nullptr, /*stop_on_eos=*/true, kEosThresh,
+                                                   cur_voice, cur_voice_kv);
             // fp32 [-1,1] → int16 LE PCM
             std::vector<int16_t> pcm(wave.size());
             for (size_t i = 0; i < wave.size(); ++i) {

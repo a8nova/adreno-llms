@@ -200,7 +200,8 @@ std::vector<float> tts_generate(GpuOps& g, int n_frames, float noise_std,
                                 const std::vector<int>& text_ids,
                                 const std::vector<float>* noise_seq,
                                 std::vector<float>* c_out, std::vector<float>* latent_out,
-                                bool stop_on_eos, float eos_threshold) {
+                                bool stop_on_eos, float eos_threshold,
+                                const std::string& voice_path, bool voice_is_kv) {
     const int CAP = 512;   // backbone KV capacity (prefill offset + decode frames); ~30s headroom
     cl_mem kc[6], vc[6];
     for (int i = 0; i < 6; ++i) { kc[i] = g.alloc((size_t)CAP * 1024); vc[i] = g.alloc((size_t)CAP * 1024); }
@@ -212,16 +213,16 @@ std::vector<float> tts_generate(GpuOps& g, int n_frames, float noise_std,
     //    `audio_prompt` is the 125-frame conditioning WITHOUT the BOS marker
     //    (cos(ap[0],bos_before_voice)=0.09), so prepend bos_before_voice — the real
     //    get_state_for_audio_prompt does `cat([bos_before_voice, conditioning])`.
-    std::vector<float> ap = g.weights().get_host_vec("audio_prompt");              // [125,1024]
-    int prompt_len = 1 + (int)(ap.size() / 1024);                                  // bos + 125 = 126
-    // The voice-prompt prime (T=126) processes the FIXED audio_prompt weight, so its KV
-    // cache is identical every generation. Compute once, persist to weights/voice_kv.bin,
-    // and LOAD it on later runs (skips ~1.3 s of prefill). Raw fp16 bytes.
+    // Voice selection: (a) v3 KV file → load the pre-computed cache directly (NO bos,
+    // offset=npos); (b) v1 audio_prompt (custom file or the baked one) → prime bos+N frames.
     const size_t es = sizeof(nnopt_storage_t);
-    const size_t kvbytes = (size_t)prompt_len * 1024 * es;
-    const char* kvpath = "weights/voice_kv.bin";
-    FILE* kf = fopen(kvpath, "rb");
-    if (kf) {
+    int prompt_len;
+    if (voice_is_kv && !voice_path.empty()) {
+        FILE* kf = fopen(voice_path.c_str(), "rb");
+        if (!kf) { NNOPT_ERROR_FMT("voice KV '%s' not found", voice_path.c_str()); return {}; }
+        fseek(kf, 0, SEEK_END); long fsz = ftell(kf); fseek(kf, 0, SEEK_SET);
+        prompt_len = (int)(fsz / (6L * 2 * 1024 * (long)es));   // 6 layers × [K,V] × 1024 × fp16
+        const size_t kvbytes = (size_t)prompt_len * 1024 * es;
         std::vector<unsigned char> buf(kvbytes);
         for (int i = 0; i < 6; ++i) {
             if (fread(buf.data(), 1, kvbytes, kf) == kvbytes)
@@ -230,32 +231,61 @@ std::vector<float> tts_generate(GpuOps& g, int n_frames, float noise_std,
                 clEnqueueWriteBuffer(g.q(), vc[i], CL_FALSE, 0, kvbytes, buf.data(), 0, nullptr, nullptr);
         }
         fclose(kf);
-        fprintf(stderr, "loaded cached voice KV (%d frames) — skipped prime\n", prompt_len);
+        fprintf(stderr, "loaded v3 voice KV (%d pos, no bos) from %s\n", prompt_len, voice_path.c_str());
     } else {
-        std::vector<float> bbv = g.weights().get_host_vec("flow_lm.bos_before_voice"); // [1024]
-        std::vector<float> prime; prime.reserve(bbv.size() + ap.size());
-        prime.insert(prime.end(), bbv.begin(), bbv.end());
-        prime.insert(prime.end(), ap.begin(), ap.end());
-        cl_mem apb = g.upload(prime);
-        cl_mem pr = backbone_run(g, apb, prompt_len, 0, kc, vc);
-        g.release(pr); g.release(apb);
-        clFinish(g.q());
-        FILE* wf = fopen(kvpath, "wb");
-        if (wf) {
+        std::vector<float> ap;
+        if (voice_path.empty()) {
+            ap = g.weights().get_host_vec("audio_prompt");                          // baked voice
+        } else {
+            FILE* vf = fopen(voice_path.c_str(), "rb");                             // custom v1 voice (fp16 [N,1024])
+            if (!vf) { NNOPT_ERROR_FMT("voice '%s' not found", voice_path.c_str()); return {}; }
+            fseek(vf, 0, SEEK_END); long fsz = ftell(vf); fseek(vf, 0, SEEK_SET);
+            size_t n = (size_t)fsz / sizeof(uint16_t);
+            std::vector<uint16_t> raw(n); (void)fread(raw.data(), sizeof(uint16_t), n, vf); fclose(vf);
+            ap.resize(n); for (size_t i = 0; i < n; ++i) ap[i] = nnopt_f16_to_f32(raw[i]);
+        }
+        prompt_len = 1 + (int)(ap.size() / 1024);                                   // bos + N
+        const size_t kvbytes = (size_t)prompt_len * 1024 * es;
+        const char* kvpath = "weights/voice_kv.bin";                                // cache the BAKED voice only
+        FILE* kf = voice_path.empty() ? fopen(kvpath, "rb") : nullptr;
+        if (kf) {
             std::vector<unsigned char> buf(kvbytes);
             for (int i = 0; i < 6; ++i) {
-                clEnqueueReadBuffer(g.q(), kc[i], CL_TRUE, 0, kvbytes, buf.data(), 0, nullptr, nullptr);
-                fwrite(buf.data(), 1, kvbytes, wf);
-                clEnqueueReadBuffer(g.q(), vc[i], CL_TRUE, 0, kvbytes, buf.data(), 0, nullptr, nullptr);
-                fwrite(buf.data(), 1, kvbytes, wf);
+                if (fread(buf.data(), 1, kvbytes, kf) == kvbytes)
+                    clEnqueueWriteBuffer(g.q(), kc[i], CL_FALSE, 0, kvbytes, buf.data(), 0, nullptr, nullptr);
+                if (fread(buf.data(), 1, kvbytes, kf) == kvbytes)
+                    clEnqueueWriteBuffer(g.q(), vc[i], CL_FALSE, 0, kvbytes, buf.data(), 0, nullptr, nullptr);
             }
-            fclose(wf);
-            fprintf(stderr, "computed + cached voice KV → %s\n", kvpath);
+            fclose(kf);
+            fprintf(stderr, "loaded cached voice KV (%d frames) — skipped prime\n", prompt_len);
+        } else {
+            std::vector<float> bbv = g.weights().get_host_vec("flow_lm.bos_before_voice");
+            std::vector<float> prime; prime.reserve(bbv.size() + ap.size());
+            prime.insert(prime.end(), bbv.begin(), bbv.end());
+            prime.insert(prime.end(), ap.begin(), ap.end());
+            cl_mem apb = g.upload(prime);
+            cl_mem pr = backbone_run(g, apb, prompt_len, 0, kc, vc);
+            g.release(pr); g.release(apb);
+            clFinish(g.q());
+            if (voice_path.empty()) {
+                FILE* wf = fopen(kvpath, "wb");
+                if (wf) {
+                    std::vector<unsigned char> buf(kvbytes);
+                    for (int i = 0; i < 6; ++i) {
+                        clEnqueueReadBuffer(g.q(), kc[i], CL_TRUE, 0, kvbytes, buf.data(), 0, nullptr, nullptr);
+                        fwrite(buf.data(), 1, kvbytes, wf);
+                        clEnqueueReadBuffer(g.q(), vc[i], CL_TRUE, 0, kvbytes, buf.data(), 0, nullptr, nullptr);
+                        fwrite(buf.data(), 1, kvbytes, wf);
+                    }
+                    fclose(wf);
+                    fprintf(stderr, "computed + cached voice KV → %s\n", kvpath);
+                }
+            }
         }
     }
     int offset = prompt_len;
     double _prime_host = std::chrono::duration<double, std::milli>(_clk::now() - _t_prefill).count();
-    fprintf(stderr, "primed KV with %d frames (bos_before_voice + %d conditioning)\n", prompt_len, (int)(ap.size()/1024));
+    fprintf(stderr, "voice KV ready: %d positions\n", prompt_len);
 
     // 2) prime text tokens.
     auto _t_text = _clk::now();
@@ -445,8 +475,8 @@ std::vector<float> tts_generate(GpuOps& g, int n_frames, float noise_std,
     fprintf(stderr, "PHASE decode_total_ms: %.1f  (%d frames)\n", _decode_ms, gen_frames);
     fprintf(stderr, "PHASE steady_per_frame_ms: %.1f  (decode/n_frames)\n", _decode_ms / (gen_frames>0?gen_frames:1));
     fprintf(stderr, "PHASE audio_s: %.3f  compute_s(prefill+decode): %.3f  RTF: %.4f  (%.1fx slower than real-time)\n",
-            _audio_s, _compute_s, _audio_s / _compute_s, _compute_s / _audio_s);
-    // App-parseable perf (Edgi ProcessEngine: PerfAccumulator `*_per_sec:` lines + `rtf=` regex →
+            _audio_s, _compute_s, _compute_s / _audio_s, _compute_s / _audio_s);
+    // App-parseable perf (host process: PerfAccumulator `*_per_sec:` lines + `rtf=` regex →
     // the same Perf telemetry kokoro/mms/musicgen surface). Audio "tokens" = 80 ms Mimi frames.
     double _decode_s = _decode_ms / 1000.0, _prefill_s = _prefill_ms / 1000.0;
     double _rtf = _audio_s > 0 ? _compute_s / _audio_s : 0.0;   // synth/audio (>1 = slower than real-time)

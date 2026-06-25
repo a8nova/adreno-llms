@@ -36,8 +36,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Dtype: NNOPT_DTYPE=fp16 builds the half-precision binary into build/fp16/
-# with -DNNOPT_DTYPE=fp16. Default fp32 uses build/.
-NNOPT_DTYPE="${NNOPT_DTYPE:-fp32}"
+# with -DNNOPT_DTYPE=fp16. NNOPT_DTYPE=fp32 uses build/ (A/B reference).
+NNOPT_DTYPE="${NNOPT_DTYPE:-fp16}"  # fp16 = the optimized binary; fastest is the default
 case "$NNOPT_DTYPE" in
     fp16) BUILD_DIR="build/fp16"; CMAKE_DTYPE_ARG="-DNNOPT_DTYPE=fp16" ;;
     fp32|"") BUILD_DIR="build"; CMAKE_DTYPE_ARG="-DNNOPT_DTYPE=fp32"; NNOPT_DTYPE="fp32" ;;
