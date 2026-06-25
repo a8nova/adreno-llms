@@ -1,0 +1,311 @@
+{
+  "_produced_by": "_run_reference.py:llm_inference_call",
+  "nodes": [
+    {
+      "order": 0,
+      "dump_name": "flow_lm_conditioner_embed",
+      "module_path": "flow_lm_conditioner_embed",
+      "op": "Embedding"
+    },
+    {
+      "order": 1,
+      "dump_name": "flow_lm_conditioner",
+      "module_path": "flow_lm_conditioner",
+      "op": "LUTConditioner"
+    },
+    {
+      "order": 2,
+      "dump_name": "flow_lm_flow_net_cond_embed",
+      "module_path": "flow_lm_flow_net_cond_embed",
+      "op": "Linear"
+    },
+    {
+      "order": 3,
+      "dump_name": "flow_lm_flow_net_final_layer_adaLN_modulation",
+      "module_path": "flow_lm_flow_net_final_layer_adaLN_modulation",
+      "op": "Sequential"
+    },
+    {
+      "order": 4,
+      "dump_name": "flow_lm_flow_net_final_layer_linear",
+      "module_path": "flow_lm_flow_net_final_layer_linear",
+      "op": "Linear"
+    },
+    {
+      "order": 5,
+      "dump_name": "flow_lm_flow_net_final_layer_norm_final",
+      "module_path": "flow_lm_flow_net_final_layer_norm_final",
+      "op": "LayerNorm"
+    },
+    {
+      "order": 6,
+      "dump_name": "flow_lm_flow_net_final_layer",
+      "module_path": "flow_lm_flow_net_final_layer",
+      "op": "FinalLayer"
+    },
+    {
+      "order": 7,
+      "dump_name": "flow_lm_flow_net_input_proj",
+      "module_path": "flow_lm_flow_net_input_proj",
+      "op": "Linear"
+    },
+    {
+      "order": 8,
+      "dump_name": "flow_lm_flow_net",
+      "module_path": "flow_lm_flow_net",
+      "op": "SimpleMLPAdaLN"
+    },
+    {
+      "order": 9,
+      "dump_name": "flow_lm_flow_net_res_blocks_0",
+      "module_path": "flow_lm_flow_net_res_blocks_0",
+      "op": "ResBlock"
+    },
+    {
+      "order": 10,
+      "dump_name": "flow_lm_flow_net_res_blocks_1",
+      "module_path": "flow_lm_flow_net_res_blocks_1",
+      "op": "ResBlock"
+    },
+    {
+      "order": 11,
+      "dump_name": "flow_lm_flow_net_res_blocks_2",
+      "module_path": "flow_lm_flow_net_res_blocks_2",
+      "op": "ResBlock"
+    },
+    {
+      "order": 12,
+      "dump_name": "flow_lm_flow_net_res_blocks_3",
+      "module_path": "flow_lm_flow_net_res_blocks_3",
+      "op": "ResBlock"
+    },
+    {
+      "order": 13,
+      "dump_name": "flow_lm_flow_net_res_blocks_4",
+      "module_path": "flow_lm_flow_net_res_blocks_4",
+      "op": "ResBlock"
+    },
+    {
+      "order": 14,
+      "dump_name": "flow_lm_flow_net_res_blocks_5",
+      "module_path": "flow_lm_flow_net_res_blocks_5",
+      "op": "ResBlock"
+    },
+    {
+      "order": 15,
+      "dump_name": "flow_lm_flow_net_time_embed_0",
+      "module_path": "flow_lm_flow_net_time_embed_0",
+      "op": "TimestepEmbedder"
+    },
+    {
+      "order": 16,
+      "dump_name": "flow_lm_flow_net_time_embed_1",
+      "module_path": "flow_lm_flow_net_time_embed_1",
+      "op": "TimestepEmbedder"
+    },
+    {
+      "order": 17,
+      "dump_name": "flow_lm_input_linear",
+      "module_path": "flow_lm_input_linear",
+      "op": "Linear"
+    },
+    {
+      "order": 18,
+      "dump_name": "flow_lm_out_eos",
+      "module_path": "flow_lm_out_eos",
+      "op": "Linear"
+    },
+    {
+      "order": 19,
+      "dump_name": "flow_lm_out_norm",
+      "module_path": "flow_lm_out_norm",
+      "op": "LayerNorm"
+    },
+    {
+      "order": 20,
+      "dump_name": "flow_lm",
+      "module_path": "flow_lm",
+      "op": "FlowLMModel"
+    },
+    {
+      "order": 21,
+      "dump_name": "flow_lm_transformer_layers_0",
+      "module_path": "flow_lm_transformer_layers_0",
+      "op": "StreamingTransformerLayer"
+    },
+    {
+      "order": 22,
+      "dump_name": "flow_lm_transformer_layers_1",
+      "module_path": "flow_lm_transformer_layers_1",
+      "op": "StreamingTransformerLayer"
+    },
+    {
+      "order": 23,
+      "dump_name": "flow_lm_transformer_layers_2",
+      "module_path": "flow_lm_transformer_layers_2",
+      "op": "StreamingTransformerLayer"
+    },
+    {
+      "order": 24,
+      "dump_name": "flow_lm_transformer_layers_3",
+      "module_path": "flow_lm_transformer_layers_3",
+      "op": "StreamingTransformerLayer"
+    },
+    {
+      "order": 25,
+      "dump_name": "flow_lm_transformer_layers_4",
+      "module_path": "flow_lm_transformer_layers_4",
+      "op": "StreamingTransformerLayer"
+    },
+    {
+      "order": 26,
+      "dump_name": "flow_lm_transformer_layers_5",
+      "module_path": "flow_lm_transformer_layers_5",
+      "op": "StreamingTransformerLayer"
+    },
+    {
+      "order": 27,
+      "dump_name": "flow_lm_transformer",
+      "module_path": "flow_lm_transformer",
+      "op": "StreamingTransformer"
+    },
+    {
+      "order": 28,
+      "dump_name": "flow_lm_transformer_rope",
+      "module_path": "flow_lm_transformer_rope",
+      "op": "RotaryEmbedding"
+    },
+    {
+      "order": 29,
+      "dump_name": "mimi_decoder_model_0",
+      "module_path": "mimi_decoder_model_0",
+      "op": "StreamingConv1d"
+    },
+    {
+      "order": 30,
+      "dump_name": "mimi_decoder_model_10",
+      "module_path": "mimi_decoder_model_10",
+      "op": "ELU"
+    },
+    {
+      "order": 31,
+      "dump_name": "mimi_decoder_model_11",
+      "module_path": "mimi_decoder_model_11",
+      "op": "StreamingConv1d"
+    },
+    {
+      "order": 32,
+      "dump_name": "mimi_decoder_model_1",
+      "module_path": "mimi_decoder_model_1",
+      "op": "ELU"
+    },
+    {
+      "order": 33,
+      "dump_name": "mimi_decoder_model_2",
+      "module_path": "mimi_decoder_model_2",
+      "op": "StreamingConvTranspose1d"
+    },
+    {
+      "order": 34,
+      "dump_name": "mimi_decoder_model_3",
+      "module_path": "mimi_decoder_model_3",
+      "op": "SEANetResnetBlock"
+    },
+    {
+      "order": 35,
+      "dump_name": "mimi_decoder_model_4",
+      "module_path": "mimi_decoder_model_4",
+      "op": "ELU"
+    },
+    {
+      "order": 36,
+      "dump_name": "mimi_decoder_model_5",
+      "module_path": "mimi_decoder_model_5",
+      "op": "StreamingConvTranspose1d"
+    },
+    {
+      "order": 37,
+      "dump_name": "mimi_decoder_model_6",
+      "module_path": "mimi_decoder_model_6",
+      "op": "SEANetResnetBlock"
+    },
+    {
+      "order": 38,
+      "dump_name": "mimi_decoder_model_7",
+      "module_path": "mimi_decoder_model_7",
+      "op": "ELU"
+    },
+    {
+      "order": 39,
+      "dump_name": "mimi_decoder_model_8",
+      "module_path": "mimi_decoder_model_8",
+      "op": "StreamingConvTranspose1d"
+    },
+    {
+      "order": 40,
+      "dump_name": "mimi_decoder_model_9",
+      "module_path": "mimi_decoder_model_9",
+      "op": "SEANetResnetBlock"
+    },
+    {
+      "order": 41,
+      "dump_name": "mimi_decoder",
+      "module_path": "mimi_decoder",
+      "op": "SEANetDecoder"
+    },
+    {
+      "order": 42,
+      "dump_name": "mimi_decoder_transformer",
+      "module_path": "mimi_decoder_transformer",
+      "op": "ProjectedTransformer"
+    },
+    {
+      "order": 43,
+      "dump_name": "mimi_decoder_transformer_output_projs_0",
+      "module_path": "mimi_decoder_transformer_output_projs_0",
+      "op": "Identity"
+    },
+    {
+      "order": 44,
+      "dump_name": "mimi_decoder_transformer_transformer",
+      "module_path": "mimi_decoder_transformer_transformer",
+      "op": "StreamingTransformer"
+    },
+    {
+      "order": 45,
+      "dump_name": "mimi_decoder_transformer_transformer_rope",
+      "module_path": "mimi_decoder_transformer_transformer_rope",
+      "op": "RotaryEmbedding"
+    },
+    {
+      "order": 46,
+      "dump_name": "mimi_quantizer",
+      "module_path": "mimi_quantizer",
+      "op": "DummyQuantizer"
+    },
+    {
+      "order": 47,
+      "dump_name": "mimi_quantizer_output_proj",
+      "module_path": "mimi_quantizer_output_proj",
+      "op": "Conv1d"
+    },
+    {
+      "order": 48,
+      "dump_name": "mimi_upsample_convtr_convtr",
+      "module_path": "mimi_upsample_convtr_convtr",
+      "op": "ConvTranspose1d"
+    },
+    {
+      "order": 49,
+      "dump_name": "mimi_upsample_convtr",
+      "module_path": "mimi_upsample_convtr",
+      "op": "StreamingConvTranspose1d"
+    },
+    {
+      "order": 50,
+      "dump_name": "mimi_upsample",
+      "module_path": "mimi_upsample",
+      "op": "ConvTrUpsample1d"
+    }
+  ]
+}

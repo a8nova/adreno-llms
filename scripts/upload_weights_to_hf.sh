@@ -29,7 +29,7 @@
 set -euo pipefail
 
 HF_REPO="${HF_REPO:-a8nova/adreno-llms-weights}"
-MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m musicgen-small seamless-m4t-unity-small openelm-270m openvoice-v2)
+MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m pocket-tts musicgen-small seamless-m4t-unity-small openelm-270m openvoice-v2)
 WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
 # OpenELM weights are NOT redistributable (Apple ASCL). For openelm-270m we
 # upload only the 3 small files (meta + tokenizer); fetch_openelm_weights.sh
@@ -86,8 +86,8 @@ for m in "${MODELS[@]}"; do
     files=("${OPENELM_WEIGHT_FILES[@]}")
   elif [ "$m" = "kokoro-82m" ] || [ "$m" = "openvoice-v2" ]; then
     files=("${KOKORO_WEIGHT_FILES[@]}")
-  elif [ "$m" = "whisper-tiny" ] || [ "$m" = "musicgen-small" ] || [ "$m" = "seamless-m4t-unity-small" ]; then
-    files=("${WHISPER_WEIGHT_FILES[@]}")
+  elif [ "$m" = "whisper-tiny" ] || [ "$m" = "musicgen-small" ] || [ "$m" = "seamless-m4t-unity-small" ] || [ "$m" = "pocket-tts" ]; then
+    files=("${WHISPER_WEIGHT_FILES[@]}")   # model.fp16.bin + meta + tokenizer_vocab.bin (voice baked in)
   else
     files=("${WEIGHT_FILES[@]}")
   fi

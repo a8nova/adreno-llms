@@ -39,7 +39,7 @@ HF_BRANCH="${HF_BRANCH:-main}"
 HF_BASE="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}"
 
 
-MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m musicgen-small seamless-m4t-unity-small openvoice-v2)
+MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m pocket-tts musicgen-small seamless-m4t-unity-small openvoice-v2)
 BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
 # whisper-tiny (ASR), musicgen-small (text→music) and seamless-m4t-unity-small
 # (speech translation) load tokenizer_vocab.bin directly and have no
@@ -121,8 +121,8 @@ file_list_for() {
   local files
   if [ "${model}" = "kokoro-82m" ] || [ "${model}" = "openvoice-v2" ]; then
     files=("${KOKORO_BASE_FILES[@]}")
-  elif [ "${model}" = "whisper-tiny" ] || [ "${model}" = "musicgen-small" ] || [ "${model}" = "seamless-m4t-unity-small" ]; then
-    files=("${WHISPER_BASE_FILES[@]}")
+  elif [ "${model}" = "whisper-tiny" ] || [ "${model}" = "musicgen-small" ] || [ "${model}" = "seamless-m4t-unity-small" ] || [ "${model}" = "pocket-tts" ]; then
+    files=("${WHISPER_BASE_FILES[@]}")   # model.fp16.bin + meta + tokenizer_vocab.bin (voice baked in)
   else
     files=("${BASE_FILES[@]}")
   fi
