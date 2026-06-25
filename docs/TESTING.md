@@ -84,10 +84,12 @@ the model build toolchain installed.
 - `adb` on `PATH`, the device authorized (`adb devices` shows it as `device`)
 - Android NDK r26d (or set `ANDROID_NDK`); `python3`; the per-model build deps in
   `~/.nnopt/deps/opencl/...` (same as local builds)
-- Model **weights** available to `deploy_android.sh`. Weights are large and not in git;
-  either pre-stage them in each `src/models/<key>/weights/` on the runner, or rely on
-  the device keeping `weights/` across runs (`deploy_android.sh` preserves and
-  incrementally syncs device `weights/`). Decide this before enabling deploy in CI.
+- Model **weights** are fetched automatically — the workflow runs
+  `scripts/fetch_weights.sh <model>` (public HF mirror, no auth, resumes/skips existing),
+  so nothing to pre-stage. On a self-hosted runner the `_work` checkout persists, so only
+  the first run per model downloads. Two gaps: `mms-tts` isn't on the mirror yet (upload
+  via `upload_weights_to_hf.sh`), and `openelm-270m` uses `fetch_openelm_weights.sh`
+  (Apple license) — but openelm is unwired/skipped anyway.
 
 **Register the runner (GitHub → repo Settings → Actions → Runners → New self-hosted runner)**
 

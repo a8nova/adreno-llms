@@ -44,6 +44,13 @@ jobs:
       - name: Confirm a device is attached
         run: adb get-state
 
+      - name: Fetch weights for ${{ matrix.model }}
+        # Pull real weights from the public HF mirror (no auth, resumes/skips existing).
+        # Best-effort: models not on the mirror, or ones the test step will skip anyway
+        # (unwired modalities), must not fail the job here — a wired model missing its
+        # weights surfaces clearly when the test step's deploy fails.
+        run: ./scripts/fetch_weights.sh "${{ matrix.model }}" || echo "::warning::weights fetch failed/unsupported for ${{ matrix.model }} — test step will skip or fail at deploy"
+
       - name: Reference test ${{ matrix.model }}
         run: |
           set +e
