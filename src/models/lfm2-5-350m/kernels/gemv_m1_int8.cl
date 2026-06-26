@@ -201,6 +201,59 @@ void gemv_m1_k4608_no4_img_int8(
   }
 }
 
+// ─── K=2560 (LFM2.5-230M w2 down-proj), image int8 W, 4 outputs per WG. WG=64. ───
+// The 230M's intermediate_size is 2560 (block_auto_adjust_ff_dim=false), so its
+// down-projection reads K=2560 instead of the 350M's 4608. Same structure as
+// gemv_m1_k4608_no4_img_int8, just 10 wave-stride vec4 iters (10*256 = 2560).
+__kernel
+__attribute__((reqd_work_group_size(64, 1, 1)))
+void gemv_m1_k2560_no4_img_int8(
+    __global const half* x,
+    __read_only image2d_t W_img,
+    __global const half* scales,
+    __global half* out,
+    const int N) {
+  const int n_base = (int)get_group_id(0) * 4;
+  const int tid    = (int)get_local_id(0);
+  if (n_base >= N) return;
+
+  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+
+  #pragma unroll
+  for (int j = 0; j < 10; ++j) {
+    const int x_off = j * (64 * 4) + tid * 4;
+    const int pix   = j * 64 + tid;
+    float4 xv = vload_half4(0, x + x_off);
+    float4 w0 = convert_float4(read_imagei(W_img, kImgSamplerI8, (int2)(pix, n_base + 0)));
+    float4 w1 = convert_float4(read_imagei(W_img, kImgSamplerI8, (int2)(pix, n_base + 1)));
+    float4 w2 = convert_float4(read_imagei(W_img, kImgSamplerI8, (int2)(pix, n_base + 2)));
+    float4 w3 = convert_float4(read_imagei(W_img, kImgSamplerI8, (int2)(pix, n_base + 3)));
+    acc0 += dot(xv, w0); acc1 += dot(xv, w1);
+    acc2 += dot(xv, w2); acc3 += dot(xv, w3);
+  }
+  __local float partial[4][64];
+  partial[0][tid] = acc0; partial[1][tid] = acc1;
+  partial[2][tid] = acc2; partial[3][tid] = acc3;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int s = 32; s > 0; s >>= 1) {
+    if (tid < s) {
+      partial[0][tid] += partial[0][tid + s]; partial[1][tid] += partial[1][tid + s];
+      partial[2][tid] += partial[2][tid + s]; partial[3][tid] += partial[3][tid + s];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (tid == 0) {
+    const float s0 = vload_half(n_base + 0, scales);
+    const float s1 = vload_half(n_base + 1, scales);
+    const float s2 = vload_half(n_base + 2, scales);
+    const float s3 = vload_half(n_base + 3, scales);
+    vstore_half(partial[0][0] * s0, 0, out + n_base + 0);
+    vstore_half(partial[1][0] * s1, 0, out + n_base + 1);
+    vstore_half(partial[2][0] * s2, 0, out + n_base + 2);
+    vstore_half(partial[3][0] * s3, 0, out + n_base + 3);
+  }
+}
+
 // ─── K=4608 (w2 down-proj), image int8 W, 8 outputs per WG. WG=64. ───
 // Same outer geometry as no4 but with 8 output rows per WG, doubling per-thread
 // arithmetic density. 8 fp32 accumulators + 8 int4 reads per K-iter. Eligibility:

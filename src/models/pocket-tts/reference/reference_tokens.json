@@ -1,0 +1,23 @@
+{
+  "prompt": "The teacher worked at the ",
+  "max_new_tokens": 7,
+  "model_id": "kyutai/pocket-tts",
+  "produced_by": "_run_reference.py",
+  "produced_via": "llm_inference_call",
+  "inference_call": "model.generate_audio(model.get_state_for_audio_prompt('marius'), prompt)",
+  "result_descriptor": {
+    "type": "Tensor",
+    "shape": [
+      44160
+    ],
+    "dtype": "torch.float32"
+  },
+  "input_ids": [
+    0
+  ],
+  "generated_ids": [
+    0
+  ],
+  "generated_text": "",
+  "reference_text": ""
+}

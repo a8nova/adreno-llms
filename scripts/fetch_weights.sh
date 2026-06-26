@@ -39,7 +39,7 @@ HF_BRANCH="${HF_BRANCH:-main}"
 HF_BASE="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}"
 
 
-MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m musicgen-small seamless-m4t-unity-small openvoice-v2)
+MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m smolvlm-256m-instruct mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m pocket-tts musicgen-small seamless-m4t-unity-small openvoice-v2)
 BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
 # whisper-tiny (ASR), musicgen-small (text→music) and seamless-m4t-unity-small
 # (speech translation) load tokenizer_vocab.bin directly and have no
@@ -48,6 +48,10 @@ WHISPER_BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer_vocab.bin)
 # kokoro-82m (TTS) phonemizes via espeak (assets) and openvoice-v2 (voice
 # cloning) is audio-to-audio — neither needs a tokenizer, just model + meta.
 KOKORO_BASE_FILES=(model.fp16.bin model.fp16.meta.json)
+# pocket-tts (TTS): model + tokenizer_vocab + the 8 selectable v1 voices (raw audio_prompt).
+POCKET_BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer_vocab.bin \
+  voices/alba.fp16.bin voices/azelma.fp16.bin voices/cosette.fp16.bin voices/eponine.fp16.bin \
+  voices/fantine.fp16.bin voices/javert.fp16.bin voices/jean.fp16.bin voices/marius.fp16.bin)
 
 # Which models currently have which quant variants published on HF. Update when
 # new quant bundles are uploaded.
@@ -121,8 +125,10 @@ file_list_for() {
   local files
   if [ "${model}" = "kokoro-82m" ] || [ "${model}" = "openvoice-v2" ]; then
     files=("${KOKORO_BASE_FILES[@]}")
+  elif [ "${model}" = "pocket-tts" ]; then
+    files=("${POCKET_BASE_FILES[@]}")    # model + meta + tokenizer_vocab + 8 v1 voices
   elif [ "${model}" = "whisper-tiny" ] || [ "${model}" = "musicgen-small" ] || [ "${model}" = "seamless-m4t-unity-small" ]; then
-    files=("${WHISPER_BASE_FILES[@]}")
+    files=("${WHISPER_BASE_FILES[@]}")   # model.fp16.bin + meta + tokenizer_vocab.bin
   else
     files=("${BASE_FILES[@]}")
   fi
@@ -167,6 +173,7 @@ fetch_one() {
   echo ">>> ${model} (--quant ${QUANT})"
   while IFS= read -r f; do
     local dest="${weights_dir}/${f}"
+    mkdir -p "$(dirname "${dest}")"          # files may live in a subdir (e.g. voices/<name>.fp16.bin)
     local url="${HF_BASE}/$(hf_subdir_for "${model}")/${f}"
     echo "    ${f}"
     curl --location --continue-at - --fail-with-body --progress-bar \

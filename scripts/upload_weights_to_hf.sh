@@ -29,7 +29,9 @@
 set -euo pipefail
 
 HF_REPO="${HF_REPO:-a8nova/adreno-llms-weights}"
-MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m musicgen-small seamless-m4t-unity-small openelm-270m openvoice-v2)
+MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m pocket-tts musicgen-small seamless-m4t-unity-small openelm-270m openvoice-v2)
+# Push only the model(s) named as args (e.g. `upload_weights_to_hf.sh pocket-tts`); default = all.
+[ $# -ge 1 ] && MODELS=("$@")
 WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
 # OpenELM weights are NOT redistributable (Apple ASCL). For openelm-270m we
 # upload only the 3 small files (meta + tokenizer); fetch_openelm_weights.sh
@@ -44,6 +46,12 @@ WHISPER_WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json tokenizer_vocab.bin)
 # openvoice-v2 (voice cloning) is audio-to-audio — neither needs a tokenizer,
 # just model + meta.
 KOKORO_WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json)
+# pocket-tts (TTS): model + tokenizer_vocab + the 8 selectable v1 voices (raw audio_prompt
+# the runtime primes). The v3 voices are NOT shipped — their pre-computed KV was made by a
+# different model snapshot and is silent on tts_b6369a24 (verified).
+POCKET_WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json tokenizer_vocab.bin \
+  voices/alba.fp16.bin voices/azelma.fp16.bin voices/cosette.fp16.bin voices/eponine.fp16.bin \
+  voices/fantine.fp16.bin voices/javert.fp16.bin voices/jean.fp16.bin voices/marius.fp16.bin)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -86,8 +94,10 @@ for m in "${MODELS[@]}"; do
     files=("${OPENELM_WEIGHT_FILES[@]}")
   elif [ "$m" = "kokoro-82m" ] || [ "$m" = "openvoice-v2" ]; then
     files=("${KOKORO_WEIGHT_FILES[@]}")
+  elif [ "$m" = "pocket-tts" ]; then
+    files=("${POCKET_WEIGHT_FILES[@]}")     # model + meta + tokenizer_vocab + 8 v1 voices
   elif [ "$m" = "whisper-tiny" ] || [ "$m" = "musicgen-small" ] || [ "$m" = "seamless-m4t-unity-small" ]; then
-    files=("${WHISPER_WEIGHT_FILES[@]}")
+    files=("${WHISPER_WEIGHT_FILES[@]}")   # model.fp16.bin + meta + tokenizer_vocab.bin
   else
     files=("${WEIGHT_FILES[@]}")
   fi
@@ -135,6 +145,12 @@ for m in "${MODELS[@]}"; do
   exclude_args=( --exclude ".gitkeep" )
   if [ "$m" = "openelm-270m" ]; then
     exclude_args+=( --exclude "model.fp16.bin" --exclude "model.bin" )
+  fi
+  if [ "$m" = "pocket-tts" ]; then
+    # ship only fp16 model + tokenizer + 8 v1 voices; drop fp32 model, fp32 meta,
+    # the cached voice_kv, and voices_v3/ (incompatible KV — silent on our model).
+    exclude_args+=( --exclude "model.bin" --exclude "model.meta.json" \
+                    --exclude "voice_kv.bin" --exclude "voices_v3/*" )
   fi
   "$HF" upload "$HF_REPO" "$src_dir" "$(hf_subdir_for "$m")" "${exclude_args[@]}"
 done

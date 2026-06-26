@@ -170,6 +170,7 @@ static cl_kernel  s_gemv_m1_k1024_no4_img_int8   = nullptr;
 static cl_kernel  s_gemv_m1_k1024_no8_img_int8   = nullptr;
 static cl_kernel  s_gemv_m1_k4608_no4_img_int8   = nullptr;
 static cl_kernel  s_gemv_m1_k4608_no8_img_int8   = nullptr;
+static cl_kernel  s_gemv_m1_k2560_no4_img_int8   = nullptr;  // LFM2.5-230M w2 (K=2560)
 
 // Block-32 symmetric Q4 image-path variants (kernels/gemv_m1_q4.cl). Same
 // dispatch geometry as int8 but the W reads come back as uint4 (RGBA UINT8)
@@ -179,6 +180,7 @@ static cl_program s_gemv_m1_q4_prog              = nullptr;
 static cl_kernel  s_gemv_m1_k1024_no4_img_q4     = nullptr;
 static cl_kernel  s_gemv_m1_k1024_no8_img_q4     = nullptr;
 static cl_kernel  s_gemv_m1_k4608_no4_img_q4     = nullptr;
+static cl_kernel  s_gemv_m1_k2560_no4_img_q4     = nullptr;  // LFM2.5-230M w2 (K=2560)
 
 // Per-weight int8 metadata. Keyed by the int8 cl_mem buffer that the layer
 // passes into pytorch_linear() as W. Holds:
@@ -343,6 +345,8 @@ static bool ensure_gemv_m1_int8_program(cl_command_queue queue) {
     if (err != CL_SUCCESS) { s_gemv_m1_k4608_no4_img_int8 = nullptr; }
     s_gemv_m1_k4608_no8_img_int8 = clCreateKernel(s_gemv_m1_int8_prog, "gemv_m1_k4608_no8_img_int8", &err);
     if (err != CL_SUCCESS) { s_gemv_m1_k4608_no8_img_int8 = nullptr; }
+    s_gemv_m1_k2560_no4_img_int8 = clCreateKernel(s_gemv_m1_int8_prog, "gemv_m1_k2560_no4_img_int8", &err);
+    if (err != CL_SUCCESS) { s_gemv_m1_k2560_no4_img_int8 = nullptr; }
     return true;
 }
 
@@ -472,6 +476,9 @@ static bool run_gemv_m1_image_int8(cl_command_queue queue, int N, int K, cl_mem 
         // Stick with no4 here. K=4608 was already at 85% of texture ceiling
         // per Razr 2020 BENCHMARK — there's no room to extract via wider tiles.
         if (K == 4608 &&                   (Nlocal % 4) == 0 && s_gemv_m1_k4608_no4_img_int8) return {s_gemv_m1_k4608_no4_img_int8, 4};
+        // K=2560 is the LFM2.5-230M w2 down-proj (intermediate_size=2560, no
+        // auto-adjust). Same no4 texture path as K=4608, 10 K-iters.
+        if (K == 2560 &&                   (Nlocal % 4) == 0 && s_gemv_m1_k2560_no4_img_int8) return {s_gemv_m1_k2560_no4_img_int8, 4};
         return {nullptr, 0};
     };
 
@@ -569,6 +576,8 @@ static bool ensure_gemv_m1_q4_program(cl_command_queue queue) {
     if (err != CL_SUCCESS) { s_gemv_m1_k1024_no8_img_q4 = nullptr; }
     s_gemv_m1_k4608_no4_img_q4 = clCreateKernel(s_gemv_m1_q4_prog, "gemv_m1_k4608_q4_no4_img", &err);
     if (err != CL_SUCCESS) { s_gemv_m1_k4608_no4_img_q4 = nullptr; }
+    s_gemv_m1_k2560_no4_img_q4 = clCreateKernel(s_gemv_m1_q4_prog, "gemv_m1_k2560_q4_no4_img", &err);
+    if (err != CL_SUCCESS) { s_gemv_m1_k2560_no4_img_q4 = nullptr; }
     return true;
 }
 
@@ -678,6 +687,8 @@ static bool run_gemv_m1_image_q4(cl_command_queue queue, int N, int K, cl_mem W,
         // K=4608 _no8 also off-table — int8 no8 spilled at this K (T2 −6.5%);
         // Q4 has more ALU per byte, would be worse.
         if (K == 4608 && (Nlocal % 4) == 0 && s_gemv_m1_k4608_no4_img_q4) return {s_gemv_m1_k4608_no4_img_q4, 4};
+        // K=2560 is the LFM2.5-230M w2 down-proj (80 q4 blocks/row).
+        if (K == 2560 && (Nlocal % 4) == 0 && s_gemv_m1_k2560_no4_img_q4) return {s_gemv_m1_k2560_no4_img_q4, 4};
         return {nullptr, 0};
     };
 

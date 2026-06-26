@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <vector>
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <dlfcn.h>
@@ -586,6 +587,11 @@ int main(int argc, char* argv[]) {
     // Reply streams to stdout, ending with a single 0x1E byte; per-reply BENCHMARK lines on stderr.
     if (serve_mode) {
         std::cerr << "SERVE_READY" << std::endl;
+        // Cross-request prefix cache: the KV and conv caches persist between requests, so a follow-up
+        // whose prompt strictly extends the previous turn only prefills its NEW tokens (warm chat).
+        // cached_ids mirrors exactly what's resident in those caches — the prior prompt + reply, minus
+        // the final token, which is generated but never fed back so never entered the caches.
+        std::vector<int> cached_ids;
         std::string header;
         while (std::getline(std::cin, header)) {
             if (header.empty()) continue;
@@ -630,7 +636,19 @@ int main(int argc, char* argv[]) {
                 std::string full = tokenizer.decode(all);
                 if (full.size() > emitted.size()) { std::cout << full.substr(emitted.size()) << std::flush; emitted = std::move(full); }
             };
-            model.generate(ids, rq_max, sc, on_token);
+            // Warm follow-up: if this prompt strictly extends what's already cached, prefill only the
+            // new suffix (resume at the cached frontier where both KV and conv state are valid). Any
+            // divergence — new chat, edited history, tokenizer round-trip mismatch — falls back to a
+            // full prefill (n_past=0), which is always correct.
+            int n_past = 0;
+            if (!cached_ids.empty() && cached_ids.size() < ids.size() &&
+                std::equal(cached_ids.begin(), cached_ids.end(), ids.begin())) {
+                n_past = (int)cached_ids.size();
+            }
+            auto out_ids = model.generate(ids, rq_max, sc, on_token, n_past);
+            // Mirror the caches: prompt + generated, minus the final (un-fed-back) token.
+            cached_ids.assign(out_ids.begin(), out_ids.end());
+            if (!cached_ids.empty()) cached_ids.pop_back();
             const auto t_end = std::chrono::steady_clock::now();
             auto secs = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b){ return std::chrono::duration<double>(b - a).count(); };
             const double ttft = got_first ? secs(t_req, t_first) : 0.0;

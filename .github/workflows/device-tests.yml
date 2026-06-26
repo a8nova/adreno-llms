@@ -1,0 +1,75 @@
+name: Device reference tests
+
+# On-device fp16 golden regression suite. Runs on a SELF-HOSTED runner with a
+# physical Adreno phone attached via adb — GitHub-hosted runners have no Adreno
+# GPU, so the device-free build matrix lives in ci.yml instead. See docs/TESTING.md
+# for runner setup and how the golden snapshots are captured.
+
+on:
+  # DISABLED: no self-hosted [self-hosted, android] runner is currently online, so the
+  # pull_request trigger is commented out — otherwise every PR would hang with a device
+  # job stuck "waiting for a runner". Re-enable by uncommenting once a runner is back.
+  # pull_request:
+  workflow_dispatch:   # manual only (won't auto-run on PRs)
+
+# One phone, one runner: never run two device jobs at once on the same device.
+concurrency:
+  group: device-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  device-reference:
+    # SECURITY: this runs on a SELF-HOSTED runner (a personal Mac) and the repo is
+    # PUBLIC. Without this guard, anyone could fork the repo, edit a workflow/script,
+    # and open a PR that executes arbitrary code on the runner. This gate runs the job
+    # ONLY for manual dispatch or for PRs whose head branch lives in THIS repo (which
+    # only maintainers can push) — fork PRs are skipped and never touch the runner.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, android]   # label the runner with both (see TESTING.md)
+    strategy:
+      fail-fast: false                # one model failing must not mask the others
+      max-parallel: 1                 # single attached device
+      matrix:
+        model:
+          - granite-4-0-350m
+          - lfm2-5-350m
+          - mamba-130m
+          - mamba2-130m
+          - openelm-270m
+          - qwen2-5-0-5b
+          - smollm2-135m-instruct
+          - lfm2-5-vl-450m
+          - smolvlm-256m-instruct
+          - whisper-tiny
+          - seamless-m4t-unity-small
+          - pocket-tts
+          - kokoro-82m
+          - mms-tts
+          - openvoice-v2
+          - musicgen-small
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm a device is attached
+        run: adb get-state
+
+      - name: Fetch weights for ${{ matrix.model }}
+        # Pull real weights from the public HF mirror (no auth, resumes/skips existing).
+        # Best-effort: models not on the mirror, or ones the test step will skip anyway
+        # (unwired modalities), must not fail the job here — a wired model missing its
+        # weights surfaces clearly when the test step's deploy fails.
+        run: ./scripts/fetch_weights.sh "${{ matrix.model }}" || echo "::warning::weights fetch failed/unsupported for ${{ matrix.model }} — test step will skip or fail at deploy"
+
+      - name: Reference test ${{ matrix.model }}
+        run: |
+          set +e
+          bash scripts/ci/run_device_reference.sh "${{ matrix.model }}"
+          rc=$?
+          set -e
+          case $rc in
+            0) echo "::notice::${{ matrix.model }} reference test PASSED" ;;
+            2) echo "::warning::${{ matrix.model }} modality not yet implemented — skipped" ;;
+            *) echo "::error::${{ matrix.model }} reference test FAILED (rc=$rc)"; exit 1 ;;
+          esac
