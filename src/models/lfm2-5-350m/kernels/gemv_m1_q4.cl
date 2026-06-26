@@ -201,6 +201,85 @@ void gemv_m1_k4608_q4_no4_img(
   }
 }
 
+// ─── K=2560 (LFM2.5-230M w2 down-proj), image Q4 W, 4 outputs per WG. WG=64. ───
+// Per WG: 5 K-iters × 64 threads × 8 weights/pixel = 2560 weights covered.
+// K=2560 / 32 = 80 blocks per row → 80 scales per row.
+__kernel
+__attribute__((reqd_work_group_size(64, 1, 1)))
+void gemv_m1_k2560_q4_no4_img(
+    __global const half* x,
+    __read_only image2d_t W_img,
+    __global const half* scales,   // [N, 80] flattened
+    __global half* out,
+    const int N) {
+  const int n_base = (int)get_group_id(0) * 4;
+  const int tid    = (int)get_local_id(0);
+  if (n_base >= N) return;
+
+  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+
+  #pragma unroll
+  for (int j = 0; j < 5; ++j) {
+    const int pix   = j * 64 + tid;
+    const int x_off = pix * 8;
+    const int blk   = pix >> 2;
+
+    float4 xv0 = vload_half4(0, x + x_off);
+    float4 xv1 = vload_half4(0, x + x_off + 4);
+
+    {
+      uint4 p = read_imageui(W_img, kImgSamplerQ4, (int2)(pix, n_base + 0));
+      int w0, w1, w2, w3, w4, w5, w6, w7;
+      UNPACK8_FROM_PIXEL(p, w0, w1, w2, w3, w4, w5, w6, w7);
+      float d = xv0.x*(float)w0 + xv0.y*(float)w1 + xv0.z*(float)w2 + xv0.w*(float)w3
+              + xv1.x*(float)w4 + xv1.y*(float)w5 + xv1.z*(float)w6 + xv1.w*(float)w7;
+      acc0 += d * vload_half((n_base + 0) * 80 + blk, scales);
+    }
+    {
+      uint4 p = read_imageui(W_img, kImgSamplerQ4, (int2)(pix, n_base + 1));
+      int w0, w1, w2, w3, w4, w5, w6, w7;
+      UNPACK8_FROM_PIXEL(p, w0, w1, w2, w3, w4, w5, w6, w7);
+      float d = xv0.x*(float)w0 + xv0.y*(float)w1 + xv0.z*(float)w2 + xv0.w*(float)w3
+              + xv1.x*(float)w4 + xv1.y*(float)w5 + xv1.z*(float)w6 + xv1.w*(float)w7;
+      acc1 += d * vload_half((n_base + 1) * 80 + blk, scales);
+    }
+    {
+      uint4 p = read_imageui(W_img, kImgSamplerQ4, (int2)(pix, n_base + 2));
+      int w0, w1, w2, w3, w4, w5, w6, w7;
+      UNPACK8_FROM_PIXEL(p, w0, w1, w2, w3, w4, w5, w6, w7);
+      float d = xv0.x*(float)w0 + xv0.y*(float)w1 + xv0.z*(float)w2 + xv0.w*(float)w3
+              + xv1.x*(float)w4 + xv1.y*(float)w5 + xv1.z*(float)w6 + xv1.w*(float)w7;
+      acc2 += d * vload_half((n_base + 2) * 80 + blk, scales);
+    }
+    {
+      uint4 p = read_imageui(W_img, kImgSamplerQ4, (int2)(pix, n_base + 3));
+      int w0, w1, w2, w3, w4, w5, w6, w7;
+      UNPACK8_FROM_PIXEL(p, w0, w1, w2, w3, w4, w5, w6, w7);
+      float d = xv0.x*(float)w0 + xv0.y*(float)w1 + xv0.z*(float)w2 + xv0.w*(float)w3
+              + xv1.x*(float)w4 + xv1.y*(float)w5 + xv1.z*(float)w6 + xv1.w*(float)w7;
+      acc3 += d * vload_half((n_base + 3) * 80 + blk, scales);
+    }
+  }
+
+  __local float partial[4][64];
+  partial[0][tid] = acc0; partial[1][tid] = acc1;
+  partial[2][tid] = acc2; partial[3][tid] = acc3;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int s = 32; s > 0; s >>= 1) {
+    if (tid < s) {
+      partial[0][tid] += partial[0][tid + s]; partial[1][tid] += partial[1][tid + s];
+      partial[2][tid] += partial[2][tid + s]; partial[3][tid] += partial[3][tid + s];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (tid == 0) {
+    vstore_half(partial[0][0], 0, out + n_base + 0);
+    vstore_half(partial[1][0], 0, out + n_base + 1);
+    vstore_half(partial[2][0], 0, out + n_base + 2);
+    vstore_half(partial[3][0], 0, out + n_base + 3);
+  }
+}
+
 // ─── K=1024, image Q4 W, 8 outputs per WG. WG=64. ───
 // Same outer geometry as q4_no4 (2 K-iters × 64 threads × 8 weights = 1024)
 // but with 8 output rows per WG. Activations are read once per K-iter and

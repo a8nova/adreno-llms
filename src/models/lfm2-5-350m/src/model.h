@@ -57,7 +57,13 @@ public:
         const std::vector<int32_t>& prompt_ids,
         int max_new_tokens = 64,
         SamplerConfig sampler_config = SamplerConfig{},
-        TokenCallback on_token = nullptr
+        TokenCallback on_token = nullptr,
+        // Prefix-cache: the first n_past tokens of prompt_ids are ALREADY resident in the KV cache
+        // from a previous generate() call (same persistent Model), so prefill only skips them and
+        // processes prompt_ids[n_past:] at start_pos=n_past. 0 = full prefill (default). The caller
+        // (serve loop) guarantees prompt_ids[0..n_past-1] are byte-identical to what populated those
+        // KV slots. Powers warm multi-turn chat: a follow-up only prefills its new tokens.
+        int n_past = 0
     );
 
 private:
@@ -66,37 +72,39 @@ private:
 
     static constexpr int VOCAB_SIZE = 65536;
     static constexpr int HIDDEN_SIZE = 1024;
-    static constexpr int NUM_LAYERS = 16;
     static constexpr int NUM_HEADS = 16;
     static constexpr int NUM_KV_HEADS = 8;
     static constexpr int HEAD_DIM = 64;
     static constexpr int MAX_SEQ_LEN = 2048;  // capped from 128000 — see model_config.h
 
-    // Hybrid-architecture per-layer-class dispatch helpers
-    static constexpr int ATTENTION_LAYER_INDICES[6] = {2, 5, 8, 10, 12, 14};
-    static constexpr int NUM_ATTENTION_LAYERS = 6;
-    inline static bool layer_has_attention(int i) {
-        for (int j = 0; j < NUM_ATTENTION_LAYERS; ++j) if (ATTENTION_LAYER_INDICES[j] == i) return true;
-        return false;
+    // ── Hybrid-architecture layout, discovered at runtime from the loaded
+    // weights (detect_architecture_). The LFM2.5 family shares one codebase
+    // across sizes that differ ONLY in layer count and the conv/attention
+    // interleave — e.g. 350M: 16 layers, attn @ {2,5,8,10,12,14}; 230M:
+    // 14 layers, attn @ {2,4,6,8,10,12}. Nothing here is baked at compile
+    // time, so the same binary runs every size whose weights we load.
+    int num_layers_ = 0;
+    std::vector<char> is_attention_layer_;   // char, not bool, to allow vector indexing without vector<bool>
+    std::vector<char> is_conv_layer_;
+    std::vector<int>  attention_layer_indices_;
+    void detect_architecture_();
+    bool layer_has_attention(int i) const {
+        return i >= 0 && i < (int)is_attention_layer_.size() && is_attention_layer_[i];
+    }
+    bool layer_has_convolution(int i) const {
+        return i >= 0 && i < (int)is_conv_layer_.size() && is_conv_layer_[i];
     }
 
-    static constexpr int CONVOLUTION_LAYER_INDICES[10] = {0, 1, 3, 4, 6, 7, 9, 11, 13, 15};
-    static constexpr int NUM_CONVOLUTION_LAYERS = 10;
-    inline static bool layer_has_convolution(int i) {
-        for (int j = 0; j < NUM_CONVOLUTION_LAYERS; ++j) if (CONVOLUTION_LAYER_INDICES[j] == i) return true;
-        return false;
-    }
-
-    // Layers
+    // Layers (sized to num_layers_ in initialize()).
     std::unique_ptr<Embedding> embedding_;
     std::unique_ptr<OperatorNorm> embedding_norm_;
 
-    std::unique_ptr<OperatorNorm> operator_norm_[NUM_LAYERS];
-    std::unique_ptr<Attention> attn_[NUM_LAYERS];
-    std::unique_ptr<Convolution> conv_[NUM_LAYERS];
-    std::unique_ptr<Mlp> mlp_[NUM_LAYERS];
+    std::vector<std::unique_ptr<OperatorNorm>> operator_norm_;
+    std::vector<std::unique_ptr<Attention>> attn_;
+    std::vector<std::unique_ptr<Convolution>> conv_;
+    std::vector<std::unique_ptr<Mlp>> mlp_;
 
-    std::unique_ptr<OperatorNorm> ffn_norm_[NUM_LAYERS];
+    std::vector<std::unique_ptr<OperatorNorm>> ffn_norm_;
 
     // Utils kernels
     cl_program utils_program_ = nullptr;

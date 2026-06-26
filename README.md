@@ -47,6 +47,9 @@ Decode tok/s = warm 3-run median, greedy (`--temperature 0`), 32-token generatio
 | [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | fp16 | 135M | LLaMA + GQA | **24.40** | 1.67 | 923 | Instruct-tuned; 61% of ceiling |
 | [SmolLM2-135M-Instruct](src/models/smollm2-135m-instruct/) | **int8** | 135M | LLaMA + GQA | 24.21 | **0.91** | **670** | Per-row symmetric int8; −27% memory at tied tok/s |
 | [OpenELM-270M-Instruct](src/models/openelm-270m/) | fp16 | 270M | LLaMA-style + tied lm_head | 14.65 | 2.00 | 1371 | 78.9% of 10 GB/s ceiling |
+| [LFM2.5-230M](src/models/lfm2-5-350m/) | fp16 | 230M | Hybrid conv+attn | 13.81 | 1.89 | 1170 | Smallest LFM2.5 (14 layers); runs on the runtime-parameterized lfm2-5-350m port |
+| [LFM2.5-230M](src/models/lfm2-5-350m/) | **int8** | 230M | Hybrid conv+attn | 18.07 | 0.57 | 783 | +30.8% vs fp16 |
+| [LFM2.5-230M](src/models/lfm2-5-350m/) | **Q4** | 230M | Hybrid conv+attn | **20.37** | **0.52** | **585** | +47.5% vs fp16; smallest footprint in the LFM family |
 | [LFM2.5-350M](src/models/lfm2-5-350m/) | fp16 | 350M | Hybrid conv+attn | 11.43 | 2.21 | 1666 | Liquid AI hybrid; 58% of texture ceiling |
 | [LFM2.5-350M](src/models/lfm2-5-350m/) | **int8** | 350M | Hybrid conv+attn | 13.67 | **0.81** | 1015 | +19.6% vs fp16 |
 | [LFM2.5-350M](src/models/lfm2-5-350m/) | **Q4** | 350M | Hybrid conv+attn | **14.54** | **0.79** | **719** | +27.2% vs fp16; ALU-bound nibble unpack |

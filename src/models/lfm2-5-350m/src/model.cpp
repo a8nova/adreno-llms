@@ -68,6 +68,27 @@ bool Model::ensure_argmax_resources_() {
   return true;
 }
 
+void Model::detect_architecture_() {
+  // Walk model.layers.<i> until an index has no operator_norm; for each
+  // present layer decide attention vs convolution by which projection the
+  // checkpoint carries. The loaded weights are the source of truth, so one
+  // build serves every LFM2.5 size (230M, 350M, …) without recompiling.
+  num_layers_ = 0;
+  is_attention_layer_.clear();
+  is_conv_layer_.clear();
+  attention_layer_indices_.clear();
+  for (int i = 0;; ++i) {
+    const std::string base = "model.layers." + std::to_string(i);
+    if (!weights_.has_tensor(base + ".operator_norm.weight")) break;
+    const bool is_attn = weights_.has_tensor(base + ".self_attn.q_proj.weight");
+    const bool is_conv = weights_.has_tensor(base + ".conv.conv.weight");
+    is_attention_layer_.push_back(is_attn ? 1 : 0);
+    is_conv_layer_.push_back(is_conv ? 1 : 0);
+    if (is_attn) attention_layer_indices_.push_back(i);
+    ++num_layers_;
+  }
+}
+
 bool Model::initialize() {
   NNOPT_CHECKPOINT("Model::initialize() started");
 
@@ -91,7 +112,25 @@ bool Model::initialize() {
   }
   NNOPT_LAYER_INIT("embedding_norm");
 
-  for (int i = 0; i < MODEL_CONFIG::NUM_LAYERS; ++i) {
+  // Discover the layer stack (count + conv/attention interleave) from the
+  // loaded weights, then size the per-layer vectors. Lets one build serve any
+  // LFM2.5 size.
+  detect_architecture_();
+  if (num_layers_ <= 0) {
+    NNOPT_ERROR("detect_architecture_: no decoder layers found in weights");
+    return false;
+  }
+  operator_norm_.resize(num_layers_);
+  ffn_norm_.resize(num_layers_);
+  attn_.resize(num_layers_);
+  conv_.resize(num_layers_);
+  mlp_.resize(num_layers_);
+  std::cerr << "Architecture: " << num_layers_ << " layers, "
+            << attention_layer_indices_.size() << " attention, "
+            << (num_layers_ - (int)attention_layer_indices_.size())
+            << " convolution" << std::endl;
+
+  for (int i = 0; i < num_layers_; ++i) {
     // operator_norm
     {
       operator_norm_[i].reset(new OperatorNorm(
@@ -178,7 +217,7 @@ void Model::collect_record_args_() {
   //   out_kernel      arg 4 = seq_k
   rec_start_pos_args_.clear();
   rec_seq_k_args_.clear();
-  for (int i : ATTENTION_LAYER_INDICES) {
+  for (int i : attention_layer_indices_) {
     if (!attn_[i]) continue;
     if (cl_kernel k = attn_[i]->rope_kernel())     rec_start_pos_args_.push_back({k, 8});
     if (cl_kernel k = attn_[i]->kv_write_kernel()) rec_start_pos_args_.push_back({k, 2});
@@ -226,7 +265,7 @@ std::vector<float> Model::forward(const std::vector<int32_t>& input_ids, int sta
   // RAW embed_tokens output, and `embedding_norm` is applied AFTER the loop as
   // the final pre-lm_head layernorm. Do NOT apply it here.
 
-  for (int i = 0; i < MODEL_CONFIG::NUM_LAYERS; ++i) {
+  for (int i = 0; i < num_layers_; ++i) {
     // operator_norm — borrowed
     cl_mem op_norm = operator_norm_[i]->forward(queue, hidden, seq_len);
     NNOPT_LAYER_CHECK_FMT(
@@ -355,7 +394,7 @@ int32_t Model::forward_greedy(const std::vector<int32_t>& input_ids, int start_p
   }
 
   if (!replayed) {
-    for (int i = 0; i < MODEL_CONFIG::NUM_LAYERS; ++i) {
+    for (int i = 0; i < num_layers_; ++i) {
       cl_mem op_norm = operator_norm_[i]->forward(queue, hidden, seq_len);
       cl_mem op_out = nullptr;
       if (layer_has_attention(i)) {
@@ -389,7 +428,7 @@ int32_t Model::forward_greedy(const std::vector<int32_t>& input_ids, int start_p
       record_enabled_ = false;
     } else {
       bool rec_ok = true;
-      for (int i = 0; i < MODEL_CONFIG::NUM_LAYERS && rec_ok; ++i) {
+      for (int i = 0; i < num_layers_ && rec_ok; ++i) {
         cl_mem op_norm = operator_norm_[i]->forward(record_queue_, hidden, 1);
         if (!op_norm) { rec_ok = false; break; }
         cl_mem op_out = nullptr;
@@ -413,7 +452,7 @@ int32_t Model::forward_greedy(const std::vector<int32_t>& input_ids, int start_p
         record_enabled_ = false;
       } else {
         recording_built_ = true;
-        std::cerr << "RecordQ: recording built (16 layers, start_pos@record=" << start_pos << ")" << std::endl;
+        std::cerr << "RecordQ: recording built (" << num_layers_ << " layers, start_pos@record=" << start_pos << ")" << std::endl;
       }
     }
   }
@@ -514,7 +553,7 @@ bool Model::forward_greedy_chained_enqueue(int start_pos) {
   cl_mem hidden = embedding_->forward_from_device_token(queue, argmax_out_idx_, /*offset=*/0);
   if (!hidden) { NNOPT_ERROR("chained: embedding forward failed"); return false; }
 
-  for (int i = 0; i < MODEL_CONFIG::NUM_LAYERS; ++i) {
+  for (int i = 0; i < num_layers_; ++i) {
     cl_mem op_norm = operator_norm_[i]->forward(queue, hidden, seq_len);
     cl_mem op_out = nullptr;
     if (layer_has_attention(i)) {
@@ -586,7 +625,7 @@ bool Model::forward_greedy_chained_enqueue(int start_pos) {
   return true;
 }
 
-std::vector<int32_t> Model::generate(const std::vector<int32_t>& prompt_ids, int max_new_tokens, SamplerConfig sampler_config, TokenCallback on_token) {
+std::vector<int32_t> Model::generate(const std::vector<int32_t>& prompt_ids, int max_new_tokens, SamplerConfig sampler_config, TokenCallback on_token, int n_past) {
   NNOPT_CHECKPOINT("generate() started");
   Sampler sampler(sampler_config);
   auto ids = prompt_ids;
@@ -595,6 +634,13 @@ std::vector<int32_t> Model::generate(const std::vector<int32_t>& prompt_ids, int
     NNOPT_ERROR("generate(): empty prompt");
     return ids;
   }
+
+  // Prefix-cache prefill: skip the first n_past tokens (already in KV from a prior turn) and prefill
+  // only the suffix prompt_ids[n_past:] at start_pos=n_past. Clamp so we always prefill ≥1 token (the
+  // last prompt token's logits drive the first generated token). n_past<=0 ⇒ full prefill, unchanged.
+  const int total = (int)prompt_ids.size();
+  const int past = (n_past > 0) ? std::min(n_past, total - 1) : 0;
+  const std::vector<int32_t> prefill_ids(prompt_ids.begin() + past, prompt_ids.end());
 
   // GPU argmax fast path: pure greedy means temperature<=0 and rep_penalty==1.
   // Top-k / top-p are inapplicable at temperature=0 anyway. Anything else
@@ -605,10 +651,10 @@ std::vector<int32_t> Model::generate(const std::vector<int32_t>& prompt_ids, int
   std::vector<int32_t> generated;
   int next_token;
   if (greedy_fast) {
-    next_token = forward_greedy(prompt_ids, /*start_pos=*/0);
+    next_token = forward_greedy(prefill_ids, /*start_pos=*/past);
     if (next_token < 0) { NNOPT_ERROR("prefill forward_greedy failed"); return ids; }
   } else {
-    auto logits = forward(prompt_ids, /*start_pos=*/0);
+    auto logits = forward(prefill_ids, /*start_pos=*/past);
     if (logits.empty()) { NNOPT_ERROR("prefill forward() returned empty logits"); return ids; }
     next_token = sampler.sample(logits, generated);
   }
