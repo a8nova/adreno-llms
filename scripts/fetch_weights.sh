@@ -11,6 +11,7 @@
 #   granite-4-0-350m  lfm2-5-350m  lfm2-5-vl-450m  mamba-130m  mamba2-130m
 #   qwen2-5-0-5b  smollm2-135m-instruct  whisper-tiny  kokoro-82m
 #   musicgen-small  seamless-m4t-unity-small  openvoice-v2
+#   functiongemma-270m-it
 #
 # Per model, this fetches the base set the runtime needs:
 #   weights/model.fp16.bin
@@ -39,11 +40,12 @@ HF_BRANCH="${HF_BRANCH:-main}"
 HF_BASE="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}"
 
 
-MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m smolvlm-256m-instruct mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m pocket-tts musicgen-small seamless-m4t-unity-small openvoice-v2)
+MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m smolvlm-256m-instruct mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m pocket-tts musicgen-small seamless-m4t-unity-small openvoice-v2 functiongemma-270m-it)
 BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
-# whisper-tiny (ASR), musicgen-small (text→music) and seamless-m4t-unity-small
-# (speech translation) load tokenizer_vocab.bin directly and have no
-# tokenizer.json, so their base set is 3 files.
+# whisper-tiny (ASR), musicgen-small (text→music), seamless-m4t-unity-small
+# (speech translation) and functiongemma-270m-it (text gen) load
+# tokenizer_vocab.bin directly and have no tokenizer.json, so their base set is
+# 3 files.
 WHISPER_BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer_vocab.bin)
 # kokoro-82m (TTS) phonemizes via espeak (assets) and openvoice-v2 (voice
 # cloning) is audio-to-audio — neither needs a tokenizer, just model + meta.
@@ -127,7 +129,7 @@ file_list_for() {
     files=("${KOKORO_BASE_FILES[@]}")
   elif [ "${model}" = "pocket-tts" ]; then
     files=("${POCKET_BASE_FILES[@]}")    # model + meta + tokenizer_vocab + 8 v1 voices
-  elif [ "${model}" = "whisper-tiny" ] || [ "${model}" = "musicgen-small" ] || [ "${model}" = "seamless-m4t-unity-small" ]; then
+  elif [ "${model}" = "whisper-tiny" ] || [ "${model}" = "musicgen-small" ] || [ "${model}" = "seamless-m4t-unity-small" ] || [ "${model}" = "functiongemma-270m-it" ]; then
     files=("${WHISPER_BASE_FILES[@]}")   # model.fp16.bin + meta + tokenizer_vocab.bin
   else
     files=("${BASE_FILES[@]}")
