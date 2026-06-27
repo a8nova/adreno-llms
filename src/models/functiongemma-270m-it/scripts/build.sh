@@ -36,8 +36,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Dtype: NNOPT_DTYPE=fp16 builds the half-precision binary into build/fp16/
-# with -DNNOPT_DTYPE=fp16. Default fp32 uses build/.
-NNOPT_DTYPE="${NNOPT_DTYPE:-fp32}"
+# with -DNNOPT_DTYPE=fp16. Default is now fp16 (fp32 is untested/unsupported).
+NNOPT_DTYPE="${NNOPT_DTYPE:-fp16}"
 case "$NNOPT_DTYPE" in
     fp16) BUILD_DIR="build/fp16"; CMAKE_DTYPE_ARG="-DNNOPT_DTYPE=fp16" ;;
     fp32|"") BUILD_DIR="build"; CMAKE_DTYPE_ARG="-DNNOPT_DTYPE=fp32"; NNOPT_DTYPE="fp32" ;;
@@ -101,23 +101,38 @@ echo "Target ABI: arm64-v8a"
 echo "Target API Level: 21"
 
 # ============================================
-# Check OpenCL headers (downloaded by porting orchestrator)
-# CLBlast is built from source via CMake FetchContent
+# Check OpenCL headers + libOpenCL.so link stub.
+#
+# Cache lives at $HOME/.cache/adreno-llms/ (override with $ADRENO_LLMS_CACHE).
+# If headers are missing, scripts/setup_deps.sh is invoked automatically — it
+# downloads the Khronos OpenCL headers and pulls libOpenCL.so from a connected
+# Android device. CLBlast is built from source via CMake FetchContent on first
+# configure.
 # ============================================
-DEPS_DIR="$HOME/.nnopt/deps"
-OPENCL_INC="$DEPS_DIR/opencl/include"
+ADRENO_LLMS_CACHE="${ADRENO_LLMS_CACHE:-$HOME/.cache/adreno-llms}"
+OPENCL_INC="$ADRENO_LLMS_CACHE/opencl/include"
+OPENCL_LIB_DIR="$ADRENO_LLMS_CACHE/opencl/lib/android-arm64-v8a"
 
 if [ ! -f "$OPENCL_INC/CL/cl.h" ]; then
-    echo "ERROR: OpenCL headers not found at $OPENCL_INC"
-    echo "The porting orchestrator should have downloaded these."
+    SETUP_SH="$(cd "$(dirname "$0")/../../../../scripts" && pwd)/setup_deps.sh"
+    if [ -x "$SETUP_SH" ]; then
+        echo "OpenCL deps not found in $ADRENO_LLMS_CACHE — running setup_deps.sh"
+        bash "$SETUP_SH"
+    else
+        echo "ERROR: OpenCL headers not found and setup_deps.sh missing at $SETUP_SH" >&2
+        exit 1
+    fi
+fi
+
+if [ ! -f "$OPENCL_INC/CL/cl.h" ]; then
+    echo "ERROR: OpenCL headers still not found at $OPENCL_INC after setup" >&2
     exit 1
 fi
 
 echo "Using OpenCL headers: $OPENCL_INC"
 echo "CLBlast will be built from source via CMake FetchContent"
 
-# Check for extracted OpenCL library (used as stub for linking)
-OPENCL_LIB_DIR="$DEPS_DIR/opencl/lib/android-arm64-v8a"
+# Check for extracted OpenCL library (used as link-time stub).
 OPENCL_LIB="$OPENCL_LIB_DIR/libOpenCL.so"
 CMAKE_OPENCL_ARG=""
 
