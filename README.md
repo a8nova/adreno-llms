@@ -1,8 +1,7 @@
-# adreno-llms 📱⚡
+# adreno-llms 📱⚡ Lightning-fast inference on Qualcomm Adreno 6xx GPUs
 > Autonomous kernel generation for Android embedded targets. Built by **NNOpt** — contact a8nova@gmail.com for early access.
 
-### ⚡ Lightning-fast inference on Qualcomm Adreno 6xx GPUs ⚡
-
+### **📲 Try it now:** [Edgi on Google Play](https://play.google.com/store/apps/details?id=com.edgi.app) — the full multimodal stack in one app, running fully on-device.
 
 
 https://github.com/user-attachments/assets/c5723e58-6bc7-4fbc-921b-59388e26f2c9
@@ -19,16 +18,12 @@ Beyond text generation, six new model types now run **fully on-device** on Adren
 - **🌐 Translation (S2ST/S2TT)** — [SeamlessM4T UnitY-small](src/models/seamless-m4t-unity-small/): speech in → translated speech or text out (English/Spanish/Portuguese/Hindi/Russian).
 - **🎙️ Voice cloning (tone-color conversion)** — [OpenVoice V2](src/models/openvoice-v2/): speech in → the same speech re-voiced in a target speaker's tone color, fused single-pass clone at ~2× real-time.
 
-The **[See & Say](examples/see-and-say/)** example app ties the vision and speech models together into a single sideloadable APK.
-
 <!-- Drop your demo .mp4 into a GitHub PR/issue, copy the resulting
      https://github.com/user-attachments/assets/<uuid> URL, and replace
      the placeholder line below. GitHub renders it inline. -->
 
 
-
 https://github.com/user-attachments/assets/d7f1d479-bd01-4003-8a22-18a253fb0b90
-
 
 
 
