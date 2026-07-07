@@ -10,7 +10,8 @@
 # Models:
 #   granite-4-0-350m  lfm2-5-350m  lfm2-5-vl-450m  mamba-130m  mamba2-130m
 #   qwen2-5-0-5b  smollm2-135m-instruct  whisper-tiny  kokoro-82m
-#   musicgen-small  seamless-m4t-unity-small  openvoice-v2
+#   musicgen-small  seamless-m4t-unity-small  openvoice-v2  smolvlm-256m-instruct
+#   pocket-tts  moonshine-tiny  depth-anything-v2-small  stable-audio-open-small
 #   functiongemma-270m-it
 #
 # Per model, this fetches the base set the runtime needs:
@@ -40,16 +41,21 @@ HF_BRANCH="${HF_BRANCH:-main}"
 HF_BASE="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}"
 
 
-MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m smolvlm-256m-instruct mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m pocket-tts musicgen-small seamless-m4t-unity-small openvoice-v2 functiongemma-270m-it)
+MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m smolvlm-256m-instruct mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m pocket-tts musicgen-small seamless-m4t-unity-small openvoice-v2 functiongemma-270m-it moonshine-tiny depth-anything-v2-small stable-audio-open-small)
 BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
-# whisper-tiny (ASR), musicgen-small (text→music), seamless-m4t-unity-small
-# (speech translation) and functiongemma-270m-it (text gen) load
-# tokenizer_vocab.bin directly and have no tokenizer.json, so their base set is
-# 3 files.
+# whisper-tiny + moonshine-tiny (ASR), musicgen-small (text→music),
+# seamless-m4t-unity-small (speech translation) and functiongemma-270m-it
+# (text gen) load tokenizer_vocab.bin directly and have no tokenizer.json, so
+# their base set is 3 files.
 WHISPER_BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer_vocab.bin)
-# kokoro-82m (TTS) phonemizes via espeak (assets) and openvoice-v2 (voice
-# cloning) is audio-to-audio — neither needs a tokenizer, just model + meta.
+# kokoro-82m (TTS) phonemizes via espeak (assets), openvoice-v2 (voice
+# cloning) is audio-to-audio, and depth-anything-v2-small (vision depth)
+# takes a pixel tensor — none needs a tokenizer, just model + meta.
 KOKORO_BASE_FILES=(model.fp16.bin model.fp16.meta.json)
+# stable-audio-open-small is three submodels (T5 conditioning + DiT + VAE):
+# DiT+VAE in model.fp16.bin, the T5 encoder, its tokenizer, and the
+# seconds-conditioning lookup table.
+STABLE_AUDIO_BASE_FILES=(model.fp16.bin model.fp16.meta.json t5_encoder.fp16.bin t5_encoder.fp16.meta.json seconds_table.bin t5_tokenizer.bin tokenizer_vocab.bin)
 # pocket-tts (TTS): model + tokenizer_vocab + the 8 selectable v1 voices (raw audio_prompt).
 POCKET_BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer_vocab.bin \
   voices/alba.fp16.bin voices/azelma.fp16.bin voices/cosette.fp16.bin voices/eponine.fp16.bin \
@@ -125,11 +131,13 @@ _in_array() {
 file_list_for() {
   local model="$1"
   local files
-  if [ "${model}" = "kokoro-82m" ] || [ "${model}" = "openvoice-v2" ]; then
+  if [ "${model}" = "stable-audio-open-small" ]; then
+    files=("${STABLE_AUDIO_BASE_FILES[@]}")
+  elif [ "${model}" = "kokoro-82m" ] || [ "${model}" = "openvoice-v2" ] || [ "${model}" = "depth-anything-v2-small" ]; then
     files=("${KOKORO_BASE_FILES[@]}")
   elif [ "${model}" = "pocket-tts" ]; then
     files=("${POCKET_BASE_FILES[@]}")    # model + meta + tokenizer_vocab + 8 v1 voices
-  elif [ "${model}" = "whisper-tiny" ] || [ "${model}" = "musicgen-small" ] || [ "${model}" = "seamless-m4t-unity-small" ] || [ "${model}" = "functiongemma-270m-it" ]; then
+  elif [ "${model}" = "whisper-tiny" ] || [ "${model}" = "musicgen-small" ] || [ "${model}" = "seamless-m4t-unity-small" ] || [ "${model}" = "functiongemma-270m-it" ] || [ "${model}" = "moonshine-tiny" ]; then
     files=("${WHISPER_BASE_FILES[@]}")   # model.fp16.bin + meta + tokenizer_vocab.bin
   else
     files=("${BASE_FILES[@]}")

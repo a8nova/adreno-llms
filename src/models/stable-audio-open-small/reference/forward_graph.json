@@ -1,0 +1,5705 @@
+{
+  "version": 1,
+  "model_class": "DiffusionTransformer",
+  "nodes": [
+    {
+      "order": 0,
+      "dump_name": "to_cond_embed_0",
+      "module_path": "to_cond_embed.0",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.to_cond_embed.0",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        1024
+      ]
+    },
+    {
+      "order": 1,
+      "dump_name": "to_cond_embed_1",
+      "module_path": "to_cond_embed.1",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        65,
+        1024
+      ]
+    },
+    {
+      "order": 2,
+      "dump_name": "to_cond_embed_2",
+      "module_path": "to_cond_embed.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.to_cond_embed.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        1024
+      ]
+    },
+    {
+      "order": 3,
+      "dump_name": "to_cond_embed",
+      "module_path": "to_cond_embed",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        65,
+        1024
+      ]
+    },
+    {
+      "order": 4,
+      "dump_name": "to_global_embed_0",
+      "module_path": "to_global_embed.0",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.to_global_embed.0",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        1024
+      ]
+    },
+    {
+      "order": 5,
+      "dump_name": "to_global_embed_1",
+      "module_path": "to_global_embed.1",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        1024
+      ]
+    },
+    {
+      "order": 6,
+      "dump_name": "to_global_embed_2",
+      "module_path": "to_global_embed.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.to_global_embed.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        1024
+      ]
+    },
+    {
+      "order": 7,
+      "dump_name": "to_global_embed",
+      "module_path": "to_global_embed",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        1024
+      ]
+    },
+    {
+      "order": 8,
+      "dump_name": "timestep_features",
+      "module_path": "timestep_features",
+      "module_class": "FourierFeatures",
+      "weight_prefix": null,
+      "op": "FourierFeatures",
+      "out_shape": [
+        1,
+        256
+      ]
+    },
+    {
+      "order": 9,
+      "dump_name": "to_timestep_embed_0",
+      "module_path": "to_timestep_embed.0",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.to_timestep_embed.0",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        1024
+      ]
+    },
+    {
+      "order": 10,
+      "dump_name": "to_timestep_embed_1",
+      "module_path": "to_timestep_embed.1",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        1024
+      ]
+    },
+    {
+      "order": 11,
+      "dump_name": "to_timestep_embed_2",
+      "module_path": "to_timestep_embed.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.to_timestep_embed.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        1024
+      ]
+    },
+    {
+      "order": 12,
+      "dump_name": "to_timestep_embed",
+      "module_path": "to_timestep_embed",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        1024
+      ]
+    },
+    {
+      "order": 13,
+      "dump_name": "preprocess_conv",
+      "module_path": "preprocess_conv",
+      "module_class": "Conv1d",
+      "weight_prefix": "model.model.preprocess_conv",
+      "op": "Conv1d",
+      "out_shape": [
+        1,
+        64,
+        256
+      ]
+    },
+    {
+      "order": 14,
+      "dump_name": "transformer_project_in",
+      "module_path": "transformer.project_in",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.project_in",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        256,
+        1024
+      ]
+    },
+    {
+      "order": 15,
+      "dump_name": "transformer_layers_0_pre_norm",
+      "module_path": "transformer.layers.0.pre_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.0.pre_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 16,
+      "dump_name": "transformer_layers_0_self_attn_to_qkv",
+      "module_path": "transformer.layers.0.self_attn.to_qkv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.0.self_attn.to_qkv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        3072
+      ]
+    },
+    {
+      "order": 17,
+      "dump_name": "transformer_layers_0_self_attn_q_norm",
+      "module_path": "transformer.layers.0.self_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.0.self_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 18,
+      "dump_name": "transformer_layers_0_self_attn_k_norm",
+      "module_path": "transformer.layers.0.self_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.0.self_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 19,
+      "dump_name": "transformer_layers_0_self_attn_to_out",
+      "module_path": "transformer.layers.0.self_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.0.self_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 20,
+      "dump_name": "transformer_layers_0_self_attn",
+      "module_path": "transformer.layers.0.self_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 21,
+      "dump_name": "transformer_layers_0_self_attn_scale",
+      "module_path": "transformer.layers.0.self_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 22,
+      "dump_name": "transformer_layers_0_cross_attend_norm",
+      "module_path": "transformer.layers.0.cross_attend_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.0.cross_attend_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 23,
+      "dump_name": "transformer_layers_0_cross_attn_to_q",
+      "module_path": "transformer.layers.0.cross_attn.to_q",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.0.cross_attn.to_q",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 24,
+      "dump_name": "transformer_layers_0_cross_attn_to_kv",
+      "module_path": "transformer.layers.0.cross_attn.to_kv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.0.cross_attn.to_kv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        2048
+      ]
+    },
+    {
+      "order": 25,
+      "dump_name": "transformer_layers_0_cross_attn_q_norm",
+      "module_path": "transformer.layers.0.cross_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.0.cross_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 26,
+      "dump_name": "transformer_layers_0_cross_attn_k_norm",
+      "module_path": "transformer.layers.0.cross_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.0.cross_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        65,
+        128
+      ]
+    },
+    {
+      "order": 27,
+      "dump_name": "transformer_layers_0_cross_attn_to_out",
+      "module_path": "transformer.layers.0.cross_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.0.cross_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 28,
+      "dump_name": "transformer_layers_0_cross_attn",
+      "module_path": "transformer.layers.0.cross_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 29,
+      "dump_name": "transformer_layers_0_cross_attn_scale",
+      "module_path": "transformer.layers.0.cross_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 30,
+      "dump_name": "transformer_layers_0_ff_norm",
+      "module_path": "transformer.layers.0.ff_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.0.ff_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 31,
+      "dump_name": "transformer_layers_0_ff_ff_0_proj",
+      "module_path": "transformer.layers.0.ff.ff.0.proj",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.0.ff.ff.0.proj",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        8192
+      ]
+    },
+    {
+      "order": 32,
+      "dump_name": "transformer_layers_0_ff_ff_0_act",
+      "module_path": "transformer.layers.0.ff.ff.0.act",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 33,
+      "dump_name": "transformer_layers_0_ff_ff_0",
+      "module_path": "transformer.layers.0.ff.ff.0",
+      "module_class": "GLU",
+      "weight_prefix": null,
+      "op": "GLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 34,
+      "dump_name": "transformer_layers_0_ff_ff_1",
+      "module_path": "transformer.layers.0.ff.ff.1",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 35,
+      "dump_name": "transformer_layers_0_ff_ff_2",
+      "module_path": "transformer.layers.0.ff.ff.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.0.ff.ff.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 36,
+      "dump_name": "transformer_layers_0_ff_ff_3",
+      "module_path": "transformer.layers.0.ff.ff.3",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 37,
+      "dump_name": "transformer_layers_0_ff_ff",
+      "module_path": "transformer.layers.0.ff.ff",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 38,
+      "dump_name": "transformer_layers_0_ff",
+      "module_path": "transformer.layers.0.ff",
+      "module_class": "FeedForward",
+      "weight_prefix": null,
+      "op": "FeedForward",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 39,
+      "dump_name": "transformer_layers_0_ff_scale",
+      "module_path": "transformer.layers.0.ff_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 40,
+      "dump_name": "transformer_layers_0",
+      "module_path": "transformer.layers.0",
+      "module_class": "TransformerBlock",
+      "weight_prefix": null,
+      "op": "TransformerBlock",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 41,
+      "dump_name": "transformer_layers_1_pre_norm",
+      "module_path": "transformer.layers.1.pre_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.1.pre_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 42,
+      "dump_name": "transformer_layers_1_self_attn_to_qkv",
+      "module_path": "transformer.layers.1.self_attn.to_qkv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.1.self_attn.to_qkv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        3072
+      ]
+    },
+    {
+      "order": 43,
+      "dump_name": "transformer_layers_1_self_attn_q_norm",
+      "module_path": "transformer.layers.1.self_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.1.self_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 44,
+      "dump_name": "transformer_layers_1_self_attn_k_norm",
+      "module_path": "transformer.layers.1.self_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.1.self_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 45,
+      "dump_name": "transformer_layers_1_self_attn_to_out",
+      "module_path": "transformer.layers.1.self_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.1.self_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 46,
+      "dump_name": "transformer_layers_1_self_attn",
+      "module_path": "transformer.layers.1.self_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 47,
+      "dump_name": "transformer_layers_1_self_attn_scale",
+      "module_path": "transformer.layers.1.self_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 48,
+      "dump_name": "transformer_layers_1_cross_attend_norm",
+      "module_path": "transformer.layers.1.cross_attend_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.1.cross_attend_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 49,
+      "dump_name": "transformer_layers_1_cross_attn_to_q",
+      "module_path": "transformer.layers.1.cross_attn.to_q",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.1.cross_attn.to_q",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 50,
+      "dump_name": "transformer_layers_1_cross_attn_to_kv",
+      "module_path": "transformer.layers.1.cross_attn.to_kv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.1.cross_attn.to_kv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        2048
+      ]
+    },
+    {
+      "order": 51,
+      "dump_name": "transformer_layers_1_cross_attn_q_norm",
+      "module_path": "transformer.layers.1.cross_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.1.cross_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 52,
+      "dump_name": "transformer_layers_1_cross_attn_k_norm",
+      "module_path": "transformer.layers.1.cross_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.1.cross_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        65,
+        128
+      ]
+    },
+    {
+      "order": 53,
+      "dump_name": "transformer_layers_1_cross_attn_to_out",
+      "module_path": "transformer.layers.1.cross_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.1.cross_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 54,
+      "dump_name": "transformer_layers_1_cross_attn",
+      "module_path": "transformer.layers.1.cross_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 55,
+      "dump_name": "transformer_layers_1_cross_attn_scale",
+      "module_path": "transformer.layers.1.cross_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 56,
+      "dump_name": "transformer_layers_1_ff_norm",
+      "module_path": "transformer.layers.1.ff_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.1.ff_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 57,
+      "dump_name": "transformer_layers_1_ff_ff_0_proj",
+      "module_path": "transformer.layers.1.ff.ff.0.proj",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.1.ff.ff.0.proj",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        8192
+      ]
+    },
+    {
+      "order": 58,
+      "dump_name": "transformer_layers_1_ff_ff_0_act",
+      "module_path": "transformer.layers.1.ff.ff.0.act",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 59,
+      "dump_name": "transformer_layers_1_ff_ff_0",
+      "module_path": "transformer.layers.1.ff.ff.0",
+      "module_class": "GLU",
+      "weight_prefix": null,
+      "op": "GLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 60,
+      "dump_name": "transformer_layers_1_ff_ff_1",
+      "module_path": "transformer.layers.1.ff.ff.1",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 61,
+      "dump_name": "transformer_layers_1_ff_ff_2",
+      "module_path": "transformer.layers.1.ff.ff.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.1.ff.ff.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 62,
+      "dump_name": "transformer_layers_1_ff_ff_3",
+      "module_path": "transformer.layers.1.ff.ff.3",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 63,
+      "dump_name": "transformer_layers_1_ff_ff",
+      "module_path": "transformer.layers.1.ff.ff",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 64,
+      "dump_name": "transformer_layers_1_ff",
+      "module_path": "transformer.layers.1.ff",
+      "module_class": "FeedForward",
+      "weight_prefix": null,
+      "op": "FeedForward",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 65,
+      "dump_name": "transformer_layers_1_ff_scale",
+      "module_path": "transformer.layers.1.ff_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 66,
+      "dump_name": "transformer_layers_1",
+      "module_path": "transformer.layers.1",
+      "module_class": "TransformerBlock",
+      "weight_prefix": null,
+      "op": "TransformerBlock",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 67,
+      "dump_name": "transformer_layers_2_pre_norm",
+      "module_path": "transformer.layers.2.pre_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.2.pre_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 68,
+      "dump_name": "transformer_layers_2_self_attn_to_qkv",
+      "module_path": "transformer.layers.2.self_attn.to_qkv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.2.self_attn.to_qkv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        3072
+      ]
+    },
+    {
+      "order": 69,
+      "dump_name": "transformer_layers_2_self_attn_q_norm",
+      "module_path": "transformer.layers.2.self_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.2.self_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 70,
+      "dump_name": "transformer_layers_2_self_attn_k_norm",
+      "module_path": "transformer.layers.2.self_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.2.self_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 71,
+      "dump_name": "transformer_layers_2_self_attn_to_out",
+      "module_path": "transformer.layers.2.self_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.2.self_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 72,
+      "dump_name": "transformer_layers_2_self_attn",
+      "module_path": "transformer.layers.2.self_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 73,
+      "dump_name": "transformer_layers_2_self_attn_scale",
+      "module_path": "transformer.layers.2.self_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 74,
+      "dump_name": "transformer_layers_2_cross_attend_norm",
+      "module_path": "transformer.layers.2.cross_attend_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.2.cross_attend_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 75,
+      "dump_name": "transformer_layers_2_cross_attn_to_q",
+      "module_path": "transformer.layers.2.cross_attn.to_q",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.2.cross_attn.to_q",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 76,
+      "dump_name": "transformer_layers_2_cross_attn_to_kv",
+      "module_path": "transformer.layers.2.cross_attn.to_kv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.2.cross_attn.to_kv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        2048
+      ]
+    },
+    {
+      "order": 77,
+      "dump_name": "transformer_layers_2_cross_attn_q_norm",
+      "module_path": "transformer.layers.2.cross_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.2.cross_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 78,
+      "dump_name": "transformer_layers_2_cross_attn_k_norm",
+      "module_path": "transformer.layers.2.cross_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.2.cross_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        65,
+        128
+      ]
+    },
+    {
+      "order": 79,
+      "dump_name": "transformer_layers_2_cross_attn_to_out",
+      "module_path": "transformer.layers.2.cross_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.2.cross_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 80,
+      "dump_name": "transformer_layers_2_cross_attn",
+      "module_path": "transformer.layers.2.cross_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 81,
+      "dump_name": "transformer_layers_2_cross_attn_scale",
+      "module_path": "transformer.layers.2.cross_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 82,
+      "dump_name": "transformer_layers_2_ff_norm",
+      "module_path": "transformer.layers.2.ff_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.2.ff_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 83,
+      "dump_name": "transformer_layers_2_ff_ff_0_proj",
+      "module_path": "transformer.layers.2.ff.ff.0.proj",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.2.ff.ff.0.proj",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        8192
+      ]
+    },
+    {
+      "order": 84,
+      "dump_name": "transformer_layers_2_ff_ff_0_act",
+      "module_path": "transformer.layers.2.ff.ff.0.act",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 85,
+      "dump_name": "transformer_layers_2_ff_ff_0",
+      "module_path": "transformer.layers.2.ff.ff.0",
+      "module_class": "GLU",
+      "weight_prefix": null,
+      "op": "GLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 86,
+      "dump_name": "transformer_layers_2_ff_ff_1",
+      "module_path": "transformer.layers.2.ff.ff.1",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 87,
+      "dump_name": "transformer_layers_2_ff_ff_2",
+      "module_path": "transformer.layers.2.ff.ff.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.2.ff.ff.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 88,
+      "dump_name": "transformer_layers_2_ff_ff_3",
+      "module_path": "transformer.layers.2.ff.ff.3",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 89,
+      "dump_name": "transformer_layers_2_ff_ff",
+      "module_path": "transformer.layers.2.ff.ff",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 90,
+      "dump_name": "transformer_layers_2_ff",
+      "module_path": "transformer.layers.2.ff",
+      "module_class": "FeedForward",
+      "weight_prefix": null,
+      "op": "FeedForward",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 91,
+      "dump_name": "transformer_layers_2_ff_scale",
+      "module_path": "transformer.layers.2.ff_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 92,
+      "dump_name": "transformer_layers_2",
+      "module_path": "transformer.layers.2",
+      "module_class": "TransformerBlock",
+      "weight_prefix": null,
+      "op": "TransformerBlock",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 93,
+      "dump_name": "transformer_layers_3_pre_norm",
+      "module_path": "transformer.layers.3.pre_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.3.pre_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 94,
+      "dump_name": "transformer_layers_3_self_attn_to_qkv",
+      "module_path": "transformer.layers.3.self_attn.to_qkv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.3.self_attn.to_qkv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        3072
+      ]
+    },
+    {
+      "order": 95,
+      "dump_name": "transformer_layers_3_self_attn_q_norm",
+      "module_path": "transformer.layers.3.self_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.3.self_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 96,
+      "dump_name": "transformer_layers_3_self_attn_k_norm",
+      "module_path": "transformer.layers.3.self_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.3.self_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 97,
+      "dump_name": "transformer_layers_3_self_attn_to_out",
+      "module_path": "transformer.layers.3.self_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.3.self_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 98,
+      "dump_name": "transformer_layers_3_self_attn",
+      "module_path": "transformer.layers.3.self_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 99,
+      "dump_name": "transformer_layers_3_self_attn_scale",
+      "module_path": "transformer.layers.3.self_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 100,
+      "dump_name": "transformer_layers_3_cross_attend_norm",
+      "module_path": "transformer.layers.3.cross_attend_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.3.cross_attend_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 101,
+      "dump_name": "transformer_layers_3_cross_attn_to_q",
+      "module_path": "transformer.layers.3.cross_attn.to_q",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.3.cross_attn.to_q",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 102,
+      "dump_name": "transformer_layers_3_cross_attn_to_kv",
+      "module_path": "transformer.layers.3.cross_attn.to_kv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.3.cross_attn.to_kv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        2048
+      ]
+    },
+    {
+      "order": 103,
+      "dump_name": "transformer_layers_3_cross_attn_q_norm",
+      "module_path": "transformer.layers.3.cross_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.3.cross_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 104,
+      "dump_name": "transformer_layers_3_cross_attn_k_norm",
+      "module_path": "transformer.layers.3.cross_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.3.cross_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        65,
+        128
+      ]
+    },
+    {
+      "order": 105,
+      "dump_name": "transformer_layers_3_cross_attn_to_out",
+      "module_path": "transformer.layers.3.cross_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.3.cross_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 106,
+      "dump_name": "transformer_layers_3_cross_attn",
+      "module_path": "transformer.layers.3.cross_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 107,
+      "dump_name": "transformer_layers_3_cross_attn_scale",
+      "module_path": "transformer.layers.3.cross_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 108,
+      "dump_name": "transformer_layers_3_ff_norm",
+      "module_path": "transformer.layers.3.ff_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.3.ff_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 109,
+      "dump_name": "transformer_layers_3_ff_ff_0_proj",
+      "module_path": "transformer.layers.3.ff.ff.0.proj",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.3.ff.ff.0.proj",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        8192
+      ]
+    },
+    {
+      "order": 110,
+      "dump_name": "transformer_layers_3_ff_ff_0_act",
+      "module_path": "transformer.layers.3.ff.ff.0.act",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 111,
+      "dump_name": "transformer_layers_3_ff_ff_0",
+      "module_path": "transformer.layers.3.ff.ff.0",
+      "module_class": "GLU",
+      "weight_prefix": null,
+      "op": "GLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 112,
+      "dump_name": "transformer_layers_3_ff_ff_1",
+      "module_path": "transformer.layers.3.ff.ff.1",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 113,
+      "dump_name": "transformer_layers_3_ff_ff_2",
+      "module_path": "transformer.layers.3.ff.ff.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.3.ff.ff.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 114,
+      "dump_name": "transformer_layers_3_ff_ff_3",
+      "module_path": "transformer.layers.3.ff.ff.3",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 115,
+      "dump_name": "transformer_layers_3_ff_ff",
+      "module_path": "transformer.layers.3.ff.ff",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 116,
+      "dump_name": "transformer_layers_3_ff",
+      "module_path": "transformer.layers.3.ff",
+      "module_class": "FeedForward",
+      "weight_prefix": null,
+      "op": "FeedForward",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 117,
+      "dump_name": "transformer_layers_3_ff_scale",
+      "module_path": "transformer.layers.3.ff_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 118,
+      "dump_name": "transformer_layers_3",
+      "module_path": "transformer.layers.3",
+      "module_class": "TransformerBlock",
+      "weight_prefix": null,
+      "op": "TransformerBlock",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 119,
+      "dump_name": "transformer_layers_4_pre_norm",
+      "module_path": "transformer.layers.4.pre_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.4.pre_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 120,
+      "dump_name": "transformer_layers_4_self_attn_to_qkv",
+      "module_path": "transformer.layers.4.self_attn.to_qkv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.4.self_attn.to_qkv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        3072
+      ]
+    },
+    {
+      "order": 121,
+      "dump_name": "transformer_layers_4_self_attn_q_norm",
+      "module_path": "transformer.layers.4.self_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.4.self_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 122,
+      "dump_name": "transformer_layers_4_self_attn_k_norm",
+      "module_path": "transformer.layers.4.self_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.4.self_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 123,
+      "dump_name": "transformer_layers_4_self_attn_to_out",
+      "module_path": "transformer.layers.4.self_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.4.self_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 124,
+      "dump_name": "transformer_layers_4_self_attn",
+      "module_path": "transformer.layers.4.self_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 125,
+      "dump_name": "transformer_layers_4_self_attn_scale",
+      "module_path": "transformer.layers.4.self_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 126,
+      "dump_name": "transformer_layers_4_cross_attend_norm",
+      "module_path": "transformer.layers.4.cross_attend_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.4.cross_attend_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 127,
+      "dump_name": "transformer_layers_4_cross_attn_to_q",
+      "module_path": "transformer.layers.4.cross_attn.to_q",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.4.cross_attn.to_q",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 128,
+      "dump_name": "transformer_layers_4_cross_attn_to_kv",
+      "module_path": "transformer.layers.4.cross_attn.to_kv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.4.cross_attn.to_kv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        2048
+      ]
+    },
+    {
+      "order": 129,
+      "dump_name": "transformer_layers_4_cross_attn_q_norm",
+      "module_path": "transformer.layers.4.cross_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.4.cross_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 130,
+      "dump_name": "transformer_layers_4_cross_attn_k_norm",
+      "module_path": "transformer.layers.4.cross_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.4.cross_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        65,
+        128
+      ]
+    },
+    {
+      "order": 131,
+      "dump_name": "transformer_layers_4_cross_attn_to_out",
+      "module_path": "transformer.layers.4.cross_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.4.cross_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 132,
+      "dump_name": "transformer_layers_4_cross_attn",
+      "module_path": "transformer.layers.4.cross_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 133,
+      "dump_name": "transformer_layers_4_cross_attn_scale",
+      "module_path": "transformer.layers.4.cross_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 134,
+      "dump_name": "transformer_layers_4_ff_norm",
+      "module_path": "transformer.layers.4.ff_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.4.ff_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 135,
+      "dump_name": "transformer_layers_4_ff_ff_0_proj",
+      "module_path": "transformer.layers.4.ff.ff.0.proj",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.4.ff.ff.0.proj",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        8192
+      ]
+    },
+    {
+      "order": 136,
+      "dump_name": "transformer_layers_4_ff_ff_0_act",
+      "module_path": "transformer.layers.4.ff.ff.0.act",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 137,
+      "dump_name": "transformer_layers_4_ff_ff_0",
+      "module_path": "transformer.layers.4.ff.ff.0",
+      "module_class": "GLU",
+      "weight_prefix": null,
+      "op": "GLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 138,
+      "dump_name": "transformer_layers_4_ff_ff_1",
+      "module_path": "transformer.layers.4.ff.ff.1",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 139,
+      "dump_name": "transformer_layers_4_ff_ff_2",
+      "module_path": "transformer.layers.4.ff.ff.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.4.ff.ff.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 140,
+      "dump_name": "transformer_layers_4_ff_ff_3",
+      "module_path": "transformer.layers.4.ff.ff.3",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 141,
+      "dump_name": "transformer_layers_4_ff_ff",
+      "module_path": "transformer.layers.4.ff.ff",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 142,
+      "dump_name": "transformer_layers_4_ff",
+      "module_path": "transformer.layers.4.ff",
+      "module_class": "FeedForward",
+      "weight_prefix": null,
+      "op": "FeedForward",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 143,
+      "dump_name": "transformer_layers_4_ff_scale",
+      "module_path": "transformer.layers.4.ff_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 144,
+      "dump_name": "transformer_layers_4",
+      "module_path": "transformer.layers.4",
+      "module_class": "TransformerBlock",
+      "weight_prefix": null,
+      "op": "TransformerBlock",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 145,
+      "dump_name": "transformer_layers_5_pre_norm",
+      "module_path": "transformer.layers.5.pre_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.5.pre_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 146,
+      "dump_name": "transformer_layers_5_self_attn_to_qkv",
+      "module_path": "transformer.layers.5.self_attn.to_qkv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.5.self_attn.to_qkv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        3072
+      ]
+    },
+    {
+      "order": 147,
+      "dump_name": "transformer_layers_5_self_attn_q_norm",
+      "module_path": "transformer.layers.5.self_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.5.self_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 148,
+      "dump_name": "transformer_layers_5_self_attn_k_norm",
+      "module_path": "transformer.layers.5.self_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.5.self_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 149,
+      "dump_name": "transformer_layers_5_self_attn_to_out",
+      "module_path": "transformer.layers.5.self_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.5.self_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 150,
+      "dump_name": "transformer_layers_5_self_attn",
+      "module_path": "transformer.layers.5.self_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 151,
+      "dump_name": "transformer_layers_5_self_attn_scale",
+      "module_path": "transformer.layers.5.self_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 152,
+      "dump_name": "transformer_layers_5_cross_attend_norm",
+      "module_path": "transformer.layers.5.cross_attend_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.5.cross_attend_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 153,
+      "dump_name": "transformer_layers_5_cross_attn_to_q",
+      "module_path": "transformer.layers.5.cross_attn.to_q",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.5.cross_attn.to_q",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 154,
+      "dump_name": "transformer_layers_5_cross_attn_to_kv",
+      "module_path": "transformer.layers.5.cross_attn.to_kv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.5.cross_attn.to_kv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        2048
+      ]
+    },
+    {
+      "order": 155,
+      "dump_name": "transformer_layers_5_cross_attn_q_norm",
+      "module_path": "transformer.layers.5.cross_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.5.cross_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 156,
+      "dump_name": "transformer_layers_5_cross_attn_k_norm",
+      "module_path": "transformer.layers.5.cross_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.5.cross_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        65,
+        128
+      ]
+    },
+    {
+      "order": 157,
+      "dump_name": "transformer_layers_5_cross_attn_to_out",
+      "module_path": "transformer.layers.5.cross_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.5.cross_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 158,
+      "dump_name": "transformer_layers_5_cross_attn",
+      "module_path": "transformer.layers.5.cross_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 159,
+      "dump_name": "transformer_layers_5_cross_attn_scale",
+      "module_path": "transformer.layers.5.cross_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 160,
+      "dump_name": "transformer_layers_5_ff_norm",
+      "module_path": "transformer.layers.5.ff_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.5.ff_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 161,
+      "dump_name": "transformer_layers_5_ff_ff_0_proj",
+      "module_path": "transformer.layers.5.ff.ff.0.proj",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.5.ff.ff.0.proj",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        8192
+      ]
+    },
+    {
+      "order": 162,
+      "dump_name": "transformer_layers_5_ff_ff_0_act",
+      "module_path": "transformer.layers.5.ff.ff.0.act",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 163,
+      "dump_name": "transformer_layers_5_ff_ff_0",
+      "module_path": "transformer.layers.5.ff.ff.0",
+      "module_class": "GLU",
+      "weight_prefix": null,
+      "op": "GLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 164,
+      "dump_name": "transformer_layers_5_ff_ff_1",
+      "module_path": "transformer.layers.5.ff.ff.1",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 165,
+      "dump_name": "transformer_layers_5_ff_ff_2",
+      "module_path": "transformer.layers.5.ff.ff.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.5.ff.ff.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 166,
+      "dump_name": "transformer_layers_5_ff_ff_3",
+      "module_path": "transformer.layers.5.ff.ff.3",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 167,
+      "dump_name": "transformer_layers_5_ff_ff",
+      "module_path": "transformer.layers.5.ff.ff",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 168,
+      "dump_name": "transformer_layers_5_ff",
+      "module_path": "transformer.layers.5.ff",
+      "module_class": "FeedForward",
+      "weight_prefix": null,
+      "op": "FeedForward",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 169,
+      "dump_name": "transformer_layers_5_ff_scale",
+      "module_path": "transformer.layers.5.ff_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 170,
+      "dump_name": "transformer_layers_5",
+      "module_path": "transformer.layers.5",
+      "module_class": "TransformerBlock",
+      "weight_prefix": null,
+      "op": "TransformerBlock",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 171,
+      "dump_name": "transformer_layers_6_pre_norm",
+      "module_path": "transformer.layers.6.pre_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.6.pre_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 172,
+      "dump_name": "transformer_layers_6_self_attn_to_qkv",
+      "module_path": "transformer.layers.6.self_attn.to_qkv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.6.self_attn.to_qkv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        3072
+      ]
+    },
+    {
+      "order": 173,
+      "dump_name": "transformer_layers_6_self_attn_q_norm",
+      "module_path": "transformer.layers.6.self_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.6.self_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 174,
+      "dump_name": "transformer_layers_6_self_attn_k_norm",
+      "module_path": "transformer.layers.6.self_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.6.self_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 175,
+      "dump_name": "transformer_layers_6_self_attn_to_out",
+      "module_path": "transformer.layers.6.self_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.6.self_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 176,
+      "dump_name": "transformer_layers_6_self_attn",
+      "module_path": "transformer.layers.6.self_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 177,
+      "dump_name": "transformer_layers_6_self_attn_scale",
+      "module_path": "transformer.layers.6.self_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 178,
+      "dump_name": "transformer_layers_6_cross_attend_norm",
+      "module_path": "transformer.layers.6.cross_attend_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.6.cross_attend_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 179,
+      "dump_name": "transformer_layers_6_cross_attn_to_q",
+      "module_path": "transformer.layers.6.cross_attn.to_q",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.6.cross_attn.to_q",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 180,
+      "dump_name": "transformer_layers_6_cross_attn_to_kv",
+      "module_path": "transformer.layers.6.cross_attn.to_kv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.6.cross_attn.to_kv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        2048
+      ]
+    },
+    {
+      "order": 181,
+      "dump_name": "transformer_layers_6_cross_attn_q_norm",
+      "module_path": "transformer.layers.6.cross_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.6.cross_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 182,
+      "dump_name": "transformer_layers_6_cross_attn_k_norm",
+      "module_path": "transformer.layers.6.cross_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.6.cross_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        65,
+        128
+      ]
+    },
+    {
+      "order": 183,
+      "dump_name": "transformer_layers_6_cross_attn_to_out",
+      "module_path": "transformer.layers.6.cross_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.6.cross_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 184,
+      "dump_name": "transformer_layers_6_cross_attn",
+      "module_path": "transformer.layers.6.cross_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 185,
+      "dump_name": "transformer_layers_6_cross_attn_scale",
+      "module_path": "transformer.layers.6.cross_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 186,
+      "dump_name": "transformer_layers_6_ff_norm",
+      "module_path": "transformer.layers.6.ff_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.6.ff_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 187,
+      "dump_name": "transformer_layers_6_ff_ff_0_proj",
+      "module_path": "transformer.layers.6.ff.ff.0.proj",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.6.ff.ff.0.proj",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        8192
+      ]
+    },
+    {
+      "order": 188,
+      "dump_name": "transformer_layers_6_ff_ff_0_act",
+      "module_path": "transformer.layers.6.ff.ff.0.act",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 189,
+      "dump_name": "transformer_layers_6_ff_ff_0",
+      "module_path": "transformer.layers.6.ff.ff.0",
+      "module_class": "GLU",
+      "weight_prefix": null,
+      "op": "GLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 190,
+      "dump_name": "transformer_layers_6_ff_ff_1",
+      "module_path": "transformer.layers.6.ff.ff.1",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 191,
+      "dump_name": "transformer_layers_6_ff_ff_2",
+      "module_path": "transformer.layers.6.ff.ff.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.6.ff.ff.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 192,
+      "dump_name": "transformer_layers_6_ff_ff_3",
+      "module_path": "transformer.layers.6.ff.ff.3",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 193,
+      "dump_name": "transformer_layers_6_ff_ff",
+      "module_path": "transformer.layers.6.ff.ff",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 194,
+      "dump_name": "transformer_layers_6_ff",
+      "module_path": "transformer.layers.6.ff",
+      "module_class": "FeedForward",
+      "weight_prefix": null,
+      "op": "FeedForward",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 195,
+      "dump_name": "transformer_layers_6_ff_scale",
+      "module_path": "transformer.layers.6.ff_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 196,
+      "dump_name": "transformer_layers_6",
+      "module_path": "transformer.layers.6",
+      "module_class": "TransformerBlock",
+      "weight_prefix": null,
+      "op": "TransformerBlock",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 197,
+      "dump_name": "transformer_layers_7_pre_norm",
+      "module_path": "transformer.layers.7.pre_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.7.pre_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 198,
+      "dump_name": "transformer_layers_7_self_attn_to_qkv",
+      "module_path": "transformer.layers.7.self_attn.to_qkv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.7.self_attn.to_qkv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        3072
+      ]
+    },
+    {
+      "order": 199,
+      "dump_name": "transformer_layers_7_self_attn_q_norm",
+      "module_path": "transformer.layers.7.self_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.7.self_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 200,
+      "dump_name": "transformer_layers_7_self_attn_k_norm",
+      "module_path": "transformer.layers.7.self_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.7.self_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 201,
+      "dump_name": "transformer_layers_7_self_attn_to_out",
+      "module_path": "transformer.layers.7.self_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.7.self_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 202,
+      "dump_name": "transformer_layers_7_self_attn",
+      "module_path": "transformer.layers.7.self_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 203,
+      "dump_name": "transformer_layers_7_self_attn_scale",
+      "module_path": "transformer.layers.7.self_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 204,
+      "dump_name": "transformer_layers_7_cross_attend_norm",
+      "module_path": "transformer.layers.7.cross_attend_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.7.cross_attend_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 205,
+      "dump_name": "transformer_layers_7_cross_attn_to_q",
+      "module_path": "transformer.layers.7.cross_attn.to_q",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.7.cross_attn.to_q",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 206,
+      "dump_name": "transformer_layers_7_cross_attn_to_kv",
+      "module_path": "transformer.layers.7.cross_attn.to_kv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.7.cross_attn.to_kv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        2048
+      ]
+    },
+    {
+      "order": 207,
+      "dump_name": "transformer_layers_7_cross_attn_q_norm",
+      "module_path": "transformer.layers.7.cross_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.7.cross_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 208,
+      "dump_name": "transformer_layers_7_cross_attn_k_norm",
+      "module_path": "transformer.layers.7.cross_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.7.cross_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        65,
+        128
+      ]
+    },
+    {
+      "order": 209,
+      "dump_name": "transformer_layers_7_cross_attn_to_out",
+      "module_path": "transformer.layers.7.cross_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.7.cross_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 210,
+      "dump_name": "transformer_layers_7_cross_attn",
+      "module_path": "transformer.layers.7.cross_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 211,
+      "dump_name": "transformer_layers_7_cross_attn_scale",
+      "module_path": "transformer.layers.7.cross_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 212,
+      "dump_name": "transformer_layers_7_ff_norm",
+      "module_path": "transformer.layers.7.ff_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.7.ff_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 213,
+      "dump_name": "transformer_layers_7_ff_ff_0_proj",
+      "module_path": "transformer.layers.7.ff.ff.0.proj",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.7.ff.ff.0.proj",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        8192
+      ]
+    },
+    {
+      "order": 214,
+      "dump_name": "transformer_layers_7_ff_ff_0_act",
+      "module_path": "transformer.layers.7.ff.ff.0.act",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 215,
+      "dump_name": "transformer_layers_7_ff_ff_0",
+      "module_path": "transformer.layers.7.ff.ff.0",
+      "module_class": "GLU",
+      "weight_prefix": null,
+      "op": "GLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 216,
+      "dump_name": "transformer_layers_7_ff_ff_1",
+      "module_path": "transformer.layers.7.ff.ff.1",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 217,
+      "dump_name": "transformer_layers_7_ff_ff_2",
+      "module_path": "transformer.layers.7.ff.ff.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.7.ff.ff.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 218,
+      "dump_name": "transformer_layers_7_ff_ff_3",
+      "module_path": "transformer.layers.7.ff.ff.3",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 219,
+      "dump_name": "transformer_layers_7_ff_ff",
+      "module_path": "transformer.layers.7.ff.ff",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 220,
+      "dump_name": "transformer_layers_7_ff",
+      "module_path": "transformer.layers.7.ff",
+      "module_class": "FeedForward",
+      "weight_prefix": null,
+      "op": "FeedForward",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 221,
+      "dump_name": "transformer_layers_7_ff_scale",
+      "module_path": "transformer.layers.7.ff_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 222,
+      "dump_name": "transformer_layers_7",
+      "module_path": "transformer.layers.7",
+      "module_class": "TransformerBlock",
+      "weight_prefix": null,
+      "op": "TransformerBlock",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 223,
+      "dump_name": "transformer_layers_8_pre_norm",
+      "module_path": "transformer.layers.8.pre_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.8.pre_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 224,
+      "dump_name": "transformer_layers_8_self_attn_to_qkv",
+      "module_path": "transformer.layers.8.self_attn.to_qkv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.8.self_attn.to_qkv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        3072
+      ]
+    },
+    {
+      "order": 225,
+      "dump_name": "transformer_layers_8_self_attn_q_norm",
+      "module_path": "transformer.layers.8.self_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.8.self_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 226,
+      "dump_name": "transformer_layers_8_self_attn_k_norm",
+      "module_path": "transformer.layers.8.self_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.8.self_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 227,
+      "dump_name": "transformer_layers_8_self_attn_to_out",
+      "module_path": "transformer.layers.8.self_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.8.self_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 228,
+      "dump_name": "transformer_layers_8_self_attn",
+      "module_path": "transformer.layers.8.self_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 229,
+      "dump_name": "transformer_layers_8_self_attn_scale",
+      "module_path": "transformer.layers.8.self_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 230,
+      "dump_name": "transformer_layers_8_cross_attend_norm",
+      "module_path": "transformer.layers.8.cross_attend_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.8.cross_attend_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 231,
+      "dump_name": "transformer_layers_8_cross_attn_to_q",
+      "module_path": "transformer.layers.8.cross_attn.to_q",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.8.cross_attn.to_q",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 232,
+      "dump_name": "transformer_layers_8_cross_attn_to_kv",
+      "module_path": "transformer.layers.8.cross_attn.to_kv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.8.cross_attn.to_kv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        2048
+      ]
+    },
+    {
+      "order": 233,
+      "dump_name": "transformer_layers_8_cross_attn_q_norm",
+      "module_path": "transformer.layers.8.cross_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.8.cross_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 234,
+      "dump_name": "transformer_layers_8_cross_attn_k_norm",
+      "module_path": "transformer.layers.8.cross_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.8.cross_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        65,
+        128
+      ]
+    },
+    {
+      "order": 235,
+      "dump_name": "transformer_layers_8_cross_attn_to_out",
+      "module_path": "transformer.layers.8.cross_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.8.cross_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 236,
+      "dump_name": "transformer_layers_8_cross_attn",
+      "module_path": "transformer.layers.8.cross_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 237,
+      "dump_name": "transformer_layers_8_cross_attn_scale",
+      "module_path": "transformer.layers.8.cross_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 238,
+      "dump_name": "transformer_layers_8_ff_norm",
+      "module_path": "transformer.layers.8.ff_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.8.ff_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 239,
+      "dump_name": "transformer_layers_8_ff_ff_0_proj",
+      "module_path": "transformer.layers.8.ff.ff.0.proj",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.8.ff.ff.0.proj",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        8192
+      ]
+    },
+    {
+      "order": 240,
+      "dump_name": "transformer_layers_8_ff_ff_0_act",
+      "module_path": "transformer.layers.8.ff.ff.0.act",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 241,
+      "dump_name": "transformer_layers_8_ff_ff_0",
+      "module_path": "transformer.layers.8.ff.ff.0",
+      "module_class": "GLU",
+      "weight_prefix": null,
+      "op": "GLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 242,
+      "dump_name": "transformer_layers_8_ff_ff_1",
+      "module_path": "transformer.layers.8.ff.ff.1",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 243,
+      "dump_name": "transformer_layers_8_ff_ff_2",
+      "module_path": "transformer.layers.8.ff.ff.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.8.ff.ff.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 244,
+      "dump_name": "transformer_layers_8_ff_ff_3",
+      "module_path": "transformer.layers.8.ff.ff.3",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 245,
+      "dump_name": "transformer_layers_8_ff_ff",
+      "module_path": "transformer.layers.8.ff.ff",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 246,
+      "dump_name": "transformer_layers_8_ff",
+      "module_path": "transformer.layers.8.ff",
+      "module_class": "FeedForward",
+      "weight_prefix": null,
+      "op": "FeedForward",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 247,
+      "dump_name": "transformer_layers_8_ff_scale",
+      "module_path": "transformer.layers.8.ff_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 248,
+      "dump_name": "transformer_layers_8",
+      "module_path": "transformer.layers.8",
+      "module_class": "TransformerBlock",
+      "weight_prefix": null,
+      "op": "TransformerBlock",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 249,
+      "dump_name": "transformer_layers_9_pre_norm",
+      "module_path": "transformer.layers.9.pre_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.9.pre_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 250,
+      "dump_name": "transformer_layers_9_self_attn_to_qkv",
+      "module_path": "transformer.layers.9.self_attn.to_qkv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.9.self_attn.to_qkv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        3072
+      ]
+    },
+    {
+      "order": 251,
+      "dump_name": "transformer_layers_9_self_attn_q_norm",
+      "module_path": "transformer.layers.9.self_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.9.self_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 252,
+      "dump_name": "transformer_layers_9_self_attn_k_norm",
+      "module_path": "transformer.layers.9.self_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.9.self_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 253,
+      "dump_name": "transformer_layers_9_self_attn_to_out",
+      "module_path": "transformer.layers.9.self_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.9.self_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 254,
+      "dump_name": "transformer_layers_9_self_attn",
+      "module_path": "transformer.layers.9.self_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 255,
+      "dump_name": "transformer_layers_9_self_attn_scale",
+      "module_path": "transformer.layers.9.self_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 256,
+      "dump_name": "transformer_layers_9_cross_attend_norm",
+      "module_path": "transformer.layers.9.cross_attend_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.9.cross_attend_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 257,
+      "dump_name": "transformer_layers_9_cross_attn_to_q",
+      "module_path": "transformer.layers.9.cross_attn.to_q",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.9.cross_attn.to_q",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 258,
+      "dump_name": "transformer_layers_9_cross_attn_to_kv",
+      "module_path": "transformer.layers.9.cross_attn.to_kv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.9.cross_attn.to_kv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        2048
+      ]
+    },
+    {
+      "order": 259,
+      "dump_name": "transformer_layers_9_cross_attn_q_norm",
+      "module_path": "transformer.layers.9.cross_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.9.cross_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 260,
+      "dump_name": "transformer_layers_9_cross_attn_k_norm",
+      "module_path": "transformer.layers.9.cross_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.9.cross_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        65,
+        128
+      ]
+    },
+    {
+      "order": 261,
+      "dump_name": "transformer_layers_9_cross_attn_to_out",
+      "module_path": "transformer.layers.9.cross_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.9.cross_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 262,
+      "dump_name": "transformer_layers_9_cross_attn",
+      "module_path": "transformer.layers.9.cross_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 263,
+      "dump_name": "transformer_layers_9_cross_attn_scale",
+      "module_path": "transformer.layers.9.cross_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 264,
+      "dump_name": "transformer_layers_9_ff_norm",
+      "module_path": "transformer.layers.9.ff_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.9.ff_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 265,
+      "dump_name": "transformer_layers_9_ff_ff_0_proj",
+      "module_path": "transformer.layers.9.ff.ff.0.proj",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.9.ff.ff.0.proj",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        8192
+      ]
+    },
+    {
+      "order": 266,
+      "dump_name": "transformer_layers_9_ff_ff_0_act",
+      "module_path": "transformer.layers.9.ff.ff.0.act",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 267,
+      "dump_name": "transformer_layers_9_ff_ff_0",
+      "module_path": "transformer.layers.9.ff.ff.0",
+      "module_class": "GLU",
+      "weight_prefix": null,
+      "op": "GLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 268,
+      "dump_name": "transformer_layers_9_ff_ff_1",
+      "module_path": "transformer.layers.9.ff.ff.1",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 269,
+      "dump_name": "transformer_layers_9_ff_ff_2",
+      "module_path": "transformer.layers.9.ff.ff.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.9.ff.ff.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 270,
+      "dump_name": "transformer_layers_9_ff_ff_3",
+      "module_path": "transformer.layers.9.ff.ff.3",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 271,
+      "dump_name": "transformer_layers_9_ff_ff",
+      "module_path": "transformer.layers.9.ff.ff",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 272,
+      "dump_name": "transformer_layers_9_ff",
+      "module_path": "transformer.layers.9.ff",
+      "module_class": "FeedForward",
+      "weight_prefix": null,
+      "op": "FeedForward",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 273,
+      "dump_name": "transformer_layers_9_ff_scale",
+      "module_path": "transformer.layers.9.ff_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 274,
+      "dump_name": "transformer_layers_9",
+      "module_path": "transformer.layers.9",
+      "module_class": "TransformerBlock",
+      "weight_prefix": null,
+      "op": "TransformerBlock",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 275,
+      "dump_name": "transformer_layers_10_pre_norm",
+      "module_path": "transformer.layers.10.pre_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.10.pre_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 276,
+      "dump_name": "transformer_layers_10_self_attn_to_qkv",
+      "module_path": "transformer.layers.10.self_attn.to_qkv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.10.self_attn.to_qkv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        3072
+      ]
+    },
+    {
+      "order": 277,
+      "dump_name": "transformer_layers_10_self_attn_q_norm",
+      "module_path": "transformer.layers.10.self_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.10.self_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 278,
+      "dump_name": "transformer_layers_10_self_attn_k_norm",
+      "module_path": "transformer.layers.10.self_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.10.self_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 279,
+      "dump_name": "transformer_layers_10_self_attn_to_out",
+      "module_path": "transformer.layers.10.self_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.10.self_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 280,
+      "dump_name": "transformer_layers_10_self_attn",
+      "module_path": "transformer.layers.10.self_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 281,
+      "dump_name": "transformer_layers_10_self_attn_scale",
+      "module_path": "transformer.layers.10.self_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 282,
+      "dump_name": "transformer_layers_10_cross_attend_norm",
+      "module_path": "transformer.layers.10.cross_attend_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.10.cross_attend_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 283,
+      "dump_name": "transformer_layers_10_cross_attn_to_q",
+      "module_path": "transformer.layers.10.cross_attn.to_q",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.10.cross_attn.to_q",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 284,
+      "dump_name": "transformer_layers_10_cross_attn_to_kv",
+      "module_path": "transformer.layers.10.cross_attn.to_kv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.10.cross_attn.to_kv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        2048
+      ]
+    },
+    {
+      "order": 285,
+      "dump_name": "transformer_layers_10_cross_attn_q_norm",
+      "module_path": "transformer.layers.10.cross_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.10.cross_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 286,
+      "dump_name": "transformer_layers_10_cross_attn_k_norm",
+      "module_path": "transformer.layers.10.cross_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.10.cross_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        65,
+        128
+      ]
+    },
+    {
+      "order": 287,
+      "dump_name": "transformer_layers_10_cross_attn_to_out",
+      "module_path": "transformer.layers.10.cross_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.10.cross_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 288,
+      "dump_name": "transformer_layers_10_cross_attn",
+      "module_path": "transformer.layers.10.cross_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 289,
+      "dump_name": "transformer_layers_10_cross_attn_scale",
+      "module_path": "transformer.layers.10.cross_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 290,
+      "dump_name": "transformer_layers_10_ff_norm",
+      "module_path": "transformer.layers.10.ff_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.10.ff_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 291,
+      "dump_name": "transformer_layers_10_ff_ff_0_proj",
+      "module_path": "transformer.layers.10.ff.ff.0.proj",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.10.ff.ff.0.proj",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        8192
+      ]
+    },
+    {
+      "order": 292,
+      "dump_name": "transformer_layers_10_ff_ff_0_act",
+      "module_path": "transformer.layers.10.ff.ff.0.act",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 293,
+      "dump_name": "transformer_layers_10_ff_ff_0",
+      "module_path": "transformer.layers.10.ff.ff.0",
+      "module_class": "GLU",
+      "weight_prefix": null,
+      "op": "GLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 294,
+      "dump_name": "transformer_layers_10_ff_ff_1",
+      "module_path": "transformer.layers.10.ff.ff.1",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 295,
+      "dump_name": "transformer_layers_10_ff_ff_2",
+      "module_path": "transformer.layers.10.ff.ff.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.10.ff.ff.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 296,
+      "dump_name": "transformer_layers_10_ff_ff_3",
+      "module_path": "transformer.layers.10.ff.ff.3",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 297,
+      "dump_name": "transformer_layers_10_ff_ff",
+      "module_path": "transformer.layers.10.ff.ff",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 298,
+      "dump_name": "transformer_layers_10_ff",
+      "module_path": "transformer.layers.10.ff",
+      "module_class": "FeedForward",
+      "weight_prefix": null,
+      "op": "FeedForward",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 299,
+      "dump_name": "transformer_layers_10_ff_scale",
+      "module_path": "transformer.layers.10.ff_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 300,
+      "dump_name": "transformer_layers_10",
+      "module_path": "transformer.layers.10",
+      "module_class": "TransformerBlock",
+      "weight_prefix": null,
+      "op": "TransformerBlock",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 301,
+      "dump_name": "transformer_layers_11_pre_norm",
+      "module_path": "transformer.layers.11.pre_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.11.pre_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 302,
+      "dump_name": "transformer_layers_11_self_attn_to_qkv",
+      "module_path": "transformer.layers.11.self_attn.to_qkv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.11.self_attn.to_qkv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        3072
+      ]
+    },
+    {
+      "order": 303,
+      "dump_name": "transformer_layers_11_self_attn_q_norm",
+      "module_path": "transformer.layers.11.self_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.11.self_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 304,
+      "dump_name": "transformer_layers_11_self_attn_k_norm",
+      "module_path": "transformer.layers.11.self_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.11.self_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 305,
+      "dump_name": "transformer_layers_11_self_attn_to_out",
+      "module_path": "transformer.layers.11.self_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.11.self_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 306,
+      "dump_name": "transformer_layers_11_self_attn",
+      "module_path": "transformer.layers.11.self_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 307,
+      "dump_name": "transformer_layers_11_self_attn_scale",
+      "module_path": "transformer.layers.11.self_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 308,
+      "dump_name": "transformer_layers_11_cross_attend_norm",
+      "module_path": "transformer.layers.11.cross_attend_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.11.cross_attend_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 309,
+      "dump_name": "transformer_layers_11_cross_attn_to_q",
+      "module_path": "transformer.layers.11.cross_attn.to_q",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.11.cross_attn.to_q",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 310,
+      "dump_name": "transformer_layers_11_cross_attn_to_kv",
+      "module_path": "transformer.layers.11.cross_attn.to_kv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.11.cross_attn.to_kv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        2048
+      ]
+    },
+    {
+      "order": 311,
+      "dump_name": "transformer_layers_11_cross_attn_q_norm",
+      "module_path": "transformer.layers.11.cross_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.11.cross_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 312,
+      "dump_name": "transformer_layers_11_cross_attn_k_norm",
+      "module_path": "transformer.layers.11.cross_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.11.cross_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        65,
+        128
+      ]
+    },
+    {
+      "order": 313,
+      "dump_name": "transformer_layers_11_cross_attn_to_out",
+      "module_path": "transformer.layers.11.cross_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.11.cross_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 314,
+      "dump_name": "transformer_layers_11_cross_attn",
+      "module_path": "transformer.layers.11.cross_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 315,
+      "dump_name": "transformer_layers_11_cross_attn_scale",
+      "module_path": "transformer.layers.11.cross_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 316,
+      "dump_name": "transformer_layers_11_ff_norm",
+      "module_path": "transformer.layers.11.ff_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.11.ff_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 317,
+      "dump_name": "transformer_layers_11_ff_ff_0_proj",
+      "module_path": "transformer.layers.11.ff.ff.0.proj",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.11.ff.ff.0.proj",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        8192
+      ]
+    },
+    {
+      "order": 318,
+      "dump_name": "transformer_layers_11_ff_ff_0_act",
+      "module_path": "transformer.layers.11.ff.ff.0.act",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 319,
+      "dump_name": "transformer_layers_11_ff_ff_0",
+      "module_path": "transformer.layers.11.ff.ff.0",
+      "module_class": "GLU",
+      "weight_prefix": null,
+      "op": "GLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 320,
+      "dump_name": "transformer_layers_11_ff_ff_1",
+      "module_path": "transformer.layers.11.ff.ff.1",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 321,
+      "dump_name": "transformer_layers_11_ff_ff_2",
+      "module_path": "transformer.layers.11.ff.ff.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.11.ff.ff.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 322,
+      "dump_name": "transformer_layers_11_ff_ff_3",
+      "module_path": "transformer.layers.11.ff.ff.3",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 323,
+      "dump_name": "transformer_layers_11_ff_ff",
+      "module_path": "transformer.layers.11.ff.ff",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 324,
+      "dump_name": "transformer_layers_11_ff",
+      "module_path": "transformer.layers.11.ff",
+      "module_class": "FeedForward",
+      "weight_prefix": null,
+      "op": "FeedForward",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 325,
+      "dump_name": "transformer_layers_11_ff_scale",
+      "module_path": "transformer.layers.11.ff_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 326,
+      "dump_name": "transformer_layers_11",
+      "module_path": "transformer.layers.11",
+      "module_class": "TransformerBlock",
+      "weight_prefix": null,
+      "op": "TransformerBlock",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 327,
+      "dump_name": "transformer_layers_12_pre_norm",
+      "module_path": "transformer.layers.12.pre_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.12.pre_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 328,
+      "dump_name": "transformer_layers_12_self_attn_to_qkv",
+      "module_path": "transformer.layers.12.self_attn.to_qkv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.12.self_attn.to_qkv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        3072
+      ]
+    },
+    {
+      "order": 329,
+      "dump_name": "transformer_layers_12_self_attn_q_norm",
+      "module_path": "transformer.layers.12.self_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.12.self_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 330,
+      "dump_name": "transformer_layers_12_self_attn_k_norm",
+      "module_path": "transformer.layers.12.self_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.12.self_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 331,
+      "dump_name": "transformer_layers_12_self_attn_to_out",
+      "module_path": "transformer.layers.12.self_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.12.self_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 332,
+      "dump_name": "transformer_layers_12_self_attn",
+      "module_path": "transformer.layers.12.self_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 333,
+      "dump_name": "transformer_layers_12_self_attn_scale",
+      "module_path": "transformer.layers.12.self_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 334,
+      "dump_name": "transformer_layers_12_cross_attend_norm",
+      "module_path": "transformer.layers.12.cross_attend_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.12.cross_attend_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 335,
+      "dump_name": "transformer_layers_12_cross_attn_to_q",
+      "module_path": "transformer.layers.12.cross_attn.to_q",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.12.cross_attn.to_q",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 336,
+      "dump_name": "transformer_layers_12_cross_attn_to_kv",
+      "module_path": "transformer.layers.12.cross_attn.to_kv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.12.cross_attn.to_kv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        2048
+      ]
+    },
+    {
+      "order": 337,
+      "dump_name": "transformer_layers_12_cross_attn_q_norm",
+      "module_path": "transformer.layers.12.cross_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.12.cross_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 338,
+      "dump_name": "transformer_layers_12_cross_attn_k_norm",
+      "module_path": "transformer.layers.12.cross_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.12.cross_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        65,
+        128
+      ]
+    },
+    {
+      "order": 339,
+      "dump_name": "transformer_layers_12_cross_attn_to_out",
+      "module_path": "transformer.layers.12.cross_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.12.cross_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 340,
+      "dump_name": "transformer_layers_12_cross_attn",
+      "module_path": "transformer.layers.12.cross_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 341,
+      "dump_name": "transformer_layers_12_cross_attn_scale",
+      "module_path": "transformer.layers.12.cross_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 342,
+      "dump_name": "transformer_layers_12_ff_norm",
+      "module_path": "transformer.layers.12.ff_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.12.ff_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 343,
+      "dump_name": "transformer_layers_12_ff_ff_0_proj",
+      "module_path": "transformer.layers.12.ff.ff.0.proj",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.12.ff.ff.0.proj",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        8192
+      ]
+    },
+    {
+      "order": 344,
+      "dump_name": "transformer_layers_12_ff_ff_0_act",
+      "module_path": "transformer.layers.12.ff.ff.0.act",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 345,
+      "dump_name": "transformer_layers_12_ff_ff_0",
+      "module_path": "transformer.layers.12.ff.ff.0",
+      "module_class": "GLU",
+      "weight_prefix": null,
+      "op": "GLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 346,
+      "dump_name": "transformer_layers_12_ff_ff_1",
+      "module_path": "transformer.layers.12.ff.ff.1",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 347,
+      "dump_name": "transformer_layers_12_ff_ff_2",
+      "module_path": "transformer.layers.12.ff.ff.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.12.ff.ff.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 348,
+      "dump_name": "transformer_layers_12_ff_ff_3",
+      "module_path": "transformer.layers.12.ff.ff.3",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 349,
+      "dump_name": "transformer_layers_12_ff_ff",
+      "module_path": "transformer.layers.12.ff.ff",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 350,
+      "dump_name": "transformer_layers_12_ff",
+      "module_path": "transformer.layers.12.ff",
+      "module_class": "FeedForward",
+      "weight_prefix": null,
+      "op": "FeedForward",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 351,
+      "dump_name": "transformer_layers_12_ff_scale",
+      "module_path": "transformer.layers.12.ff_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 352,
+      "dump_name": "transformer_layers_12",
+      "module_path": "transformer.layers.12",
+      "module_class": "TransformerBlock",
+      "weight_prefix": null,
+      "op": "TransformerBlock",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 353,
+      "dump_name": "transformer_layers_13_pre_norm",
+      "module_path": "transformer.layers.13.pre_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.13.pre_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 354,
+      "dump_name": "transformer_layers_13_self_attn_to_qkv",
+      "module_path": "transformer.layers.13.self_attn.to_qkv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.13.self_attn.to_qkv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        3072
+      ]
+    },
+    {
+      "order": 355,
+      "dump_name": "transformer_layers_13_self_attn_q_norm",
+      "module_path": "transformer.layers.13.self_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.13.self_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 356,
+      "dump_name": "transformer_layers_13_self_attn_k_norm",
+      "module_path": "transformer.layers.13.self_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.13.self_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 357,
+      "dump_name": "transformer_layers_13_self_attn_to_out",
+      "module_path": "transformer.layers.13.self_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.13.self_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 358,
+      "dump_name": "transformer_layers_13_self_attn",
+      "module_path": "transformer.layers.13.self_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 359,
+      "dump_name": "transformer_layers_13_self_attn_scale",
+      "module_path": "transformer.layers.13.self_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 360,
+      "dump_name": "transformer_layers_13_cross_attend_norm",
+      "module_path": "transformer.layers.13.cross_attend_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.13.cross_attend_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 361,
+      "dump_name": "transformer_layers_13_cross_attn_to_q",
+      "module_path": "transformer.layers.13.cross_attn.to_q",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.13.cross_attn.to_q",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 362,
+      "dump_name": "transformer_layers_13_cross_attn_to_kv",
+      "module_path": "transformer.layers.13.cross_attn.to_kv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.13.cross_attn.to_kv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        2048
+      ]
+    },
+    {
+      "order": 363,
+      "dump_name": "transformer_layers_13_cross_attn_q_norm",
+      "module_path": "transformer.layers.13.cross_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.13.cross_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 364,
+      "dump_name": "transformer_layers_13_cross_attn_k_norm",
+      "module_path": "transformer.layers.13.cross_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.13.cross_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        65,
+        128
+      ]
+    },
+    {
+      "order": 365,
+      "dump_name": "transformer_layers_13_cross_attn_to_out",
+      "module_path": "transformer.layers.13.cross_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.13.cross_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 366,
+      "dump_name": "transformer_layers_13_cross_attn",
+      "module_path": "transformer.layers.13.cross_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 367,
+      "dump_name": "transformer_layers_13_cross_attn_scale",
+      "module_path": "transformer.layers.13.cross_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 368,
+      "dump_name": "transformer_layers_13_ff_norm",
+      "module_path": "transformer.layers.13.ff_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.13.ff_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 369,
+      "dump_name": "transformer_layers_13_ff_ff_0_proj",
+      "module_path": "transformer.layers.13.ff.ff.0.proj",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.13.ff.ff.0.proj",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        8192
+      ]
+    },
+    {
+      "order": 370,
+      "dump_name": "transformer_layers_13_ff_ff_0_act",
+      "module_path": "transformer.layers.13.ff.ff.0.act",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 371,
+      "dump_name": "transformer_layers_13_ff_ff_0",
+      "module_path": "transformer.layers.13.ff.ff.0",
+      "module_class": "GLU",
+      "weight_prefix": null,
+      "op": "GLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 372,
+      "dump_name": "transformer_layers_13_ff_ff_1",
+      "module_path": "transformer.layers.13.ff.ff.1",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 373,
+      "dump_name": "transformer_layers_13_ff_ff_2",
+      "module_path": "transformer.layers.13.ff.ff.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.13.ff.ff.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 374,
+      "dump_name": "transformer_layers_13_ff_ff_3",
+      "module_path": "transformer.layers.13.ff.ff.3",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 375,
+      "dump_name": "transformer_layers_13_ff_ff",
+      "module_path": "transformer.layers.13.ff.ff",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 376,
+      "dump_name": "transformer_layers_13_ff",
+      "module_path": "transformer.layers.13.ff",
+      "module_class": "FeedForward",
+      "weight_prefix": null,
+      "op": "FeedForward",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 377,
+      "dump_name": "transformer_layers_13_ff_scale",
+      "module_path": "transformer.layers.13.ff_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 378,
+      "dump_name": "transformer_layers_13",
+      "module_path": "transformer.layers.13",
+      "module_class": "TransformerBlock",
+      "weight_prefix": null,
+      "op": "TransformerBlock",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 379,
+      "dump_name": "transformer_layers_14_pre_norm",
+      "module_path": "transformer.layers.14.pre_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.14.pre_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 380,
+      "dump_name": "transformer_layers_14_self_attn_to_qkv",
+      "module_path": "transformer.layers.14.self_attn.to_qkv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.14.self_attn.to_qkv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        3072
+      ]
+    },
+    {
+      "order": 381,
+      "dump_name": "transformer_layers_14_self_attn_q_norm",
+      "module_path": "transformer.layers.14.self_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.14.self_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 382,
+      "dump_name": "transformer_layers_14_self_attn_k_norm",
+      "module_path": "transformer.layers.14.self_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.14.self_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 383,
+      "dump_name": "transformer_layers_14_self_attn_to_out",
+      "module_path": "transformer.layers.14.self_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.14.self_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 384,
+      "dump_name": "transformer_layers_14_self_attn",
+      "module_path": "transformer.layers.14.self_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 385,
+      "dump_name": "transformer_layers_14_self_attn_scale",
+      "module_path": "transformer.layers.14.self_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 386,
+      "dump_name": "transformer_layers_14_cross_attend_norm",
+      "module_path": "transformer.layers.14.cross_attend_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.14.cross_attend_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 387,
+      "dump_name": "transformer_layers_14_cross_attn_to_q",
+      "module_path": "transformer.layers.14.cross_attn.to_q",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.14.cross_attn.to_q",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 388,
+      "dump_name": "transformer_layers_14_cross_attn_to_kv",
+      "module_path": "transformer.layers.14.cross_attn.to_kv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.14.cross_attn.to_kv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        2048
+      ]
+    },
+    {
+      "order": 389,
+      "dump_name": "transformer_layers_14_cross_attn_q_norm",
+      "module_path": "transformer.layers.14.cross_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.14.cross_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 390,
+      "dump_name": "transformer_layers_14_cross_attn_k_norm",
+      "module_path": "transformer.layers.14.cross_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.14.cross_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        65,
+        128
+      ]
+    },
+    {
+      "order": 391,
+      "dump_name": "transformer_layers_14_cross_attn_to_out",
+      "module_path": "transformer.layers.14.cross_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.14.cross_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 392,
+      "dump_name": "transformer_layers_14_cross_attn",
+      "module_path": "transformer.layers.14.cross_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 393,
+      "dump_name": "transformer_layers_14_cross_attn_scale",
+      "module_path": "transformer.layers.14.cross_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 394,
+      "dump_name": "transformer_layers_14_ff_norm",
+      "module_path": "transformer.layers.14.ff_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.14.ff_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 395,
+      "dump_name": "transformer_layers_14_ff_ff_0_proj",
+      "module_path": "transformer.layers.14.ff.ff.0.proj",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.14.ff.ff.0.proj",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        8192
+      ]
+    },
+    {
+      "order": 396,
+      "dump_name": "transformer_layers_14_ff_ff_0_act",
+      "module_path": "transformer.layers.14.ff.ff.0.act",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 397,
+      "dump_name": "transformer_layers_14_ff_ff_0",
+      "module_path": "transformer.layers.14.ff.ff.0",
+      "module_class": "GLU",
+      "weight_prefix": null,
+      "op": "GLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 398,
+      "dump_name": "transformer_layers_14_ff_ff_1",
+      "module_path": "transformer.layers.14.ff.ff.1",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 399,
+      "dump_name": "transformer_layers_14_ff_ff_2",
+      "module_path": "transformer.layers.14.ff.ff.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.14.ff.ff.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 400,
+      "dump_name": "transformer_layers_14_ff_ff_3",
+      "module_path": "transformer.layers.14.ff.ff.3",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 401,
+      "dump_name": "transformer_layers_14_ff_ff",
+      "module_path": "transformer.layers.14.ff.ff",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 402,
+      "dump_name": "transformer_layers_14_ff",
+      "module_path": "transformer.layers.14.ff",
+      "module_class": "FeedForward",
+      "weight_prefix": null,
+      "op": "FeedForward",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 403,
+      "dump_name": "transformer_layers_14_ff_scale",
+      "module_path": "transformer.layers.14.ff_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 404,
+      "dump_name": "transformer_layers_14",
+      "module_path": "transformer.layers.14",
+      "module_class": "TransformerBlock",
+      "weight_prefix": null,
+      "op": "TransformerBlock",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 405,
+      "dump_name": "transformer_layers_15_pre_norm",
+      "module_path": "transformer.layers.15.pre_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.15.pre_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 406,
+      "dump_name": "transformer_layers_15_self_attn_to_qkv",
+      "module_path": "transformer.layers.15.self_attn.to_qkv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.15.self_attn.to_qkv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        3072
+      ]
+    },
+    {
+      "order": 407,
+      "dump_name": "transformer_layers_15_self_attn_q_norm",
+      "module_path": "transformer.layers.15.self_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.15.self_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 408,
+      "dump_name": "transformer_layers_15_self_attn_k_norm",
+      "module_path": "transformer.layers.15.self_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.15.self_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 409,
+      "dump_name": "transformer_layers_15_self_attn_to_out",
+      "module_path": "transformer.layers.15.self_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.15.self_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 410,
+      "dump_name": "transformer_layers_15_self_attn",
+      "module_path": "transformer.layers.15.self_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 411,
+      "dump_name": "transformer_layers_15_self_attn_scale",
+      "module_path": "transformer.layers.15.self_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 412,
+      "dump_name": "transformer_layers_15_cross_attend_norm",
+      "module_path": "transformer.layers.15.cross_attend_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.15.cross_attend_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 413,
+      "dump_name": "transformer_layers_15_cross_attn_to_q",
+      "module_path": "transformer.layers.15.cross_attn.to_q",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.15.cross_attn.to_q",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 414,
+      "dump_name": "transformer_layers_15_cross_attn_to_kv",
+      "module_path": "transformer.layers.15.cross_attn.to_kv",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.15.cross_attn.to_kv",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        65,
+        2048
+      ]
+    },
+    {
+      "order": 415,
+      "dump_name": "transformer_layers_15_cross_attn_q_norm",
+      "module_path": "transformer.layers.15.cross_attn.q_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.15.cross_attn.q_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        257,
+        128
+      ]
+    },
+    {
+      "order": 416,
+      "dump_name": "transformer_layers_15_cross_attn_k_norm",
+      "module_path": "transformer.layers.15.cross_attn.k_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.15.cross_attn.k_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        8,
+        65,
+        128
+      ]
+    },
+    {
+      "order": 417,
+      "dump_name": "transformer_layers_15_cross_attn_to_out",
+      "module_path": "transformer.layers.15.cross_attn.to_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.15.cross_attn.to_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 418,
+      "dump_name": "transformer_layers_15_cross_attn",
+      "module_path": "transformer.layers.15.cross_attn",
+      "module_class": "Attention",
+      "weight_prefix": null,
+      "op": "Attention",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 419,
+      "dump_name": "transformer_layers_15_cross_attn_scale",
+      "module_path": "transformer.layers.15.cross_attn_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 420,
+      "dump_name": "transformer_layers_15_ff_norm",
+      "module_path": "transformer.layers.15.ff_norm",
+      "module_class": "LayerNorm",
+      "weight_prefix": "model.model.transformer.layers.15.ff_norm",
+      "op": "LayerNorm",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 421,
+      "dump_name": "transformer_layers_15_ff_ff_0_proj",
+      "module_path": "transformer.layers.15.ff.ff.0.proj",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.15.ff.ff.0.proj",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        8192
+      ]
+    },
+    {
+      "order": 422,
+      "dump_name": "transformer_layers_15_ff_ff_0_act",
+      "module_path": "transformer.layers.15.ff.ff.0.act",
+      "module_class": "SiLU",
+      "weight_prefix": null,
+      "op": "SiLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 423,
+      "dump_name": "transformer_layers_15_ff_ff_0",
+      "module_path": "transformer.layers.15.ff.ff.0",
+      "module_class": "GLU",
+      "weight_prefix": null,
+      "op": "GLU",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 424,
+      "dump_name": "transformer_layers_15_ff_ff_1",
+      "module_path": "transformer.layers.15.ff.ff.1",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        4096
+      ]
+    },
+    {
+      "order": 425,
+      "dump_name": "transformer_layers_15_ff_ff_2",
+      "module_path": "transformer.layers.15.ff.ff.2",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.layers.15.ff.ff.2",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 426,
+      "dump_name": "transformer_layers_15_ff_ff_3",
+      "module_path": "transformer.layers.15.ff.ff.3",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 427,
+      "dump_name": "transformer_layers_15_ff_ff",
+      "module_path": "transformer.layers.15.ff.ff",
+      "module_class": "Sequential",
+      "weight_prefix": null,
+      "op": "Sequential",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 428,
+      "dump_name": "transformer_layers_15_ff",
+      "module_path": "transformer.layers.15.ff",
+      "module_class": "FeedForward",
+      "weight_prefix": null,
+      "op": "FeedForward",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 429,
+      "dump_name": "transformer_layers_15_ff_scale",
+      "module_path": "transformer.layers.15.ff_scale",
+      "module_class": "Identity",
+      "weight_prefix": null,
+      "op": "Identity",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 430,
+      "dump_name": "transformer_layers_15",
+      "module_path": "transformer.layers.15",
+      "module_class": "TransformerBlock",
+      "weight_prefix": null,
+      "op": "TransformerBlock",
+      "out_shape": [
+        1,
+        257,
+        1024
+      ]
+    },
+    {
+      "order": 431,
+      "dump_name": "transformer_project_out",
+      "module_path": "transformer.project_out",
+      "module_class": "Linear",
+      "weight_prefix": "model.model.transformer.project_out",
+      "op": "Linear",
+      "out_shape": [
+        1,
+        257,
+        64
+      ]
+    },
+    {
+      "order": 432,
+      "dump_name": "transformer",
+      "module_path": "transformer",
+      "module_class": "ContinuousTransformer",
+      "weight_prefix": null,
+      "op": "ContinuousTransformer",
+      "out_shape": [
+        1,
+        257,
+        64
+      ]
+    },
+    {
+      "order": 433,
+      "dump_name": "postprocess_conv",
+      "module_path": "postprocess_conv",
+      "module_class": "Conv1d",
+      "weight_prefix": "model.model.postprocess_conv",
+      "op": "Conv1d",
+      "out_shape": [
+        1,
+        64,
+        256
+      ]
+    }
+  ],
+  "_nnport_capture_version": "custom-dit-reference-v1",
+  "_raw_node_count_before_dedup": 434
+}
