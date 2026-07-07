@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "model_class": "DepthAnythingForDepthEstimation",
+  "modality": "vision_depth",
+  "input_fixtures": [
+    {
+      "name": "test_pixel_values",
+      "shape": [
+        1,
+        3,
+        518,
+        686
+      ],
+      "dtype": "float32",
+      "source": "AutoImageProcessor(images=test_image).pixel_values",
+      "deploy_path": "assets/test_pixel_values.bin",
+      "consumer": "backbone",
+      "note": "MUST be loaded by main.cpp as the model input. Do NOT zero-fill."
+    }
+  ],
+  "output_artifact": {
+    "kind": "depth_map",
+    "shape": [
+      1,
+      518,
+      686
+    ]
+  },
+  "rng_seeds": {
+    "deterministic": true
+  },
+  "_nnport_capture_version": "vision-v1"
+}

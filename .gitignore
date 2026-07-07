@@ -28,6 +28,9 @@ layer_dumps_new/
 **/reference/layers/
 logs/
 kernel_cache/
+# nnport per-port scratch files (the port tool re-emits these; never commit)
+**/dump_spec.txt
+**/nnport_config.yaml
 
 # Python
 __pycache__/
