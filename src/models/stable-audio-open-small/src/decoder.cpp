@@ -24,6 +24,8 @@
 #include <vector>
 #include <cstdint>
 #include <future>
+#include <fstream>       // OPT-4 folded-weight disk cache
+#include <sys/stat.h>    // OPT-4 mkdir
 
 // ── ctor / dtor ──
 Decoder::Decoder(OpenCLContext& cl_ctx, Weights& weights)
@@ -65,8 +67,18 @@ static inline float dec(nnopt_storage_t v) {
 
 cl_mem Decoder::alloc(size_t nelem) {
     cl_int err;
-    cl_mem b = clCreateBuffer(cl_ctx_.context(), CL_MEM_READ_WRITE,
-                              nelem * sizeof(nnopt_storage_t), nullptr, &err);
+    // B8: route decoder activations through the shared buffer pool (the DiT
+    // already does) — the VAE was the one component still doing raw
+    // clCreateBuffer/Release per conv (guide §5.7.1; BENCHMARK.md notes the
+    // churn also fragmented the Adreno heap). NNOPT_DEC_POOL=0 reverts.
+    static const bool pool_on = [] {
+        const char* e = std::getenv("NNOPT_DEC_POOL");
+        return !(e && e[0] == '0');
+    }();
+    cl_mem b = pool_on
+        ? nnopt_pool_alloc(cl_ctx_.context(), nelem * sizeof(nnopt_storage_t), &err)
+        : clCreateBuffer(cl_ctx_.context(), CL_MEM_READ_WRITE,
+                         nelem * sizeof(nnopt_storage_t), nullptr, &err);
     if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("alloc %zu err=%d", nelem, err); return nullptr; }
     return b;
 }
@@ -115,10 +127,86 @@ void Decoder::download(cl_mem buf, std::vector<float>& host, size_t nelem) {
 // (Same layout used for both Conv1d and ConvTranspose1d checkpoints; the
 //  transpose-conv kernel indexes weight as [Cin,Cout,K] which is exactly how
 //  PyTorch stores ConvTranspose1d weight — Cout here is the kernel's C_out arg.)
-cl_mem Decoder::load_wn_weight(const std::string& prefix, int Cout, int Cin, int K, bool repack_for_conv) {
+// ── OPT-4: folded-weight disk cache ─────────────────────────────────────
+// load_wn_weight re-derived every conv weight from the raw fp32 checkpoint on
+// EVERY decode: weight-norm fold over up to 156M params + repack + fp16
+// re-encode ≈ 4+ s host wall per run (g_dec_host_weight_sec). The folded fp16
+// bytes are deterministic per (weights file, layout variant), so persist them
+// to weights/dec_fold_cache/<prefix>.<variant>.f16 and mmap-free reload on
+// later runs. File = [magic u32][elem-count u64][fp16 payload]; a size or
+// magic mismatch falls back to a fresh fold + rewrite.
+// Kill-switch: NNOPT_DEC_FOLD_CACHE=0.
+static bool dec_fold_cache_on() {
+    static const bool on = [] {
+        const char* e = std::getenv("NNOPT_DEC_FOLD_CACHE");
+        return !(e && e[0] == '0');
+    }();
+    return on;
+}
+static std::string dec_fold_cache_path(const std::string& prefix, const char* variant) {
+    std::string name = prefix;
+    for (auto& c : name) if (c == '.' || c == '/') c = '_';
+    return std::string("weights/dec_fold_cache/") + name + variant + ".f16";
+}
+// B7: 128-bit vectorized elementwise kernels (guide §6.3). NNOPT_VEC_KERNELS=0
+// reverts to the scalar variants; non-8-aligned sizes fall back per call.
+static bool vec_kernels_enabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("NNOPT_VEC_KERNELS");
+        return !(e && e[0] == '0');
+    }();
+    return on;
+}
+// OPT-B1: transpose-conv as GEMM + col2im gather. NNOPT_CONVT_GEMM=0 reverts
+// to the register-tiled gather kernel (which measured ~8 GFLOPS — memory-bound
+// on scalar half loads; the 5 upsample layers were 52% of ALL GPU time).
+static bool convt_gemm_enabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("NNOPT_CONVT_GEMM");
+        return !(e && e[0] == '0');
+    }();
+    return on;
+}
+static constexpr uint32_t DEC_FOLD_MAGIC = 0x44464331u; // "DFC1"
+
+cl_mem Decoder::load_wn_weight(const std::string& prefix, int Cout, int Cin, int K, int repack_mode) {
     const auto _t0 = std::chrono::steady_clock::now();
     struct _Acc { const std::chrono::steady_clock::time_point t0;
                   ~_Acc(){ g_dec_host_weight_sec += std::chrono::duration<double>(std::chrono::steady_clock::now()-t0).count(); } } _acc{_t0};
+
+    // The repack variant is decidable from the caller's dims alone — needed
+    // up front so the cache filename matches what the fold below would emit.
+    const size_t dims_total = (Cout > 0 && Cin > 0 && K > 0)
+                            ? (size_t)Cout * (size_t)Cin * (size_t)K : 0;
+    const bool would_repack = repack_mode == 1 && Cout > 0 && (Cout % 4) == 0 && dims_total > 0;
+    const bool would_tg     = repack_mode == 2 && dims_total > 0;
+    const char* variant = would_tg ? ".tg" : (would_repack ? ".r4" : ".flat");
+
+    // Fast path: cached folded fp16 bytes → straight to a device buffer.
+    if (dec_fold_cache_on() && dims_total > 0) {
+        const std::string cpath = dec_fold_cache_path(prefix, variant);
+        std::ifstream in(cpath, std::ios::binary);
+        if (in.is_open()) {
+            uint32_t magic = 0; uint64_t count = 0;
+            in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+            in.read(reinterpret_cast<char*>(&count), sizeof(count));
+            if (in.good() && magic == DEC_FOLD_MAGIC && count == dims_total) {
+                std::vector<nnopt_storage_t> bytes(count);
+                in.read(reinterpret_cast<char*>(bytes.data()),
+                        (std::streamsize)(count * sizeof(nnopt_storage_t)));
+                if (in.good()) {
+                    cl_int err;
+                    cl_mem b = clCreateBuffer(cl_ctx_.context(),
+                                              CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                                              bytes.size() * sizeof(nnopt_storage_t),
+                                              bytes.data(), &err);
+                    if (err == CL_SUCCESS) return b;
+                }
+            }
+            // fall through: stale/corrupt cache → refold + rewrite
+        }
+    }
+
     std::vector<float> g = weights_.get_host_vec(prefix + ".weight_g");
     std::vector<float> v = weights_.get_host_vec(prefix + ".weight_v");
     if (g.empty() || v.empty()) {
@@ -152,21 +240,77 @@ cl_mem Decoder::load_wn_weight(const std::string& prefix, int Cout, int Cin, int
         }
         for (auto& f : fs) f.get();
     }
+    // OPT-4: encode + persist + upload in one pass (falls back to plain
+    // upload_f32 when the cache is off or dims don't describe the tensor).
+    auto upload_and_persist = [&](const std::vector<float>& host, const char* var) -> cl_mem {
+        if (!(dec_fold_cache_on() && dims_total == host.size())) return upload_f32(host);
+        const size_t n = host.size();
+        std::vector<nnopt_storage_t> tmp(n);
+        {
+            const int nth = 4;
+            std::vector<std::future<void>> fs;
+            for (int t = 0; t < nth; t++) {
+                const size_t lo = n * t / nth, hi = n * (t + 1) / nth;
+                fs.emplace_back(std::async(std::launch::async, [&, lo, hi](){
+                    for (size_t i = lo; i < hi; i++) tmp[i] = enc(host[i]);
+                }));
+            }
+            for (auto& f : fs) f.get();
+        }
+        // Persist (best-effort; a partial write fails the size check next run).
+        ::mkdir("weights/dec_fold_cache", 0755);
+        std::ofstream outf(dec_fold_cache_path(prefix, var),
+                           std::ios::binary | std::ios::trunc);
+        if (outf.is_open()) {
+            uint32_t magic = DEC_FOLD_MAGIC; uint64_t count = n;
+            outf.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+            outf.write(reinterpret_cast<const char*>(&count), sizeof(count));
+            outf.write(reinterpret_cast<const char*>(tmp.data()),
+                       (std::streamsize)(n * sizeof(nnopt_storage_t)));
+        }
+        cl_int err;
+        cl_mem b = clCreateBuffer(cl_ctx_.context(), CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                                  tmp.size() * sizeof(nnopt_storage_t), tmp.data(), &err);
+        if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("upload err=%d", err); return nullptr; }
+        return b;
+    };
+
     // v2 repack, oc-tile-blocked: [Cout,Cin,K] -> [Cout/4][Cin*K][4]. For a
     // fixed oc-tile the (ic,k) walk is perfectly SEQUENTIAL vec4 loads (the
     // first [ick][oc] repack strided by Cout and was slower than v1).
-    if (repack_for_conv && Cout > 0 && (Cout % 4) == 0 &&
-        (size_t)Cout * (size_t)Cin * (size_t)K == total) {
+    if (would_repack && dims_total == total) {
         const int ickn = Cin * K;
         std::vector<float> R(total);
         for (int oc = 0; oc < Cout; oc++)
             for (int ick = 0; ick < ickn; ick++)
                 R[(size_t)(oc / 4) * ickn * 4 + (size_t)ick * 4 + (oc % 4)]
                     = W[(size_t)oc * ickn + ick];
-        return upload_f32(R);
+        return upload_and_persist(R, ".r4");
+    }
+    // B1 repack for the convT-as-GEMM path. Stored convT layout is
+    // [C1, C2, K] with C1 = the layer's Cin (param name Cout here — callers
+    // pass the FIRST stored dim first). GEMM wants A = W2[(c2*K + k), c1] so
+    // cols[(c2*K+k), il] = Σ_c1 W2 · x[c1, il] falls out of one row-major HGEMM.
+    if (would_tg && dims_total == total) {
+        const int C1 = Cout, C2 = Cin;
+        std::vector<float> R(total);
+        const int nth = 4;
+        std::vector<std::future<void>> fs;
+        for (int t = 0; t < nth; t++) {
+            const int lo = C1 * t / nth, hi = C1 * (t + 1) / nth;
+            fs.emplace_back(std::async(std::launch::async, [&, lo, hi](){
+                for (int c1 = lo; c1 < hi; c1++)
+                    for (int c2 = 0; c2 < C2; c2++)
+                        for (int k = 0; k < K; k++)
+                            R[((size_t)c2 * K + k) * C1 + c1]
+                                = W[((size_t)c1 * C2 + c2) * K + k];
+            }));
+        }
+        for (auto& f : fs) f.get();
+        return upload_and_persist(R, ".tg");
     }
     (void)Cout; (void)Cin; (void)K;
-    return upload_f32(W);
+    return upload_and_persist(W, ".flat");
 }
 
 cl_mem Decoder::load_vec(const std::string& key, int n) {
@@ -217,7 +361,16 @@ cl_mem Decoder::conv1d_gemm(cl_mem in, cl_mem w, cl_mem bias, int Cin, int Cout,
     for (int l0 = 0; l0 < Lout; l0 += Lc_max) {
         const int Lc = (Lout - l0 < Lc_max) ? (Lout - l0) : Lc_max;
         cl_int err;
-        cl_kernel k = nnopt_cached_kernel(conv_, "im2col_1d", &err);
+        // B7 SPLIT: im2col's 8-wide fast path does UNALIGNED vload_half8
+        // (il0 shifts by k*dilation-padding) — measured slower than the
+        // scalar 4-wide kernel on this driver. Default OFF; NNOPT_IM2COL_V8=1
+        // re-enables the experiment.
+        static const bool im2col_v8_on = [] {
+            const char* e = std::getenv("NNOPT_IM2COL_V8");
+            return e && e[0] == '1';
+        }();
+        const bool im2col_v8 = im2col_v8_on;
+        cl_kernel k = nnopt_cached_kernel(conv_, im2col_v8 ? "im2col_1d_v8" : "im2col_1d", &err);
         if (err != CL_SUCCESS) { NNOPT_ERROR("im2col kernel"); nnopt_pool_release(out); return nullptr; }
         bool ok = set_arg_checked(k, 0, sizeof(cl_mem), &in, "in")
                && set_arg_checked(k, 1, sizeof(cl_mem), &col, "col")
@@ -230,8 +383,8 @@ cl_mem Decoder::conv1d_gemm(cl_mem in, cl_mem w, cl_mem bias, int Cin, int Cout,
                && set_arg_checked(k, 8, sizeof(int), &l0, "l0")
                && set_arg_checked(k, 9, sizeof(int), &Lc, "Lc");
         if (ok) {
-            size_t gws[2] = { (size_t)((Lc + 3) / 4), (size_t)rows };
-            cl_int e2 = clEnqueueNDRangeKernel(cl_ctx_.queue(), k, 2, nullptr, gws, nullptr, 0, nullptr, KernelProfiler::event_for("im2col_1d"));
+            size_t gws[2] = { im2col_v8 ? (size_t)((Lc + 7) / 8) : (size_t)((Lc + 3) / 4), (size_t)rows };
+            cl_int e2 = clEnqueueNDRangeKernel(cl_ctx_.queue(), k, 2, nullptr, gws, nullptr, 0, nullptr, KernelProfiler::event_for(im2col_v8 ? "im2col_1d_v8" : "im2col_1d"));
             ok = (e2 == CL_SUCCESS);
         }
         nnopt_kernel_done(k);
@@ -242,14 +395,15 @@ cl_mem Decoder::conv1d_gemm(cl_mem in, cl_mem w, cl_mem bias, int Cin, int Cout,
     }
     if (has_bias) {
         cl_int err;
-        cl_kernel k = nnopt_cached_kernel(prog_, "bias_add_rows", &err);
+        const bool v8 = vec_kernels_enabled() && (Lout % 8) == 0;
+        cl_kernel k = nnopt_cached_kernel(prog_, v8 ? "bias_add_rows_v8" : "bias_add_rows", &err);
         if (err == CL_SUCCESS) {
             set_arg_checked(k, 0, sizeof(cl_mem), &out, "x");
             set_arg_checked(k, 1, sizeof(cl_mem), &bias, "bias");
             set_arg_checked(k, 2, sizeof(int), &Cout, "C");
             set_arg_checked(k, 3, sizeof(int), &Lout, "L");
-            size_t gws = (size_t)Cout * Lout;
-            clEnqueueNDRangeKernel(cl_ctx_.queue(), k, 1, nullptr, &gws, nullptr, 0, nullptr, KernelProfiler::event_for("bias_add_rows"));
+            size_t gws = v8 ? (size_t)Cout * (Lout / 8) : (size_t)Cout * Lout;
+            clEnqueueNDRangeKernel(cl_ctx_.queue(), k, 1, nullptr, &gws, nullptr, 0, nullptr, KernelProfiler::event_for(v8 ? "bias_add_rows_v8" : "bias_add_rows"));
             nnopt_kernel_done(k);
         }
     }
@@ -343,6 +497,62 @@ cl_mem Decoder::conv_transpose1d(cl_mem in, cl_mem w, cl_mem bias, int Cin, int 
     if (!has_bias) { zero_bias = alloc((size_t)Cout); bias_use = zero_bias; }
     int dilation = 1;
     cl_int err;
+
+    // ── B1: convT as chunked HGEMM + 2-read col2im gather ──
+    // cols[(oc*K+k), il-ia] = Σ_ic W2[(oc*K+k), ic] · in[ic, il] (one CLBlast
+    // HGEMM per output chunk, B = column window of `in`, no input copy), then
+    // convt_col2im gathers each output's ≤2 valid taps + bias. Requires the
+    // .tg-repacked weight (decoder_block passes repack_mode=2 under the same
+    // switch, so `w` and this path always agree). NNOPT_CONVT_GEMM=0 reverts.
+    if (convt_gemm_enabled()) {
+        const int M = Cout * K;
+        const size_t max_cols_bytes = 64u << 20;   // cols scratch cap
+        int nq_max = (int)(max_cols_bytes / ((size_t)M * sizeof(nnopt_storage_t)));
+        if (nq_max < 8) nq_max = 8;
+        if (nq_max > Lin) nq_max = Lin;
+        // Input-window span for ow outputs is ow/stride + K/stride (+1 from
+        // flooring) columns — with K = 2*stride that's ow/stride + 3, so a
+        // 3-column margin keeps every chunk within the nq_max scratch.
+        const int ow_max = ((nq_max - 3) * stride > 0) ? (nq_max - 3) * stride : stride;
+        cl_kernel gk = nnopt_cached_kernel(convt_, "convt_col2im", &err);
+        if (err != CL_SUCCESS) { NNOPT_ERROR("convt_col2im kernel"); if (zero_bias) nnopt_pool_release(zero_bias); nnopt_pool_release(out); return nullptr; }
+        cl_mem cols = alloc((size_t)M * nq_max);   // one scratch for all chunks
+        if (!cols) { if (zero_bias) nnopt_pool_release(zero_bias); nnopt_pool_release(out); return nullptr; }
+        bool okg = true;
+        for (int oa = 0; oa < Lout && okg; oa += ow_max) {
+            const int ow = (Lout - oa < ow_max) ? (Lout - oa) : ow_max;
+            int ia = (oa + padding - (K - 1)) / stride; if (ia < 0) ia = 0;
+            int ib = (oa + ow - 1 + padding) / stride + 1; if (ib > Lin) ib = Lin;
+            const int nq = ib - ia;
+            if (!gemm_ab_bld(cl_ctx_.queue(), M, nq, Cin, w, in, (size_t)ia, Lin, cols)) {
+                okg = false; break;
+            }
+            okg = set_arg_checked(gk, 0, sizeof(cl_mem), &cols, "cols")
+               && set_arg_checked(gk, 1, sizeof(cl_mem), &bias_use, "bias")
+               && set_arg_checked(gk, 2, sizeof(cl_mem), &out, "out")
+               && set_arg_checked(gk, 3, sizeof(int), &Cout, "Cout")
+               && set_arg_checked(gk, 4, sizeof(int), &K, "K")
+               && set_arg_checked(gk, 5, sizeof(int), &stride, "stride")
+               && set_arg_checked(gk, 6, sizeof(int), &padding, "padding")
+               && set_arg_checked(gk, 7, sizeof(int), &Lin, "Lin")
+               && set_arg_checked(gk, 8, sizeof(int), &Lout, "Lout")
+               && set_arg_checked(gk, 9, sizeof(int), &ia, "ia")
+               && set_arg_checked(gk, 10, sizeof(int), &nq, "nq")
+               && set_arg_checked(gk, 11, sizeof(int), &oa, "oa")
+               && set_arg_checked(gk, 12, sizeof(int), &ow, "ow")
+               && set_arg_checked(gk, 13, sizeof(int), &has_bias, "has_bias");
+            if (okg) {
+                size_t gws = ((size_t)Cout * ow + 63) / 64 * 64;
+                err = clEnqueueNDRangeKernel(cl_ctx_.queue(), gk, 1, nullptr, &gws, nullptr, 0, nullptr, KernelProfiler::event_for("convt_col2im"));
+                okg = (err == CL_SUCCESS);
+            }
+        }
+        nnopt_pool_release(cols);
+        nnopt_kernel_done(gk);
+        if (zero_bias) nnopt_pool_release(zero_bias);
+        if (!okg) { NNOPT_ERROR("convT GEMM path failed"); nnopt_pool_release(out); return nullptr; }
+        return out;
+    }
     // Register-tiled path (4 oc x 4 same-phase ol per WI); NNOPT_CONV_T4X4=0
     // falls back to the scalar gather kernel for on-device A/B.
     static const bool use_t4x4_t = [](){
@@ -403,7 +613,9 @@ cl_mem Decoder::conv_transpose1d(cl_mem in, cl_mem w, cl_mem bias, int Cin, int 
 
 void Decoder::snake(cl_mem x, cl_mem alpha, cl_mem beta, int C, int L) {
     cl_int err;
-    cl_kernel k = nnopt_cached_kernel(prog_, "snake_beta", &err);
+    // B7: half8 variant (one 128-bit load+store per chunk) when L is 8-aligned.
+    const bool v8 = vec_kernels_enabled() && (L % 8) == 0;
+    cl_kernel k = nnopt_cached_kernel(prog_, v8 ? "snake_beta_v8" : "snake_beta", &err);
     if (err != CL_SUCCESS) { NNOPT_ERROR("snake kernel"); return; }
     set_arg_checked(k, 0, sizeof(cl_mem), &x, "x");
     set_arg_checked(k, 1, sizeof(cl_mem), &alpha, "alpha");
@@ -413,7 +625,7 @@ void Decoder::snake(cl_mem x, cl_mem alpha, cl_mem beta, int C, int L) {
     // Matches SNAKE_CHUNK=8 in kernels/decoder.cl: one WI per 8-element chunk.
     const size_t chunks_per_ch = ((size_t)L + 7) / 8;
     size_t gws = (size_t)C * chunks_per_ch;
-    clEnqueueNDRangeKernel(cl_ctx_.queue(), k, 1, nullptr, &gws, nullptr, 0, nullptr, KernelProfiler::event_for("snake_beta"));
+    clEnqueueNDRangeKernel(cl_ctx_.queue(), k, 1, nullptr, &gws, nullptr, 0, nullptr, KernelProfiler::event_for(v8 ? "snake_beta_v8" : "snake_beta"));
     nnopt_kernel_done(k);
 }
 
@@ -421,14 +633,15 @@ cl_mem Decoder::add(cl_mem a, cl_mem b, int n) {
     cl_mem out = alloc((size_t)n);
     if (!out) return nullptr;
     cl_int err;
-    cl_kernel k = nnopt_cached_kernel(prog_, "add_cl", &err);
+    const bool v8 = vec_kernels_enabled() && (n % 8) == 0;
+    cl_kernel k = nnopt_cached_kernel(prog_, v8 ? "add_cl_v8" : "add_cl", &err);
     if (err != CL_SUCCESS) { NNOPT_ERROR("add kernel"); nnopt_pool_release(out); return nullptr; }
     set_arg_checked(k, 0, sizeof(cl_mem), &a, "a");
     set_arg_checked(k, 1, sizeof(cl_mem), &b, "b");
     set_arg_checked(k, 2, sizeof(cl_mem), &out, "out");
     set_arg_checked(k, 3, sizeof(int), &n, "n");
-    size_t gws = (size_t)n;
-    err = clEnqueueNDRangeKernel(cl_ctx_.queue(), k, 1, nullptr, &gws, nullptr, 0, nullptr, KernelProfiler::event_for("residual_add"));
+    size_t gws = v8 ? (size_t)(n / 8) : (size_t)n;
+    err = clEnqueueNDRangeKernel(cl_ctx_.queue(), k, 1, nullptr, &gws, nullptr, 0, nullptr, KernelProfiler::event_for(v8 ? "residual_add_v8" : "residual_add"));
     nnopt_kernel_done(k);
     if (err != CL_SUCCESS) { NNOPT_ERROR("add dispatch"); nnopt_pool_release(out); return nullptr; }
     return out;
@@ -510,7 +723,8 @@ cl_mem Decoder::decoder_block(cl_mem x, const std::string& prefix, int Cin, int 
     int K = 2 * stride;
     int pad = (stride + 1) / 2;  // ceil(stride/2)
     // ConvTranspose1d weight stored [Cin, Cout, K]; weight_g [Cin,1,1].
-    cl_mem w1 = load_wn_weight(prefix + ".layers.1", Cin, Cout, K);
+    cl_mem w1 = load_wn_weight(prefix + ".layers.1", Cin, Cout, K,
+                               convt_gemm_enabled() ? 2 : 0);
     cl_mem bias1 = load_vec(prefix + ".layers.1.bias", Cout);
     if (!w1 || !bias1) { nnopt_pool_release(h); if (w1) nnopt_pool_release(w1); if (bias1) nnopt_pool_release(bias1); return nullptr; }
     int Lup = 0;
@@ -545,6 +759,30 @@ cl_mem Decoder::decoder_block(cl_mem x, const std::string& prefix, int Cin, int 
 bool Decoder::decode(const std::vector<float>& latent, int T, std::vector<float>& out) {
     if (!ready_ && !initialize()) return false;
     cl_command_queue q = cl_ctx_.queue();
+
+    // ── B12: decoder-scoped CLBlast Xgemm params (2026-07-08 A/B). ──
+    // The on-device-tuned set helps the decoder's huge-N conv GEMMs
+    // (23.6 → 22.1 s) but hurts the DiT's M=257 linears (32.0 → 35.9 s), so
+    // the override is applied ONLY for the decode stage and restored to this
+    // device's stock database entry on exit (needed for serve mode, where the
+    // next generation's DiT runs in the same process). Safe without cache
+    // clears: CLBlast keys compiled programs by the param values.
+    // NNOPT_DEC_TUNED=0 reverts.
+    static const bool dec_tuned_on = [] {
+        const char* e = std::getenv("NNOPT_DEC_TUNED");
+        return !(e && e[0] == '0');
+    }();
+    // Tuned at m=256 n=8192 k=1024 fp16 (clblast_tuner_xgemm, this device).
+    static const size_t XGEMM_DEC_TUNED[16] =
+        {0, 1, 16, 2, 8, 16, 128, 16, 8, 64, 0, 1, 1, 1, 4, 4};
+    // Stock = CLBlast's QUALCOMM Adreno wildcard entry (xgemm_16.hpp).
+    static const size_t XGEMM_ADRENO_STOCK[16] =
+        {0, 1, 32, 2, 8, 8, 64, 8, 8, 64, 1, 1, 0, 0, 4, 4};
+    struct ScopedXgemm {
+        cl_device_id dev; bool active;
+        ~ScopedXgemm() { if (active) nnopt_xgemm_override(dev, XGEMM_ADRENO_STOCK); }
+    } scoped{cl_ctx_.device(),
+             dec_tuned_on && nnopt_xgemm_override(cl_ctx_.device(), XGEMM_DEC_TUNED)};
     const std::string P = "pretransform.model.decoder";
     const int latent_dim = MODEL_CONFIG::DIT_LATENT_CHANNELS;  // 64
 

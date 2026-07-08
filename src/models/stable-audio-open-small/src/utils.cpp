@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <numeric>
 #include <cstdint>
+#include <unordered_map>
+#include <string>
 
 // ──────────────────────────────────────────────
 // set_arg_checked — public clSetKernelArg wrapper.
@@ -493,6 +495,100 @@ bool gemm_ab_ld(cl_command_queue queue, int M, int N, int K,
     }
     } catch (const std::exception& e) {
         NNOPT_ERROR_FMT("gemm_ab_ld threw: %gemm_ab_ld", e.what());
+        return false;
+    }
+    return true;
+}
+
+// B14: single-row linear via Gemv — see utils.h.
+bool pytorch_linear_row(cl_command_queue queue, int N, int K,
+                        cl_mem x, size_t x_off, cl_mem W,
+                        cl_mem out, size_t out_off) {
+    try {
+#ifdef NNOPT_USE_FP16
+    cl_half h_one  = static_cast<cl_half>(nnopt_f32_to_f16(1.0f));
+    cl_half h_zero = static_cast<cl_half>(nnopt_f32_to_f16(0.0f));
+    auto status = clblast::Gemv<cl_half>(
+        clblast::Layout::kRowMajor, clblast::Transpose::kNo,
+        N, K,
+        h_one, W, 0, K,
+        x, x_off, 1,
+        h_zero, out, out_off, 1,
+        &queue, KernelProfiler::event_for("linear_row"));
+#else
+    auto status = clblast::Gemv<float>(
+        clblast::Layout::kRowMajor, clblast::Transpose::kNo,
+        N, K,
+        1.0f, W, 0, K,
+        x, x_off, 1,
+        0.0f, out, out_off, 1,
+        &queue, KernelProfiler::event_for("linear_row"));
+#endif
+    if (status != clblast::StatusCode::kSuccess) {
+        NNOPT_ERROR_FMT("pytorch_linear_row failed status=%d N=%d K=%d", (int)status, N, K);
+        return false;
+    }
+    } catch (const std::exception& e) {
+        NNOPT_ERROR_FMT("pytorch_linear_row threw: %s", e.what());
+        return false;
+    }
+    return true;
+}
+
+// B12: stage-scoped Xgemm override — see utils.h.
+bool nnopt_xgemm_override(cl_device_id dev, const size_t vals[16]) {
+    static const char* names[16] = {
+        "GEMMK","KREG","KWG","KWI","MDIMA","MDIMC","MWG","NDIMB",
+        "NDIMC","NWG","SA","SB","STRM","STRN","VWM","VWN"};
+    std::unordered_map<std::string, size_t> ov;
+    for (int i = 0; i < 16; i++) ov[names[i]] = vals[i];
+#ifdef NNOPT_USE_FP16
+    const auto prec = clblast::Precision::kHalf;
+#else
+    const auto prec = clblast::Precision::kSingle;
+#endif
+    const auto st = clblast::OverrideParameters(dev, "Xgemm", prec, ov);
+    if (st != clblast::StatusCode::kSuccess) {
+        NNOPT_ERROR_FMT("nnopt_xgemm_override failed status=%d", (int)st);
+        return false;
+    }
+    return true;
+}
+
+// gemm_ab_bld — B-window variant: C[M,N] (contiguous, ldc=N) =
+// A[M,K] @ B[K, b_off : b_off+N) with B row stride ldb. The convT-as-GEMM
+// path uses this to GEMM directly against a column window of the input
+// feature map, so no input-gather kernel or copy is needed per chunk.
+bool gemm_ab_bld(cl_command_queue queue, int M, int N, int K,
+                 cl_mem A, cl_mem B, size_t b_off, int ldb, cl_mem C) {
+    try {
+#ifdef NNOPT_USE_FP16
+    cl_half h_one  = static_cast<cl_half>(nnopt_f32_to_f16(1.0f));
+    cl_half h_zero = static_cast<cl_half>(nnopt_f32_to_f16(0.0f));
+    auto status = clblast::Gemm<cl_half>(
+        clblast::Layout::kRowMajor,
+        clblast::Transpose::kNo, clblast::Transpose::kNo,
+        M, N, K,
+        h_one,  A, 0, K,  B, b_off, ldb,
+        h_zero, C, 0, N,
+        &queue, KernelProfiler::event_for("convt_gemm"),
+        nnopt_gemm_temp(queue, clblast::Transpose::kNo, M, N, K, ldb, 0, N));
+#else
+    auto status = clblast::Gemm<float>(
+        clblast::Layout::kRowMajor,
+        clblast::Transpose::kNo, clblast::Transpose::kNo,
+        M, N, K,
+        1.0f, A, 0, K,  B, b_off, ldb,
+        0.0f, C, 0, N,
+        &queue, KernelProfiler::event_for("convt_gemm"),
+        nnopt_gemm_temp(queue, clblast::Transpose::kNo, M, N, K, ldb, 0, N));
+#endif
+    if (status != clblast::StatusCode::kSuccess) {
+        NNOPT_ERROR_FMT("gemm_ab_bld failed status=%d M=%d N=%d K=%d ldb=%d", (int)status, M, N, K, ldb);
+        return false;
+    }
+    } catch (const std::exception& e) {
+        NNOPT_ERROR_FMT("gemm_ab_bld threw: %s", e.what());
         return false;
     }
     return true;

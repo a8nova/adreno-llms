@@ -263,3 +263,40 @@ __kernel void im2col_1d(
         STORE(col, ob + o0 + j, v);
     }
 }
+
+// B7: 8-wide im2col — interior (in-bounds, full-lane) chunks move as one
+// 128-bit load + store; borders fall back to the guarded scalar loop.
+__kernel void im2col_1d_v8(
+    __global const storage_t* in,   // [C_in, L_in]
+    __global       storage_t* col,  // [C_in*K, Lc]
+    const int C_in, const int L_in, const int L_out,
+    const int K, const int padding, const int dilation,
+    const int l0, const int Lc) {
+    const int row = get_global_id(1);              // ic*K + k
+    if (row >= C_in * K) return;
+    const int o0 = get_global_id(0) * 8;           // chunk-local
+    if (o0 >= Lc) return;
+    const int ic = row / K;
+    const int k  = row % K;
+    const int in_base = ic * L_in;
+    const int d = k * dilation - padding;
+    const size_t ob = (size_t)row * Lc;
+    const int il0 = l0 + o0 + d;
+    const int lend = min(min(8, Lc - o0), L_out - l0 - o0);
+#ifdef USE_FP16
+    if (lend == 8 && il0 >= 0 && il0 + 8 <= L_in) {
+        vstore_half8(vload_half8(0, in + in_base + il0), 0, col + ob + o0);
+        return;
+    }
+#else
+    if (lend == 8 && il0 >= 0 && il0 + 8 <= L_in) {
+        vstore8(vload8(0, in + in_base + il0), 0, col + ob + o0);
+        return;
+    }
+#endif
+    for (int j = 0; j < lend; j++) {
+        const int il = il0 + j;
+        const float v = (il >= 0 && il < L_in) ? LOAD(in, in_base + il) : 0.0f;
+        STORE(col, ob + o0 + j, v);
+    }
+}

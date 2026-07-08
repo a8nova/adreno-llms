@@ -156,6 +156,15 @@ else()
     set(TESTS OFF CACHE BOOL "Disable tests" FORCE)
     set(NETLIB OFF CACHE BOOL "Disable netlib" FORCE)
     FetchContent_MakeAvailable(clblast)
+    # OPT-5b: overlay the disk-binary-cache patch onto the fetched source
+    # (src/third_party/clblast/routine.cpp — same proven overlay as
+    # depth-anything). Stock behavior unless NNOPT_CLBLAST_CACHE_DIR is set at
+    # runtime; kills CLBlast's ~1.5-3 s first-call kernel JIT per process.
+    configure_file(
+        "${CMAKE_SOURCE_DIR}/src/third_party/clblast/routine.cpp"
+        "${clblast_SOURCE_DIR}/src/routine.cpp"
+        COPYONLY
+    )
     if(ANDROID AND TARGET clblast)
         target_compile_options(clblast PRIVATE "-include" "sstream")
     endif()
@@ -264,6 +273,20 @@ set_target_properties(stable_audio_open_small_inference PROPERTIES
 
 # Link libraries (backend-specific)
 target_link_libraries(stable_audio_open_small_inference ${BACKEND_LIBRARIES})
+
+# GEMM micro-benchmark (2026-07 campaign round 4): iterates bespoke
+# texture-path GEMM candidates against the CLBlast baseline in seconds
+# instead of ~90 s end-to-end runs. Only built when the source exists.
+if(EXISTS "${CMAKE_SOURCE_DIR}/tools/gemm_bench.cpp")
+    add_executable(gemm_bench
+        tools/gemm_bench.cpp
+        src/opencl_context.cpp
+        src/utils.cpp
+        src/profiler.cpp
+    )
+    target_include_directories(gemm_bench PRIVATE src/ src/third_party/)
+    target_link_libraries(gemm_bench ${BACKEND_LIBRARIES})
+endif()
 
 # Android-specific linker flags for runtime OpenCL resolution
 if(ANDROID)

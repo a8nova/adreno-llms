@@ -19,6 +19,8 @@
 #include "opencl_context.h"
 #include "weights.h"
 #include <vector>
+#include <string>
+#include <unordered_map>
 
 class DiT {
 public:
@@ -34,12 +36,50 @@ public:
                       const std::vector<float>& global_emb,
                       std::vector<float>& out);
 
+    // B4 (on-GPU denoise loop) device-resident API: x stays a cl_mem across
+    // all 8 steps; only the final latent is downloaded. v_out receives a NEW
+    // buffer with the raw model output [C,T] (caller releases).
+    bool forward_step_dev(cl_mem x_ct, int T, float t,
+                          const std::vector<float>& cross_cond, int cross_seq,
+                          const std::vector<float>& global_emb,
+                          cl_mem* v_out);
+    // In-place pingpong update: x = (1-sn)*(x - sc*v) + sn*noise.
+    bool denoise_resample(cl_mem x, cl_mem v, cl_mem noise,
+                          float sc, float sn, int n);
+    // Buffer plumbing for the pipeline driver (pool-backed).
+    cl_mem upload_buf(const std::vector<float>& host, size_t nelem) { return upload(host, nelem); }
+    void download_buf(cl_mem buf, std::vector<float>& host, size_t nelem) { download(buf, host, nelem); }
+    void release_buf(cl_mem b);
+
 private:
     OpenCLContext& cl_ctx_;
     Weights& weights_;
     cl_program prog_ = nullptr;   // kernels/dit.cl
     cl_program utils_ = nullptr;  // kernels/utils.cl (element_add)
+    // B13 experiment program (kernels/linear_p8.cl) — built lazily ONLY when
+    // NNOPT_BESPOKE_LINEAR=1: its register-spilling kernel must never share a
+    // program with the hot dit.cl kernels (Adreno program-wide register trap;
+    // measured DiT 32 → 44 s from mere co-residence).
+    cl_program p8prog_ = nullptr;
     bool ready_ = false;
+
+    // OPT-1: step-invariant cache. cross_flat (to_cond_embed output), global_e
+    // (to_global_embed output, pre-timestep add) and the RoPE freq table depend
+    // only on the conditioning / sequence length — not on t — yet the denoise
+    // loop calls forward_step 8× with identical values. Cache keyed on a
+    // fingerprint of the inputs; recomputed transparently when the prompt or
+    // latent length changes. NNOPT_STEP_CACHE=0 reverts to per-step recompute.
+    uint64_t  cache_sig_        = 0;
+    cl_mem    cached_cross_flat_ = nullptr;   // [cross_seq, D]
+    cl_mem    cached_global_e_   = nullptr;   // [D]
+    cl_mem    cached_freqs_      = nullptr;   // [seq, rot_dim]
+
+    // B11: per-weight transposed copy [K,N] of each nn.Linear weight [N,K],
+    // built once on-GPU at first use so every DiT GEMM runs CLBlast's
+    // NoTrans×NoTrans path (the TransB path re-pads/transposes the WEIGHT
+    // matrix inside every call, every step, at stock params).
+    // NNOPT_PRETRANS=0 reverts to pytorch_linear's TransB path.
+    std::unordered_map<std::string, cl_mem> wt_cache_;
 
     // helpers
     cl_mem alloc(size_t nelem);

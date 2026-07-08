@@ -82,6 +82,14 @@ if [ -n "${NNOPT_CONV_GEMM:-}" ]; then PERF_ENV="$PERF_ENV NNOPT_CONV_GEMM=$NNOP
 if [ -n "${NNOPT_KERNEL_CACHE:-}" ]; then PERF_ENV="$PERF_ENV NNOPT_KERNEL_CACHE=$NNOPT_KERNEL_CACHE"; fi
 if [ -n "${NNOPT_BUF_POOL:-}" ]; then PERF_ENV="$PERF_ENV NNOPT_BUF_POOL=$NNOPT_BUF_POOL"; fi
 if [ -n "${NNOPT_COND_FROM_ASSETS:-}" ]; then PERF_ENV="$PERF_ENV NNOPT_COND_FROM_ASSETS=$NNOPT_COND_FROM_ASSETS"; fi
+# 2026-07 optimization-campaign kill switches (OPT-1..OPT-5) — forwarded so
+# the A/B ladder can toggle each lever without rebuilding.
+for v in NNOPT_STEP_CACHE NNOPT_ATTN_FUSED NNOPT_LN_WG NNOPT_DEC_FOLD_CACHE \
+         NNOPT_PROG_CACHE NNOPT_CLBLAST_CACHE_DIR NNOPT_CONVT_GEMM NNOPT_DENOISE_GPU \
+         NNOPT_VEC_KERNELS NNOPT_QK_WG NNOPT_ATTN_ROWS NNOPT_XGEMM_TUNED NNOPT_IM2COL_V8 NNOPT_DEC_POOL NNOPT_DEC_TUNED NNOPT_BESPOKE_LINEAR NNOPT_SPLIT_M NNOPT_PRETRANS NNOPT_PERF_HINT NNOPT_PRINT_EXTENSIONS NNOPT_NATIVE_SIN NNOPT_NONBLOCK_UPLOAD; do
+    val=$(eval "printf '%s' \"\${$v:-}\"")
+    if [ -n "$val" ]; then PERF_ENV="$PERF_ENV $v=$val"; fi
+done
 
 # Execute on device — let stdout and stderr flow through adb to host.
 # adb shell merges remote stdout+stderr into host stdout. The Infer tool

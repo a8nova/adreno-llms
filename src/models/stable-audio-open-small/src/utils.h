@@ -160,6 +160,26 @@ bool gemm_ab(cl_command_queue queue, int M, int N, int K,
 // C column-window variant for chunked im2col conv (see utils.cpp).
 bool gemm_ab_ld(cl_command_queue queue, int M, int N, int K,
                 cl_mem A, cl_mem B, cl_mem C, size_t c_off, int ldc);
+// B column-window variant: C[M,N] (contiguous) = A[M,K] @ B[K, b_off:b_off+N)
+// with B row stride ldb. Used by the convT-as-GEMM path where B is a column
+// window of the input feature map [Cin, Lin] (ldb = Lin).
+bool gemm_ab_bld(cl_command_queue queue, int M, int N, int K,
+                 cl_mem A, cl_mem B, size_t b_off, int ldb, cl_mem C);
+
+// B14: single-row nn.Linear via CLBlast Gemv — out[out_off..+N) =
+// W[N,K] @ x[x_off..+K). Used to peel the +1 row off M=257/M=65 GEMMs so the
+// bulk call runs at an MWG-aligned M (CLBlast pads M up to the next 64
+// multiple: measured M=257 costs the same as M=320, M=256 is 16% faster).
+bool pytorch_linear_row(cl_command_queue queue, int N, int K,
+                        cl_mem x, size_t x_off, cl_mem W,
+                        cl_mem out, size_t out_off);
+
+// B12: stage-scoped CLBlast Xgemm parameter override. vals[16] in CLBlast's
+// alphabetical param order (GEMMK,KREG,KWG,KWI,MDIMA,MDIMC,MWG,NDIMB,NDIMC,
+// NWG,SA,SB,STRM,STRN,VWM,VWN). Safe to call between stages: CLBlast's
+// program-cache key embeds the param values, so stock- and tuned-built
+// kernels coexist without recompiles. Returns false on CLBlast error.
+bool nnopt_xgemm_override(cl_device_id dev, const size_t vals[16]);
 
 bool pytorch_linear(cl_command_queue queue,
                     int M, int N, int K,
