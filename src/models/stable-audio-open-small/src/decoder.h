@@ -61,7 +61,9 @@ private:
 
     // Reconstruct weight_norm conv weight (host) and upload as a device buffer.
     // Returns a NEW cl_mem [Cout*Cin*K]; caller owns.
-    cl_mem load_wn_weight(const std::string& prefix, int Cout, int Cin, int K, bool repack_for_conv = false);
+    // repack_mode: 0 = stored layout, 1 = conv t4x4 oc-tile repack (.r4),
+    //              2 = convT-as-GEMM repack [C2*K, C1] (.tg — B1 campaign).
+    cl_mem load_wn_weight(const std::string& prefix, int Cout, int Cin, int K, int repack_mode = 0);
     // Upload a plain weight/param vector [n] as a device buffer.
     cl_mem load_vec(const std::string& key, int n);
 

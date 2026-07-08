@@ -34,6 +34,11 @@
 #include <vector>
 #include <cstdint>
 #include <cmath>
+#include <thread>
+#include <mutex>
+#include <deque>
+#include <condition_variable>
+#include <future>
 #include <cstdio>
 #include <cstdlib>
 
@@ -99,6 +104,7 @@ int main(int argc, char** argv) {
     // Mode: default runs the full 8-step pingpong loop. --single-step runs one
     // DiT forward on a fixed input asset (t=0.5) for per-op cosine validation.
     bool single_step = false;
+    bool serve_mode = false;   // B-serve: persistent process, one gen per stdin line
     int latent_len = 0;   // 0 = full length from assets/init_noise.bin
     int seconds_total = 11;
     std::string prompt;
@@ -106,6 +112,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--single-step") single_step = true;
+        else if (a == "--serve") serve_mode = true;
         // Fast-iteration mode: truncate the latent to N frames (~N*2048/44100 s
         // of audio). Output is NOT reference-comparable — perf iteration only.
         else if (a == "--latent-len" && i + 1 < argc) latent_len = std::atoi(argv[++i]);
@@ -204,6 +211,101 @@ int main(int argc, char** argv) {
     // ── Full pingpong denoise loop + autoencoder decode ──
     Decoder decoder(cl_ctx, weights);
     if (!decoder.initialize()) { NNOPT_ERROR("Decoder init failed"); return 1; }
+
+    // ── B-serve (top-10 lever #1, MusicGen --serve pattern): keep the
+    // process alive and generate once per stdin line. Weights, compiled
+    // programs, folded VAE weights and the OPT-1 step-invariant cache all
+    // stay resident, so generation 2+ pays zero startup tax. Protocol:
+    //   stdin line  = prompt ("quit"/EOF ends)
+    //   output      = output_serve_<idx>.wav + SERVE_DONE line on stderr.
+    if (serve_mode) {
+        T5CondEncoder t5s;
+        if (!t5s.load("weights/t5_encoder.fp16.bin", "weights/t5_encoder.fp16.meta.json",
+                      "weights/t5_tokenizer.bin", "weights/seconds_table.bin")) {
+            NNOPT_ERROR("serve: T5 load failed");
+            return 1;
+        }
+        // B15 (pipelining): a reader thread queues stdin lines as they arrive
+        // and the NEXT queued prompt's T5 conditioning (CPU) is encoded on a
+        // worker thread while the GPU runs the CURRENT generation — the main
+        // thread mostly blocks in clFinish, so the big cores are otherwise
+        // idle. Back-to-back prompts hide the full ~2.6 s T5 cost; a single
+        // interactive prompt behaves exactly as before.
+        std::deque<std::string> pending;
+        std::mutex mu;
+        std::condition_variable cv;
+        bool eof = false;
+        std::thread reader([&] {
+            std::string l;
+            while (std::getline(std::cin, l)) {
+                if (l == "quit" || l == "exit") break;
+                if (l.empty()) continue;
+                { std::lock_guard<std::mutex> lk(mu); pending.push_back(l); }
+                cv.notify_one();
+            }
+            { std::lock_guard<std::mutex> lk(mu); eof = true; }
+            cv.notify_one();
+        });
+
+        struct Cond { std::vector<float> cc, ge; bool ok; double sec; };
+        auto encode = [&](const std::string& p) -> Cond {
+            Cond c; int n_real = 0;
+            const auto t0 = std::chrono::steady_clock::now();
+            c.ok = t5s.compute(p, seconds_total, c.cc, c.ge, &n_real);
+            c.sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            return c;
+        };
+
+        fprintf(stderr, "SERVE_READY\n");
+        int gen_idx = 0;
+        std::string prefetched_prompt;
+        std::future<Cond> prefetched;
+        while (true) {
+            std::string prompt_now;
+            {
+                std::unique_lock<std::mutex> lk(mu);
+                cv.wait(lk, [&] { return eof || !pending.empty(); });
+                if (pending.empty()) break;   // eof and drained
+                prompt_now = pending.front();
+                pending.pop_front();
+            }
+            const auto g0 = std::chrono::steady_clock::now();
+            Cond cond = (prefetched.valid() && prompt_now == prefetched_prompt)
+                      ? prefetched.get() : encode(prompt_now);
+            prefetched_prompt.clear();
+            if (!cond.ok) { fprintf(stderr, "SERVE_ERR idx=%d stage=t5\n", gen_idx); continue; }
+
+            // Prefetch the next queued prompt's conditioning during GPU work.
+            {
+                std::lock_guard<std::mutex> lk(mu);
+                if (!pending.empty()) {
+                    prefetched_prompt = pending.front();
+                    prefetched = std::async(std::launch::async, encode, prefetched_prompt);
+                }
+            }
+
+            const int cseq = (int)cond.cc.size() / MODEL_CONFIG::DIT_COND_TOKEN_DIM;
+            std::vector<float> aud;
+            int fr = 0;
+            if (!run_diffusion_pipeline(cl_ctx, dit, decoder, cond.cc, cseq, cond.ge,
+                                        aud, fr, latent_len)) {
+                fprintf(stderr, "SERVE_ERR idx=%d stage=pipeline\n", gen_idx);
+                continue;
+            }
+            char wavp[64];
+            snprintf(wavp, sizeof(wavp), "output_serve_%d.wav", gen_idx);
+            write_wav_stereo(wavp, aud, MODEL_CONFIG::AUDIO_CHANNELS, fr,
+                             MODEL_CONFIG::SAMPLE_RATE);
+            const double gen_sec = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - g0).count();
+            fprintf(stderr, "SERVE_DONE idx=%d wav=%s t5_sec=%.2f gen_sec=%.2f\n",
+                    gen_idx, wavp, cond.sec, gen_sec);
+            gen_idx++;
+        }
+        if (prefetched.valid()) prefetched.wait();
+        reader.join();
+        return 0;
+    }
 
     bench.mark_prefill_start();
     std::vector<float> audio;

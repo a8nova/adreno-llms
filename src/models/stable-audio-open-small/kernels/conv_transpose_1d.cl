@@ -156,3 +156,35 @@ __kernel void conv_transpose_1d_t4x4(
     STORE_ROW_T(oc0 + 3, acc3);
     #undef STORE_ROW_T
 }
+
+// convt_col2im — epilogue of the convT-as-GEMM path (2026-07 campaign, B1).
+// A single HGEMM produced cols[(oc*K + k), il - ia] = Σ_ic W2[(oc*K+k), ic] ·
+// x[ic, il] for the input window [ia, ia+nq). Each output ol gathers its ≤2
+// valid taps (K == 2*stride in every Oobleck upsample layer, so exactly two
+// away from the borders) and adds bias — 2 loads + 1 store per element; the
+// arithmetic-heavy work already happened inside the tiled GEMM.
+__kernel void convt_col2im(__global const storage_t* cols, // [C_out*K, nq]
+                           __global const storage_t* bias, // [C_out] (may be unused)
+                           __global storage_t* out,        // [C_out, L_out]
+                           const int C_out, const int K,
+                           const int stride, const int padding,
+                           const int L_in, const int L_out,
+                           const int ia, const int nq,
+                           const int oa, const int ow,     // output window [oa, oa+ow)
+                           const int has_bias) {
+    const int gid = get_global_id(0);
+    if (gid >= C_out * ow) return;
+    const int oc = gid / ow;
+    const int ol = oa + gid % ow;
+    if (ol >= L_out) return;
+
+    float acc = has_bias ? (float)LOAD(bias, oc) : 0.0f;
+    const int r = (ol + padding) % stride;
+    for (int k = r; k < K; k += stride) {
+        const int il = (ol + padding - k) / stride;
+        const int q = il - ia;
+        if (il < 0 || il >= L_in || q < 0 || q >= nq) continue;
+        acc += (float)LOAD(cols, (size_t)(oc * K + k) * nq + q);
+    }
+    STORE(out, (size_t)oc * L_out + ol, acc);
+}

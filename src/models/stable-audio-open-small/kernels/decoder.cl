@@ -60,3 +60,52 @@ __kernel void bias_add_rows(__global storage_t* x,          // [C, L]
     const int c = gid / L;
     STORE(x, gid, LOAD(x, gid) + LOAD(bias, c));
 }
+
+// ═══ B7 (2026-07 campaign): 128-bit vectorized elementwise variants ═══
+// Guide §6.3/§7.2: scalar vload_half is a 16-bit load path; these move the
+// hot decoder elementwise ops to half8 (128-bit) transactions. Hosts fall
+// back to the scalar kernels when n/L isn't 8-aligned or NNOPT_VEC_KERNELS=0.
+#ifdef USE_FP16
+  #define LOAD8V(p, i)     convert_float8(vload_half8(0, (p) + (i)))
+  #define STORE8V(p, i, v) vstore_half8((v), 0, (p) + (i))
+#else
+  #define LOAD8V(p, i)     vload8(0, (p) + (i))
+  #define STORE8V(p, i, v) vstore8((v), 0, (p) + (i))
+#endif
+
+__kernel void snake_beta_v8(__global storage_t* x,           // [C, L], L % 8 == 0
+                            __global const storage_t* alpha, // [C]
+                            __global const storage_t* beta,  // [C]
+                            const int C, const int L) {
+    const int Lv = L >> 3;
+    const int gid = get_global_id(0);
+    if (gid >= C * Lv) return;
+    const int c = gid / Lv;
+    const float a  = native_exp((float)LOAD(alpha, c));
+    const float rb = 1.0f / (native_exp((float)LOAD(beta, c)) + 1.0e-9f);
+    const size_t base = (size_t)gid * 8;
+    const float8 v = LOAD8V(x, base);
+    const float8 s = native_sin(v * a);
+    STORE8V(x, base, v + rb * (s * s));
+}
+
+__kernel void add_cl_v8(__global const storage_t* a,
+                        __global const storage_t* b,
+                        __global storage_t* out,
+                        const int n) {              // n % 8 == 0
+    const int gid = get_global_id(0);
+    if (gid >= (n >> 3)) return;
+    const size_t off = (size_t)gid * 8;
+    STORE8V(out, off, LOAD8V(a, off) + LOAD8V(b, off));
+}
+
+__kernel void bias_add_rows_v8(__global storage_t* x,          // [C, L], L % 8 == 0
+                               __global const storage_t* bias, // [C]
+                               const int C, const int L) {
+    const int Lv = L >> 3;
+    const int gid = get_global_id(0);
+    if (gid >= C * Lv) return;
+    const int c = gid / Lv;
+    const size_t off = (size_t)gid * 8;
+    STORE8V(x, off, LOAD8V(x, off) + (float8)((float)LOAD(bias, c)));
+}

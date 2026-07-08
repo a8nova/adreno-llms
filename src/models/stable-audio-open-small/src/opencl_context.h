@@ -16,6 +16,12 @@ public:
     bool initialize(int platform_idx = 0, int device_idx = 0);
     cl_program build_program(const std::string& source, const std::string& options = "");
     cl_program build_program_from_file(const std::string& path, const std::string& options = "");
+    // OPT-5: `<path>.bin` on-disk program binary cache (guide §5.7.3) —
+    // skips clBuildProgram-from-source on every run after the first.
+    // NNOPT_PROG_CACHE=0 bypasses for A/B.
+    cl_program load_or_build_program(const std::string& path,
+                                     const std::string& source,
+                                     const std::string& options = "");
 
     cl_context context() const { return context_; }
     cl_command_queue queue() const { return queue_; }

@@ -5,6 +5,8 @@
 #include <sstream>
 #include <iostream>
 #include <cstring>
+#include <cstdlib>
+#include <string>
 
 OpenCLContext::OpenCLContext() {}
 
@@ -35,7 +37,35 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
     device_ = devices[device_idx];
 
     cl_int err;
-    context_ = clCreateContext(nullptr, 1, &device_, nullptr, nullptr, &err);
+    // B10: cl_qcom_perf_hint — request highest GPU clock policy (guide
+    // §9.1.1; same pattern as the kokoro port). Probe the extension first;
+    // fall back to a plain context on non-Qualcomm or rejecting drivers.
+    // NNOPT_PERF_HINT=0 disables for A/B.
+    constexpr cl_context_properties CL_CONTEXT_PERF_HINT_QCOM = 0x40C2;
+    constexpr cl_context_properties CL_PERF_HINT_HIGH_QCOM    = 0x40C3;
+    bool want_hint = true;
+    if (const char* e = std::getenv("NNOPT_PERF_HINT")) want_hint = (e[0] != '0');
+    context_ = nullptr;
+    {
+        size_t ext_len = 0;
+        clGetDeviceInfo(device_, CL_DEVICE_EXTENSIONS, 0, nullptr, &ext_len);
+        std::string ext_str(ext_len, '\0');
+        if (ext_len > 0) clGetDeviceInfo(device_, CL_DEVICE_EXTENSIONS, ext_len, &ext_str[0], nullptr);
+        // NNOPT_PRINT_EXTENSIONS=1: dump the extension list once — drives
+        // which vendor extensions (recordable queues, onchip global memory)
+        // future campaign rounds can rely on.
+        if (const char* pe = std::getenv("NNOPT_PRINT_EXTENSIONS")) {
+            if (pe[0] == '1') fprintf(stderr, "CL_DEVICE_EXTENSIONS: %s\n", ext_str.c_str());
+        }
+        if (want_hint && ext_str.find("cl_qcom_perf_hint") != std::string::npos) {
+            cl_context_properties props[] = {
+                CL_CONTEXT_PERF_HINT_QCOM, CL_PERF_HINT_HIGH_QCOM, 0
+            };
+            context_ = clCreateContext(props, 1, &device_, nullptr, nullptr, &err);
+            if (err != CL_SUCCESS) context_ = nullptr;   // driver rejected the hint
+        }
+    }
+    if (!context_) context_ = clCreateContext(nullptr, 1, &device_, nullptr, nullptr, &err);
     if (err != CL_SUCCESS) return false;
 
     queue_ = clCreateCommandQueue(context_, device_, CL_QUEUE_PROFILING_ENABLE, &err);
@@ -86,6 +116,88 @@ cl_program OpenCLContext::build_program(const std::string& source, const std::st
     return program;
 }
 
+// ── OPT-5: on-disk program binary cache ──────────────────────────────────
+// clBuildProgram from source is a multi-hundred-ms cost per .cl file per
+// process, paid on EVERY one-shot run (guide §5.7.3: use
+// clCreateProgramWithBinary). Cache file `<path>.bin` = [8-byte fnv1a key]
+// [CL_PROGRAM_BINARIES bytes], keyed on source+options+device+driver+dtype so
+// a driver update or kernel edit invalidates cleanly (falls back to source
+// build and rewrites). Ported from the moonshine r6 implementation.
+// Kill-switch: NNOPT_PROG_CACHE=0 (A/B).
+static uint64_t nnopt_fnv1a64(const std::string& s, uint64_t h = 1469598103934665603ULL) {
+    for (unsigned char c : s) { h ^= c; h *= 1099511628211ULL; }
+    return h;
+}
+
+cl_program OpenCLContext::load_or_build_program(const std::string& path,
+                                                const std::string& source,
+                                                const std::string& options) {
+    static const bool cache_on = [] {
+        const char* e = std::getenv("NNOPT_PROG_CACHE");
+        return !(e && e[0] == '0');
+    }();
+    if (!cache_on) return build_program(source, options);
+
+    char driver[256] = {0};
+    clGetDeviceInfo(device_, CL_DRIVER_VERSION, sizeof(driver), driver, nullptr);
+    uint64_t key = nnopt_fnv1a64(source);
+    key = nnopt_fnv1a64(options, key);
+    // build_program appends fast-math/mad/USE_FP16 deterministically — fold a
+    // constant marker so changing that suffix invalidates the cache too.
+    key = nnopt_fnv1a64("-cl-fast-relaxed-math -cl-mad-enable", key);
+    key = nnopt_fnv1a64(device_name(), key);
+    key = nnopt_fnv1a64(driver, key);
+#ifdef NNOPT_USE_FP16
+    key = nnopt_fnv1a64("fp16", key);
+#endif
+    const std::string cache_path = path + ".bin";
+
+    // Try the cache: [8-byte key][binary bytes].
+    {
+        std::ifstream in(cache_path, std::ios::binary);
+        if (in.is_open()) {
+            uint64_t stored_key = 0;
+            in.read(reinterpret_cast<char*>(&stored_key), sizeof(stored_key));
+            if (in.good() && stored_key == key) {
+                std::vector<unsigned char> bin((std::istreambuf_iterator<char>(in)),
+                                               std::istreambuf_iterator<char>());
+                if (!bin.empty()) {
+                    const unsigned char* bin_ptr = bin.data();
+                    size_t bin_len = bin.size();
+                    cl_int bin_status = CL_SUCCESS, err = CL_SUCCESS;
+                    cl_program prog = clCreateProgramWithBinary(
+                        context_, 1, &device_, &bin_len, &bin_ptr, &bin_status, &err);
+                    if (prog && err == CL_SUCCESS && bin_status == CL_SUCCESS &&
+                        clBuildProgram(prog, 1, &device_, nullptr, nullptr, nullptr) == CL_SUCCESS) {
+                        return prog;
+                    }
+                    if (prog) clReleaseProgram(prog);
+                    // Corrupt/incompatible cache — fall through to source build.
+                }
+            }
+        }
+    }
+
+    cl_program prog = build_program(source, options);
+    if (!prog) return nullptr;
+
+    // Persist the binary (best-effort; failure to write is not an error).
+    size_t bin_len = 0;
+    if (clGetProgramInfo(prog, CL_PROGRAM_BINARY_SIZES, sizeof(bin_len), &bin_len, nullptr) == CL_SUCCESS
+        && bin_len > 0) {
+        std::vector<unsigned char> bin(bin_len);
+        unsigned char* bin_ptr = bin.data();
+        if (clGetProgramInfo(prog, CL_PROGRAM_BINARIES, sizeof(bin_ptr), &bin_ptr, nullptr) == CL_SUCCESS) {
+            std::ofstream out(cache_path, std::ios::binary | std::ios::trunc);
+            if (out.is_open()) {
+                out.write(reinterpret_cast<const char*>(&key), sizeof(key));
+                out.write(reinterpret_cast<const char*>(bin.data()), (std::streamsize)bin.size());
+            }
+        }
+    }
+    return prog;
+}
+
 cl_program OpenCLContext::build_program_from_file(const std::string& path, const std::string& options) {
     std::ifstream file(path);
     if (!file.is_open()) {
@@ -95,7 +207,7 @@ cl_program OpenCLContext::build_program_from_file(const std::string& path, const
 
     std::stringstream buffer;
     buffer << file.rdbuf();
-    cl_program prog = build_program(buffer.str(), options);
+    cl_program prog = load_or_build_program(path, buffer.str(), options);
     if (!prog) {
         NNOPT_ERROR_FMT("OpenCL kernel compilation FAILED for: %s (file opened OK, but clBuildProgram returned error)", path.c_str());
     }
