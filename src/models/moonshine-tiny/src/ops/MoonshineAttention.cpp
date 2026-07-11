@@ -168,20 +168,26 @@ static cl_mem attention_core(OpenCLContext& cl_ctx, cl_command_queue q,
 
 // ── KV-cache append (OPT-1) ─────────────────────────────────────────────
 // Append new [H, T_new, D] head-split rows into a persistent [H, KV_CAP, D]
-// cache at position `pos`, per head, via one clEnqueueCopyBufferRect.
+// cache at position `pos`, one clEnqueueCopyBuffer per head. This was a single
+// clEnqueueCopyBufferRect, but app-bundled Android OpenCL loader stubs commonly
+// omit that symbol and the executable then fails to LINK inside an APK (dlopen:
+// "cannot locate symbol clEnqueueCopyBufferRect" — hit on Edgi/SM-X210).
+// N_HEADS tiny enqueues are noise next to a decode step, and plain CopyBuffer
+// is exported by every loader.
 static bool kv_append(cl_command_queue q, cl_mem cache, cl_mem newkv,
                       int pos, int t_new, int kv_cap) {
     const size_t es = sizeof(nnopt_storage_t);
-    const size_t row_bytes = (size_t)t_new * HEAD_DIM * es;   // contiguous [T_new, D] block per head
-    size_t src_origin[3] = {0, 0, 0};
-    size_t dst_origin[3] = {(size_t)pos * HEAD_DIM * es, 0, 0};
-    size_t region[3]     = {row_bytes, (size_t)N_HEADS, 1};
-    cl_int err = clEnqueueCopyBufferRect(
-        q, newkv, cache, src_origin, dst_origin, region,
-        /*src_row_pitch=*/row_bytes, /*src_slice_pitch=*/0,
-        /*dst_row_pitch=*/(size_t)kv_cap * HEAD_DIM * es, /*dst_slice_pitch=*/0,
-        0, nullptr, nullptr);
-    if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("kv_append rect copy %d", err); return false; }
+    const size_t row_bytes  = (size_t)t_new * HEAD_DIM * es;    // contiguous [T_new, D] block per head
+    const size_t dst_pitch  = (size_t)kv_cap * HEAD_DIM * es;   // per-head stride in the cache
+    const size_t dst_offset = (size_t)pos * HEAD_DIM * es;      // append position within a head
+    for (int h = 0; h < N_HEADS; ++h) {
+        cl_int err = clEnqueueCopyBuffer(
+            q, newkv, cache,
+            /*src_offset=*/(size_t)h * row_bytes,
+            /*dst_offset=*/(size_t)h * dst_pitch + dst_offset,
+            row_bytes, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("kv_append copy head %d err %d", h, err); return false; }
+    }
     return true;
 }
 

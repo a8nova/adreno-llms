@@ -126,6 +126,8 @@ bool run_diffusion_pipeline(OpenCLContext& cl_ctx,
                                                   sigmas[i], sigmas[i + 1], n);
                 if (v_dev) dit.release_buf(v_dev);
                 if (i == 0) NNOPT_BENCH_FIRST_TOKEN();
+                // Per-step progress marker for app UIs (same stderr channel as SERVE_*).
+                if (ok) { fprintf(stderr, "SA_PROGRESS step=%d/%d\n", i + 1, steps); fflush(stderr); }
             }
             for (cl_mem b : noise_bufs) dit.release_buf(b);
             if (ok) dit.download_buf(x_dev, x, x.size());
@@ -163,6 +165,8 @@ bool run_diffusion_pipeline(OpenCLContext& cl_ctx,
             return false;
         }
         if (i == 0) NNOPT_BENCH_FIRST_TOKEN();
+        // Per-step progress marker for app UIs (same stderr channel as SERVE_*).
+        fprintf(stderr, "SA_PROGRESS step=%d/%d\n", i + 1, steps); fflush(stderr);
 
         // denoised = x - sigma_curr * v
         std::vector<float> denoised(x.size());

@@ -51,8 +51,16 @@ WHISPER_WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json tokenizer_vocab.bin)
 # tokenizer, just model + meta.
 KOKORO_WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json)
 # stable-audio-open-small: DiT+VAE in model.fp16.bin, plus the T5 encoder, its
-# tokenizer, and the seconds-conditioning lookup table.
-STABLE_AUDIO_WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json t5_encoder.fp16.bin t5_encoder.fp16.meta.json seconds_table.bin t5_tokenizer.bin tokenizer_vocab.bin)
+# tokenizer, and the seconds-conditioning lookup table. It reads t5_tokenizer.bin
+# only — the previous tokenizer_vocab.bin entry was a copy-paste from the LM sets
+# and matched nothing but a 0-byte placeholder. Deterministic noise sets ship with
+# the weights so the app can stage 4-step (fast) or 8-step (full) quality.
+STABLE_AUDIO_WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json t5_encoder.fp16.bin t5_encoder.fp16.meta.json seconds_table.bin t5_tokenizer.bin \
+  noise_s4/sigmas.bin noise_s4/init_noise.bin \
+  noise_s4/step_noise_0.bin noise_s4/step_noise_1.bin noise_s4/step_noise_2.bin noise_s4/step_noise_3.bin \
+  noise_s8/sigmas.bin noise_s8/init_noise.bin \
+  noise_s8/step_noise_0.bin noise_s8/step_noise_1.bin noise_s8/step_noise_2.bin noise_s8/step_noise_3.bin \
+  noise_s8/step_noise_4.bin noise_s8/step_noise_5.bin noise_s8/step_noise_6.bin noise_s8/step_noise_7.bin)
 # pocket-tts (TTS): model + tokenizer_vocab + the 8 selectable v1 voices (raw audio_prompt
 # the runtime primes). The v3 voices are NOT shipped — their pre-computed KV was made by a
 # different model snapshot and is silent on tts_b6369a24 (verified).

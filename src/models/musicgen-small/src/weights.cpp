@@ -147,6 +147,29 @@ static inline size_t _nnopt_bytes_per_element(const std::string& dtype) {
     return 4;  // float32 default
 }
 
+void Weights::advise_dontneed_key(const std::string& key) {
+    auto it = tensors_.find(key);
+    if (it == tensors_.end()) return;
+    advise_dontneed(it->second.offset, it->second.size_bytes);
+}
+
+void Weights::advise_dontneed(size_t offset, size_t nbytes) {
+    if (mapped_ == nullptr || mapped_ == MAP_FAILED || nbytes == 0) return;
+    const long ps = sysconf(_SC_PAGESIZE);
+    if (ps <= 0) return;
+    const size_t page_sz = (size_t)ps;
+    const uintptr_t start = (uintptr_t)mapped_ + offset;
+    const uintptr_t end   = start + nbytes;
+    // Round INWARD: skip partial pages so a tensor whose region overlaps an
+    // adjacent tensor's page doesn't accidentally evict the neighbour.
+    const uintptr_t aligned_start = (start + page_sz - 1) & ~(page_sz - 1);
+    const uintptr_t aligned_end   =  end                   & ~(page_sz - 1);
+    if (aligned_end > aligned_start) {
+        // Best-effort hint; failure is non-fatal (we still hold the cl_mem).
+        (void)madvise((void*)aligned_start, aligned_end - aligned_start, MADV_DONTNEED);
+    }
+}
+
 Weights::~Weights() {
     if (prefetch_thread_.joinable()) prefetch_thread_.join();
     if (mapped_ != nullptr && mapped_ != MAP_FAILED) {
@@ -517,6 +540,13 @@ cl_mem Weights::get_buffer(const std::string& key, bool optional) {
         }
         _nnopt_roundtrip_verified_once = true;
     }
+
+    // Release the file-backed pages now that the GPU holds a COPY_HOST_PTR copy.
+    // The cl_mem is the source of truth from here on; on the unified-memory
+    // Adreno keeping the host mmap resident too means ~2× the weight bytes in
+    // physical RAM (the cause of the music-gen OOM on small-RAM devices). Mirror
+    // smolvlm / lfm2-vl which drop the host pages immediately after upload.
+    advise_dontneed(meta.offset, meta.size_bytes);
 
     return meta.buffer;
 }
