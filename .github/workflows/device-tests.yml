@@ -33,6 +33,7 @@ jobs:
       max-parallel: 1                 # single attached device
       matrix:
         model:
+          - functiongemma-270m-it
           - granite-4-0-350m
           - lfm2-5-350m
           - mamba-130m

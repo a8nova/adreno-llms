@@ -1,0 +1,162 @@
+{
+  "produced_by": "_run_reference.py",
+  "script_version": "2026-06-25-local-source-path-no-strip-v9",
+  "transformers_version": "4.57.1",
+  "pytorch_version": "2.2.2",
+  "python_version": "3.9.9",
+  "input_ids": [
+    2,
+    818,
+    9800,
+    5934,
+    657,
+    506,
+    236743
+  ],
+  "generated_ids": [
+    2,
+    818,
+    9800,
+    5934,
+    657,
+    506,
+    236743,
+    236770,
+    236810,
+    594,
+    11398,
+    1012,
+    236761,
+    108
+  ],
+  "prompt": "The teacher worked at the ",
+  "reference_text": "The teacher worked at the 15th grade class.\n\n",
+  "generated_text": "15th grade class.\n\n",
+  "max_new_tokens": 7,
+  "model_id": "functiongemma-270m-it",
+  "test_prompts": [
+    {
+      "prompt": "The teacher worked at the ",
+      "input_ids": [
+        2,
+        818,
+        9800,
+        5934,
+        657,
+        506,
+        236743
+      ]
+    },
+    {
+      "prompt": "Hello",
+      "input_ids": [
+        2,
+        9259
+      ]
+    },
+    {
+      "prompt": "Hello, world!",
+      "input_ids": [
+        2,
+        9259,
+        236764,
+        1902,
+        236888
+      ]
+    },
+    {
+      "prompt": "The quick brown fox jumps over the lazy dog.",
+      "input_ids": [
+        2,
+        818,
+        3823,
+        8864,
+        37423,
+        38167,
+        1024,
+        506,
+        31770,
+        4799,
+        236761
+      ]
+    },
+    {
+      "prompt": "  leading and   multiple   whitespace  ",
+      "input_ids": [
+        2,
+        138,
+        26016,
+        532,
+        139,
+        43819,
+        139,
+        203201,
+        138
+      ]
+    },
+    {
+      "prompt": "Numbers 0 1 2 3 and code def f(x): return x**2",
+      "input_ids": [
+        2,
+        37091,
+        236743,
+        236771,
+        236743,
+        236770,
+        236743,
+        236778,
+        236743,
+        236800,
+        532,
+        3393,
+        1096,
+        517,
+        236769,
+        236781,
+        1473,
+        994,
+        1123,
+        1018,
+        236778
+      ]
+    },
+    {
+      "prompt": "Email: user@example.com (2024-01-01)",
+      "input_ids": [
+        2,
+        11919,
+        236787,
+        2430,
+        236940,
+        8358,
+        236761,
+        854,
+        568,
+        236778,
+        236771,
+        236778,
+        236812,
+        236772,
+        236771,
+        236770,
+        236772,
+        236771,
+        236770,
+        236768
+      ]
+    },
+    {
+      "prompt": "\n\tnewlines and\ttabs\n",
+      "input_ids": [
+        2,
+        107,
+        255968,
+        208697,
+        532,
+        255968,
+        39218,
+        107
+      ]
+    }
+  ]
+}

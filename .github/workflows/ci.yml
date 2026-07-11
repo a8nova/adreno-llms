@@ -28,15 +28,20 @@ jobs:
       fail-fast: false
       matrix:
         model:
+          - functiongemma-270m-it
           - granite-4-0-350m
+          - kokoro-82m
           - lfm2-5-350m
           - lfm2-5-vl-450m
           - mamba-130m
           - mamba2-130m
           - mms-tts
+          - musicgen-small
           - openelm-270m
           - openvoice-v2
+          - pocket-tts
           - qwen2-5-0-5b
+          - seamless-m4t-unity-small
           - smollm2-135m-instruct
           - smolvlm-256m-instruct
           - whisper-tiny
