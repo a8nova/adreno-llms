@@ -37,7 +37,7 @@ done
 
 # Dtype: NNOPT_DTYPE=fp16 builds the half-precision binary into build/fp16/
 # with -DNNOPT_DTYPE=fp16. Default fp32 uses build/.
-NNOPT_DTYPE="${NNOPT_DTYPE:-fp32}"
+NNOPT_DTYPE="${NNOPT_DTYPE:-fp16}"
 case "$NNOPT_DTYPE" in
     fp16) BUILD_DIR="build/fp16"; CMAKE_DTYPE_ARG="-DNNOPT_DTYPE=fp16" ;;
     fp32|"") BUILD_DIR="build"; CMAKE_DTYPE_ARG="-DNNOPT_DTYPE=fp32"; NNOPT_DTYPE="fp32" ;;
