@@ -789,6 +789,11 @@ static bool mega_i8o_prepare(OpenCLContext& cl_ctx, cl_command_queue queue,
     if (s_i8o_img[layer_idx][slot]) return true;
     std::vector<float> w = weights.get_host_vec(key);
     if ((int)w.size() != N * K) { NNOPT_ERROR_FMT("i8o: %s size mismatch", key.c_str()); return false; }
+    // We now own a float32 copy in `w`; the file-backed weight pages are no
+    // longer needed (this quantize runs once per matrix, then caches the GPU
+    // buffer). Drop them so the fp16 host copy doesn't stay resident next to
+    // the int8 GPU copy for the whole run — the bulk of the music-gen RSS.
+    weights.advise_dontneed_key(key);
     const int ngroups = K / 128;
     std::vector<int8_t> q((size_t)N * K, 0);
     std::vector<float> scales((size_t)N * ngroups, 0.0f);

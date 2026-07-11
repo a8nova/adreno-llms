@@ -134,10 +134,11 @@ extern "C" void MoonshineBackbone_invalidate_encoder_cache();
 
 namespace {
 
-// No-repeat n-gram blocking (HF `no_repeat_ngram_size`), PARTIALs only: bans a
-// token that would complete an n-gram already generated in this window, so a
-// short live-preview window can't run away in a repetition loop. FINALs stay
-// pure greedy — byte-identical to the batch path the token-exact gate proves.
+// No-repeat n-gram blocking (HF `no_repeat_ngram_size`) for ALL stream decodes
+// (PARTIAL and FINAL): bans a token that would complete an n-gram already
+// generated in this window, so no repetition loop can ever be COMMITTED to the
+// transcript. The batch (non-stream) path stays pure greedy — the token-exact
+// gate only covers batch mode, which does not use this function.
 static void ban_repeat_ngrams(std::vector<float>& logits,
                               const std::vector<int32_t>& gen, int n) {
     const int g = (int)gen.size();
@@ -154,14 +155,17 @@ static void ban_repeat_ngrams(std::vector<float>& logits,
     }
 }
 
-// Transcribe one window of 16kHz mono float audio → text. full_quality=false
-// (PARTIAL) adds the no-repeat-ngram guard; FINALs are the plain greedy loop.
-std::string nnopt_transcribe_window(OpenCLContext& cl_ctx, Model& model, Tokenizer& tok,
-                                    bool tokenizer_ok, Sampler& sampler,
-                                    const SamplerConfig& scfg, int max_new_tokens,
-                                    const std::vector<float>& wav,
-                                    bool full_quality) {
-    if (wav.empty()) return std::string();
+// Transcribe one window of 16kHz mono float audio → generated TOKENS (EOS
+// stripped). Token output (not text) is what makes local-agreement streaming
+// possible: consecutive hypotheses are compared token-for-token and only the
+// agreed prefix is committed. All stream decodes use the no-repeat guard.
+std::vector<int32_t> nnopt_transcribe_window_tokens(
+        OpenCLContext& cl_ctx, Model& model, Tokenizer& tok,
+        bool tokenizer_ok, Sampler& sampler,
+        const SamplerConfig& scfg, int max_new_tokens,
+        const std::vector<float>& wav) {
+    (void)tokenizer_ok;
+    if (wav.empty()) return {};
     const auto _t0 = std::chrono::high_resolution_clock::now();
     const double _win_s = (double)wav.size() / 16000.0;
 
@@ -175,7 +179,7 @@ std::string nnopt_transcribe_window(OpenCLContext& cl_ctx, Model& model, Tokeniz
     cl_mem feats = clCreateBuffer(cl_ctx.context(), CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
                                   wav_storage.size() * sizeof(nnopt_storage_t),
                                   wav_storage.data(), &err);
-    if (err != CL_SUCCESS || !feats) { NNOPT_ERROR_FMT("stream: waveform buffer alloc %d", (int)err); return std::string(); }
+    if (err != CL_SUCCESS || !feats) { NNOPT_ERROR_FMT("stream: waveform buffer alloc %d", (int)err); return {}; }
 
     MoonshineBackbone_invalidate_encoder_cache();   // force recompute for THIS window's audio
     ForwardDispatch::set_input_features(feats);
@@ -196,7 +200,7 @@ std::string nnopt_transcribe_window(OpenCLContext& cl_ctx, Model& model, Tokeniz
             break;
         }
         std::vector<int32_t> gen_so_far(decoder_ids.begin() + prompt_len, decoder_ids.end());
-        if (!full_quality) ban_repeat_ngrams(logits, gen_so_far, 3);
+        ban_repeat_ngrams(logits, gen_so_far, 3);
         int next = sampler.sample(logits, gen_so_far);
         decoder_ids.push_back(next);
         if (scfg.eos_token_id >= 0 && next == scfg.eos_token_id) break;
@@ -206,21 +210,16 @@ std::string nnopt_transcribe_window(OpenCLContext& cl_ctx, Model& model, Tokeniz
     MoonshineBackbone_invalidate_encoder_cache();   // don't leave this window's encoder cached
     ForwardDispatch::set_input_features(nullptr);
 
-    std::string text;
-    if (decoder_ids.size() > prompt_len && tokenizer_ok) {
-        std::vector<int32_t> gen(decoder_ids.begin() + prompt_len, decoder_ids.end());
-        if (!gen.empty() && scfg.eos_token_id >= 0 && gen.back() == scfg.eos_token_id)
-            gen.pop_back();
-        text = tok.decode(gen);
-    }
+    std::vector<int32_t> gen(decoder_ids.begin() + prompt_len, decoder_ids.end());
+    if (!gen.empty() && scfg.eos_token_id >= 0 && gen.back() == scfg.eos_token_id)
+        gen.pop_back();
 
     const double _proc_s = std::chrono::duration<double>(
         std::chrono::high_resolution_clock::now() - _t0).count();
-    const int _ntok = (int)(decoder_ids.size() - prompt_len);
     fprintf(stderr, "STREAM_TIMING win=%.2f proc=%.2f rtf=%.2f ntok=%d\n",
-            _win_s, _proc_s, (_win_s > 0 ? _proc_s / _win_s : 0.0), _ntok);
+            _win_s, _proc_s, (_win_s > 0 ? _proc_s / _win_s : 0.0), (int)gen.size());
     fflush(stderr);
-    return text;
+    return gen;
 }
 
 int nnopt_run_stream(OpenCLContext& cl_ctx, Model& model, Tokenizer& tok, bool tokenizer_ok,
@@ -253,7 +252,7 @@ int nnopt_run_stream(OpenCLContext& cl_ctx, Model& model, Tokenizer& tok, bool t
     std::vector<float> cur;                  // in-progress phrase (guarded)
     size_t cur_voiced = 0;                   // samples up to & incl. the last VOICED frame (guarded)
     double cur_t0 = 0.0;                     // stream-time (s) of cur[0] (guarded)
-    struct Phrase { std::vector<float> pcm; double t0, t1; };
+    struct Phrase { std::vector<float> pcm; double t0, t1; bool reset = false; };
     std::deque<Phrase> finals;               // completed phrases awaiting transcription (guarded)
     std::atomic<bool> eof{false};
 
@@ -331,6 +330,10 @@ int nnopt_run_stream(OpenCLContext& cl_ctx, Model& model, Tokenizer& tok, bool t
                 const double t1 = cur_t0 + (double)cur.size() / (double)SR;
                 finals.push_back(Phrase{std::move(cur), cur_t0, t1});
             }
+            // Reset marker AFTER any flushed tail: the consumer prints
+            // STREAM_RESET_ACK once everything from the old session has been
+            // emitted, so the app can drop stale events deterministically.
+            finals.push_back(Phrase{{}, 0.0, 0.0, /*reset=*/true});
             cur.clear(); cur_voiced = 0;
             framebuf.clear(); in_speech = false; speech_run = 0; silence_run = 0;
         };
@@ -356,18 +359,32 @@ int nnopt_run_stream(OpenCLContext& cl_ctx, Model& model, Tokenizer& tok, bool t
             vad_threshold, step_ms, hangover_ms, cap);
     fflush(stderr);
 
-    auto emit = [&](const char* tag, const std::vector<float>& pcm, int tok_cap, bool full_quality,
-                    double t0, double t1) {
-        const std::string txt = nnopt_transcribe_window(cl_ctx, model, tok, tokenizer_ok,
-                                                        sampler, scfg, tok_cap, pcm, full_quality);
+    // ── Local-agreement streaming (LocalAgreement-2) ────────────────────────
+    // Each step re-decodes the open phrase; tokens where TWO consecutive
+    // hypotheses agree are COMMITTED (append-only — the app renders them solid
+    // and never repaints them); only the disagreeing tail is a PARTIAL. FINAL
+    // emits just the not-yet-committed remainder, so nothing is ever printed
+    // twice. Wire protocol (stdout):
+    //   COMMIT  [t0-t1]: <newly agreed text>   (append)
+    //   PARTIAL [t0-t1]: <unstable tail>       (replace)
+    //   FINAL   [t0-t1]: <remainder>           (append; phrase closed)
+    //   STREAM_RESET_ACK                       (all pre-reset events flushed)
+    auto decode_tokens = [&](const std::vector<float>& pcm) {
+        return nnopt_transcribe_window_tokens(cl_ctx, model, tok, tokenizer_ok,
+                                              sampler, scfg, cap, pcm);
+    };
+    auto print_event = [&](const char* tag, double t0, double t1, const std::string& txt) {
         char hdr[64];
         snprintf(hdr, sizeof(hdr), "%s [%.2f-%.2f]: ", tag, t0, t1);
         std::cout << hdr << txt << std::endl;
     };
-
+    std::vector<int32_t> committed;     // tokens already emitted as COMMIT (this phrase)
+    std::vector<int32_t> prev_hyp;      // previous hypothesis (this phrase)
+    double phrase_id = -1.0;            // cur_t0 of the phrase the state belongs to
     size_t last_partial_n = 0;
+
     while (true) {
-        // 1. Completed phrases first — commit as FINAL (plain greedy = batch path).
+        // 1. Completed phrases first.
         Phrase fin;
         bool have_final = false;
         {
@@ -375,9 +392,25 @@ int nnopt_run_stream(OpenCLContext& cl_ctx, Model& model, Tokenizer& tok, bool t
             if (!finals.empty()) { fin = std::move(finals.front()); finals.pop_front(); have_final = true; }
         }
         if (have_final) {
-            if (fin.pcm.size() >= min_phrase_samps)
-                emit("FINAL", fin.pcm, cap, /*full_quality=*/true, fin.t0, fin.t1);
-            last_partial_n = 0;
+            if (fin.reset) {
+                committed.clear(); prev_hyp.clear(); phrase_id = -1.0; last_partial_n = 0;
+                std::cout << "STREAM_RESET_ACK" << std::endl;
+                continue;
+            }
+            if (fin.pcm.size() >= min_phrase_samps) {
+                std::vector<int32_t> hyp = decode_tokens(fin.pcm);
+                // Emit only what the partials haven't already committed. If this
+                // final's phrase never got a partial (very short), committed is
+                // empty and the whole hypothesis is the remainder. Positional
+                // clamp: committed text stands even if the final re-decode
+                // disagrees with it (streaming commits are irrevocable).
+                const size_t base = (fin.t0 == phrase_id && committed.size() < hyp.size())
+                                        ? committed.size()
+                                        : (fin.t0 == phrase_id ? hyp.size() : 0);
+                std::vector<int32_t> rem(hyp.begin() + base, hyp.end());
+                print_event("FINAL", fin.t0, fin.t1, tok.decode(rem));
+            }
+            committed.clear(); prev_hyp.clear(); phrase_id = -1.0; last_partial_n = 0;
             continue;
         }
         // 2. Stream closed with nothing queued → flush the in-progress tail.
@@ -385,30 +418,50 @@ int nnopt_run_stream(OpenCLContext& cl_ctx, Model& model, Tokenizer& tok, bool t
             std::vector<float> tail;
             double tail_t0 = 0.0;
             { std::lock_guard<std::mutex> lk(mtx); tail.swap(cur); tail_t0 = cur_t0; }
-            if (tail.size() >= min_phrase_samps)
-                emit("FINAL", tail, cap, /*full_quality=*/true,
-                     tail_t0, tail_t0 + (double)tail.size() / (double)SR);
+            if (tail.size() >= min_phrase_samps) {
+                std::vector<int32_t> hyp = decode_tokens(tail);
+                const size_t base = (tail_t0 == phrase_id && committed.size() < hyp.size())
+                                        ? committed.size()
+                                        : (tail_t0 == phrase_id ? hyp.size() : 0);
+                std::vector<int32_t> rem(hyp.begin() + base, hyp.end());
+                print_event("FINAL", tail_t0, tail_t0 + (double)tail.size() / (double)SR, tok.decode(rem));
+            }
             break;
         }
-        // 3. PARTIAL: re-transcribe the most recent ~partial_window_s of VOICED
-        //    audio (slice ends at cur_voiced so trailing silence never enters).
+        // 3. PARTIAL step: snapshot the open phrase's voiced audio.
         std::vector<float> snap;
-        double snap_t0 = 0.0, snap_t1 = 0.0;
+        double snap_phrase = -1.0, snap_t0 = 0.0, snap_t1 = 0.0;
         {
             std::lock_guard<std::mutex> lk(mtx);
             if (cur_voiced >= min_phrase_samps && cur_voiced >= last_partial_n + step_samples) {
                 const size_t take = cur_voiced < partial_window_samps ? cur_voiced : partial_window_samps;
                 snap.assign(cur.begin() + (cur_voiced - take), cur.begin() + cur_voiced);
+                snap_phrase = cur_t0;
                 snap_t0 = cur_t0 + (double)(cur_voiced - take) / (double)SR;
                 snap_t1 = cur_t0 + (double)cur_voiced / (double)SR;
                 last_partial_n = cur_voiced;
             }
         }
-        if (!snap.empty()) {
-            emit("PARTIAL", snap, cap, /*full_quality=*/false, snap_t0, snap_t1);
-        } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        if (snap.empty()) { std::this_thread::sleep_for(std::chrono::milliseconds(15)); continue; }
+        // A new phrase opened while state still belongs to the previous one
+        // (its FINAL is queued but not yet processed) — don't cross-pollinate
+        // hypotheses across phrases; the next loop iteration drains the FINAL.
+        if (phrase_id >= 0.0 && snap_phrase != phrase_id) { last_partial_n = 0; continue; }
+        if (phrase_id < 0.0) phrase_id = snap_phrase;
+
+        std::vector<int32_t> hyp = decode_tokens(snap);
+        // LocalAgreement-2: the prefix two consecutive hypotheses agree on is stable.
+        size_t agree = 0;
+        while (agree < prev_hyp.size() && agree < hyp.size() && prev_hyp[agree] == hyp[agree]) ++agree;
+        if (agree > committed.size()) {
+            std::vector<int32_t> newly(hyp.begin() + (long)committed.size(), hyp.begin() + (long)agree);
+            committed.insert(committed.end(), newly.begin(), newly.end());
+            print_event("COMMIT", snap_t0, snap_t1, tok.decode(newly));
         }
+        const size_t tail_from = committed.size() < hyp.size() ? committed.size() : hyp.size();
+        std::vector<int32_t> tail_toks(hyp.begin() + (long)tail_from, hyp.end());
+        print_event("PARTIAL", snap_t0, snap_t1, tok.decode(tail_toks));
+        prev_hyp = std::move(hyp);
     }
 
     reader.join();

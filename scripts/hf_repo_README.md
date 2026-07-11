@@ -45,6 +45,10 @@ Decode tok/s = 5-run warm median, fp16, greedy (`temperature=0, seed=42`), 32-to
 | `seamless-m4t-unity-small/model.fp16.bin` | [facebook/seamless-m4t-unity-small](https://huggingface.co/facebook/seamless-m4t-unity-small) | ~323M | S2ST/S2TT (see repo) | CC-BY-NC 4.0 |
 | `openelm-270m-instruct/` (companion files only) | [apple/OpenELM-270M-Instruct](https://huggingface.co/apple/OpenELM-270M-Instruct) | 270M | 4.47 | Apple ASCL — fetch + convert locally |
 | `openvoice-v2/model.fp16.bin` | [myshell-ai/OpenVoiceV2](https://huggingface.co/myshell-ai/OpenVoiceV2) | ~32M | voice cloning (see repo) | MIT |
+| `pocket-tts/model.fp16.bin` | [kyutai/pocket-tts](https://huggingface.co/kyutai/pocket-tts) | ~100M | TTS (see repo) | see upstream (gated repo) |
+| `moonshine-tiny/model.fp16.bin` | [UsefulSensors/moonshine-tiny](https://huggingface.co/UsefulSensors/moonshine-tiny) | ~27M | streaming ASR (see repo) | MIT |
+| `depth-anything-v2-small/model.fp16.bin` | [depth-anything/Depth-Anything-V2-Small-hf](https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf) | ~25M | depth estimation (see repo) | Apache 2.0 |
+| `stable-audio-open-small/model.fp16.bin` | [stabilityai/stable-audio-open-small](https://huggingface.co/stabilityai/stable-audio-open-small) | ~341M | text→audio (see repo) | Stability AI Community License |
 
 **OpenELM-270M-Instruct is partially hosted here.** Under `openelm-270m-instruct/` you'll find only the small companion files:
 
