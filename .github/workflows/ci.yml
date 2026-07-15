@@ -28,6 +28,7 @@ jobs:
       fail-fast: false
       matrix:
         model:
+          - depth-anything-v2-small
           - functiongemma-270m-it
           - granite-4-0-350m
           - kokoro-82m
@@ -36,6 +37,7 @@ jobs:
           - mamba-130m
           - mamba2-130m
           - mms-tts
+          - moonshine-tiny
           - musicgen-small
           - openelm-270m
           - openvoice-v2
@@ -44,6 +46,7 @@ jobs:
           - seamless-m4t-unity-small
           - smollm2-135m-instruct
           - smolvlm-256m-instruct
+          - stable-audio-open-small
           - whisper-tiny
     steps:
       - uses: actions/checkout@v4
@@ -79,3 +82,13 @@ jobs:
           bin=$(find "src/models/${{ matrix.model }}/build/fp16" -maxdepth 1 -type f -name '*_inference_fp16' | head -1)
           strict=""; [ "${{ matrix.model }}" = "openvoice-v2" ] && strict="--strict"
           ANDROID_NDK="$ANDROID_NDK_LATEST_HOME" bash scripts/ci/check_self_contained.sh "$bin" $strict
+
+      # Google Play (Android 15 / API 35+) REJECTS an AAB whose bundled .so isn't 16 KB
+      # (0x4000)-page aligned, and it fails to load on 16 KB-page devices. NDK r26d defaults
+      # to 4 KB — each model must link with -Wl,-z,max-page-size=16384. This gate proves it
+      # here, in the model repo, before the binary is embedded in the app (device-free ELF
+      # parse; mirrors Edgi's verifyNativeLibAlignment so they can't drift).
+      - name: Check binary is 16 KB-page aligned (Google Play)
+        run: |
+          bin=$(find "src/models/${{ matrix.model }}/build/fp16" -maxdepth 1 -type f -name '*_inference_fp16' | head -1)
+          bash scripts/ci/check_16kb_alignment.sh "$bin"

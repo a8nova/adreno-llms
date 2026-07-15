@@ -1,0 +1,20 @@
+{
+  "produced_by": "_run_reference.py",
+  "produced_via": "vision",
+  "model_id": "depth-anything/Depth-Anything-V2-Small-hf",
+  "prompt": "Describe this image.",
+  "max_new_tokens": 7,
+  "input_ids": [
+    0
+  ],
+  "generated_ids": [
+    0
+  ],
+  "generated_text": "",
+  "reference_text": "",
+  "modality": "vision_depth",
+  "result_descriptor": {
+    "kind": "tensor",
+    "file": "reference/predicted_depth.bin"
+  }
+}

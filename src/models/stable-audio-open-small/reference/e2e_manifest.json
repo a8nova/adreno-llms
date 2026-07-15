@@ -1,0 +1,59 @@
+{
+  "produced_by": "gen_e2e_reference.py",
+  "model_id": "stabilityai/stable-audio-open-small",
+  "prompt": "128 BPM tech house drum loop",
+  "seconds_total": 11,
+  "steps": 8,
+  "cfg_scale": 1.0,
+  "sampler_type": "pingpong",
+  "seed": 0,
+  "sample_rate": 44100,
+  "sample_size": 524288,
+  "io_channels": 64,
+  "downsampling_ratio": 2048,
+  "latent_len": 256,
+  "sigmas": [
+    1.0,
+    0.875,
+    0.75,
+    0.625,
+    0.5,
+    0.375,
+    0.25,
+    0.125,
+    0.0
+  ],
+  "num_rng_draws": 9,
+  "num_step_noise": 8,
+  "shapes": {
+    "init_noise": [
+      1,
+      64,
+      256
+    ],
+    "latent_final": [
+      1,
+      64,
+      256
+    ],
+    "output_audio": [
+      1,
+      2,
+      524288
+    ]
+  },
+  "assets": {
+    "init_noise": "assets/init_noise.bin",
+    "step_noise": [
+      "assets/step_noise_0.bin",
+      "assets/step_noise_1.bin",
+      "assets/step_noise_2.bin",
+      "assets/step_noise_3.bin",
+      "assets/step_noise_4.bin",
+      "assets/step_noise_5.bin",
+      "assets/step_noise_6.bin",
+      "assets/step_noise_7.bin"
+    ],
+    "sigmas": "assets/sigmas.bin"
+  }
+}

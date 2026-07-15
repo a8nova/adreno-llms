@@ -53,6 +53,15 @@ public:
     // "float16", "bfloat16"). Empty string if key not found.
     std::string get_dtype(const std::string& key) const;
 
+    // Drop the host mmap pages backing [key] now that its bytes have been
+    // consumed (uploaded to the GPU, or decoded into a heap copy). Use this on
+    // the INT8 quantize path (MegaDecoderLayer), which reads weights via
+    // get_host_vec() rather than get_buffer() — without it those file-backed
+    // pages stay resident for the whole run next to the GPU copy (~2× weights
+    // → music-gen OOM). No-op if the key is unknown; safe because the mapping
+    // is MAP_PRIVATE/PROT_READ (a later read re-faults the clean page).
+    void advise_dontneed_key(const std::string& key);
+
     // Destructor — munmaps the weight file and releases any GPU buffers
     // created by get_buffer().
     ~Weights();
@@ -87,4 +96,16 @@ private:
 
     std::unordered_map<std::string, TensorMeta> tensors_;
     cl_context ctx_ = nullptr;
+
+    // Hint the kernel that we no longer need a region of the mmap'd weight file
+    // in RAM. Called immediately after a successful clCreateBuffer that
+    // COPY_HOST_PTR'd from `mapped_ + offset` — the GPU now holds the only copy
+    // it needs, so the host pages are redundant. Page-aligns INWARD so we never
+    // release a page that straddles into an adjacent tensor's range. Cuts peak
+    // CPU RSS by ~weight-file-size, which otherwise sits resident next to the
+    // GPU copies (~2× weights on the unified-memory Adreno → OOM on small RAM).
+    // Safe because the mapping is MAP_PRIVATE/PROT_READ: any later host read of
+    // a dropped tensor (e.g. the EnCodec host decode path) simply re-faults the
+    // clean page back from the file — correct, just a one-off re-read.
+    void advise_dontneed(size_t offset, size_t nbytes);
 };

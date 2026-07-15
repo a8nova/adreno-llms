@@ -18,6 +18,9 @@
 #   for each of: granite-4-0-350m, lfm2-5-350m, lfm2-5-vl-450m, mamba-130m,
 #                mamba2-130m, qwen2-5-0-5b, smollm2-135m-instruct, whisper-tiny,
 #                kokoro-82m, musicgen-small, seamless-m4t-unity-small,
+#                pocket-tts, moonshine-tiny (3-file ASR set),
+#                depth-anything-v2-small (model + meta only, no tokenizer),
+#                stable-audio-open-small (T5 + DiT/VAE + seconds table),
 #                openelm-270m (companion files only)
 #   plus a top-level README.md sourced from scripts/hf_repo_README.md
 #
@@ -29,7 +32,7 @@
 set -euo pipefail
 
 HF_REPO="${HF_REPO:-a8nova/adreno-llms-weights}"
-MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m pocket-tts musicgen-small seamless-m4t-unity-small openelm-270m openvoice-v2)
+MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m pocket-tts musicgen-small seamless-m4t-unity-small openelm-270m openvoice-v2 moonshine-tiny depth-anything-v2-small stable-audio-open-small)
 # Push only the model(s) named as args (e.g. `upload_weights_to_hf.sh pocket-tts`); default = all.
 [ $# -ge 1 ] && MODELS=("$@")
 WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
@@ -41,11 +44,23 @@ OPENELM_WEIGHT_FILES=(model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
 # tokenizer_vocab.bin directly and never reads a tokenizer.json, so its weight
 # set is 3 files — the full model.fp16.bin IS redistributable (Apache 2.0).
 WHISPER_WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json tokenizer_vocab.bin)
-# musicgen-small (text→music) and seamless-m4t-unity-small (speech translation)
-# use the same 3-file set. kokoro-82m (TTS) phonemizes via espeak assets and
-# openvoice-v2 (voice cloning) is audio-to-audio — neither needs a tokenizer,
-# just model + meta.
+# moonshine-tiny (ASR), musicgen-small (text→music) and seamless-m4t-unity-small
+# (speech translation) use the same 3-file set. kokoro-82m (TTS) phonemizes via
+# espeak assets, openvoice-v2 (voice cloning) is audio-to-audio, and
+# depth-anything-v2-small (vision depth) takes a pixel tensor — none needs a
+# tokenizer, just model + meta.
 KOKORO_WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json)
+# stable-audio-open-small: DiT+VAE in model.fp16.bin, plus the T5 encoder, its
+# tokenizer, and the seconds-conditioning lookup table. It reads t5_tokenizer.bin
+# only — the previous tokenizer_vocab.bin entry was a copy-paste from the LM sets
+# and matched nothing but a 0-byte placeholder. Deterministic noise sets ship with
+# the weights so the app can stage 4-step (fast) or 8-step (full) quality.
+STABLE_AUDIO_WEIGHT_FILES=(model.fp16.bin model.fp16.meta.json t5_encoder.fp16.bin t5_encoder.fp16.meta.json seconds_table.bin t5_tokenizer.bin \
+  noise_s4/sigmas.bin noise_s4/init_noise.bin \
+  noise_s4/step_noise_0.bin noise_s4/step_noise_1.bin noise_s4/step_noise_2.bin noise_s4/step_noise_3.bin \
+  noise_s8/sigmas.bin noise_s8/init_noise.bin \
+  noise_s8/step_noise_0.bin noise_s8/step_noise_1.bin noise_s8/step_noise_2.bin noise_s8/step_noise_3.bin \
+  noise_s8/step_noise_4.bin noise_s8/step_noise_5.bin noise_s8/step_noise_6.bin noise_s8/step_noise_7.bin)
 # pocket-tts (TTS): model + tokenizer_vocab + the 8 selectable v1 voices (raw audio_prompt
 # the runtime primes). The v3 voices are NOT shipped — their pre-computed KV was made by a
 # different model snapshot and is silent on tts_b6369a24 (verified).
@@ -92,11 +107,13 @@ expected=0
 for m in "${MODELS[@]}"; do
   if [ "$m" = "openelm-270m" ]; then
     files=("${OPENELM_WEIGHT_FILES[@]}")
-  elif [ "$m" = "kokoro-82m" ] || [ "$m" = "openvoice-v2" ]; then
+  elif [ "$m" = "stable-audio-open-small" ]; then
+    files=("${STABLE_AUDIO_WEIGHT_FILES[@]}")
+  elif [ "$m" = "kokoro-82m" ] || [ "$m" = "openvoice-v2" ] || [ "$m" = "depth-anything-v2-small" ]; then
     files=("${KOKORO_WEIGHT_FILES[@]}")
   elif [ "$m" = "pocket-tts" ]; then
     files=("${POCKET_WEIGHT_FILES[@]}")     # model + meta + tokenizer_vocab + 8 v1 voices
-  elif [ "$m" = "whisper-tiny" ] || [ "$m" = "musicgen-small" ] || [ "$m" = "seamless-m4t-unity-small" ]; then
+  elif [ "$m" = "whisper-tiny" ] || [ "$m" = "musicgen-small" ] || [ "$m" = "seamless-m4t-unity-small" ] || [ "$m" = "moonshine-tiny" ]; then
     files=("${WHISPER_WEIGHT_FILES[@]}")   # model.fp16.bin + meta + tokenizer_vocab.bin
   else
     files=("${WEIGHT_FILES[@]}")
@@ -151,6 +168,16 @@ for m in "${MODELS[@]}"; do
     # the cached voice_kv, and voices_v3/ (incompatible KV — silent on our model).
     exclude_args+=( --exclude "model.bin" --exclude "model.meta.json" \
                     --exclude "voice_kv.bin" --exclude "voices_v3/*" )
+  fi
+  if [ "$m" = "moonshine-tiny" ]; then
+    # drop the fp32 model.bin (a symlink into ~/.nnopt) and its meta — the
+    # published bundle is fp16-only, same as whisper-tiny.
+    exclude_args+=( --exclude "model.bin" --exclude "model.meta.json" )
+  fi
+  if [ "$m" = "stable-audio-open-small" ]; then
+    # the runtime reads the precomputed seconds_table.bin, not the raw
+    # seconds_embedder weights.
+    exclude_args+=( --exclude "seconds_embedder.fp16.bin" --exclude "seconds_embedder.meta.json" )
   fi
   "$HF" upload "$HF_REPO" "$src_dir" "$(hf_subdir_for "$m")" "${exclude_args[@]}"
 done

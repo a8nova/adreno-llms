@@ -1,0 +1,68 @@
+{
+  "A": {
+    "num_samples": 40868,
+    "duration_s": 2.554,
+    "ids": [
+      1,
+      450,
+      4996,
+      17354,
+      1701,
+      29916,
+      432,
+      17204,
+      975,
+      278,
+      17366,
+      11203,
+      29889,
+      2
+    ],
+    "text": "The quick brown fox jumps over the lazy dog."
+  },
+  "B": {
+    "num_samples": 57586,
+    "duration_s": 3.599,
+    "ids": [
+      1,
+      4321,
+      292,
+      12032,
+      19679,
+      373,
+      278,
+      9008,
+      411,
+      278,
+      14982,
+      716,
+      10541,
+      29889,
+      2
+    ],
+    "text": "Testing speech recognition on the phone with the brand new sentence."
+  },
+  "C": {
+    "num_samples": 43469,
+    "duration_s": 2.717,
+    "ids": [
+      1,
+      29871,
+      29896,
+      29889,
+      2448,
+      2192,
+      8527,
+      29879,
+      19509,
+      373,
+      323,
+      4901,
+      29247,
+      678,
+      4512,
+      2
+    ],
+    "text": "1. Neuro Networks Running on Tiny Graphics Chips"
+  }
+}

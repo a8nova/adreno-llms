@@ -287,6 +287,12 @@ if(ANDROID)
         # time, but the DT_NEEDED on it doesn't cascade.
         "-Wl,--no-copy-dt-needed-entries"
         "-Wl,-rpath,/vendor/lib64:/vendor/lib:/system/lib64:/system/lib"
+        # 16 KB page alignment — REQUIRED for a Google Play release targeting
+        # Android 15 (API 35). NDK r26d defaults PT_LOAD alignment to 4 KB
+        # (0x1000); Play rejects any bundled .so that isn't 16 KB (0x4000)
+        # aligned, and it fails to load on 16 KB-page devices. AGP does not
+        # catch this — the host app's verifyNativeLibAlignment gate does.
+        "-Wl,-z,max-page-size=16384"
     )
     set_target_properties(functiongemma_270m_it_inference PROPERTIES
         INSTALL_RPATH "/vendor/lib64:/vendor/lib:/system/lib64:/system/lib"

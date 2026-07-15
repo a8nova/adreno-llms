@@ -7,16 +7,18 @@
 https://github.com/user-attachments/assets/c5723e58-6bc7-4fbc-921b-59388e26f2c9
 
 
-## ✨ NEW: six new modalities on-device — Vision, Speech, Listening, Music, Translation & Voice cloning
+## ✨ NEW: eight modalities on-device — Vision, Speech, Listening, Music, Translation, Voice cloning, Depth & Diffusion audio
 
-Beyond text generation, six new model types now run **fully on-device** on Adreno 6xx:
+Beyond text generation, eight model types now run **fully on-device** on Adreno 6xx:
 
 - **👁️ Vision (VLM)** — [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) and [LFM2.5-VL-450M](src/models/lfm2-5-vl-450m/): image + text in, text out.
 - **🗣️ Speech (TTS)** — [MMS-TTS](src/models/mms-tts/), [Kokoro-82M](src/models/kokoro-82m/) and [Pocket-TTS](src/models/pocket-tts/): text in, speech out.
-- **🎧 Listening (ASR)** — [Whisper-tiny](src/models/whisper-tiny/): speech in, text out, with real-time streaming transcription.
+- **🎧 Listening (ASR)** — [Whisper-tiny](src/models/whisper-tiny/) (with real-time streaming transcription) and [Moonshine-tiny](src/models/moonshine-tiny/) (raw-waveform in, no mel stage — RTF ~0.3 one-shot): speech in, text out.
 - **🎵 Music (text→music)** — [MusicGen-small](src/models/musicgen-small/): text prompt in, music out.
 - **🌐 Translation (S2ST/S2TT)** — [SeamlessM4T UnitY-small](src/models/seamless-m4t-unity-small/): speech in → translated speech or text out (English/Spanish/Portuguese/Hindi/Russian).
 - **🎙️ Voice cloning (tone-color conversion)** — [OpenVoice V2](src/models/openvoice-v2/): speech in → the same speech re-voiced in a target speaker's tone color, fused single-pass clone at ~2× real-time.
+- **🏔️ Depth (monocular depth estimation)** — [Depth-Anything-V2-Small](src/models/depth-anything-v2-small/): single RGB image in, per-pixel depth map out — 5.2 s/frame at 518×686 fp16 on Adreno 620, cosine 0.99999 vs the PyTorch reference.
+- **🌊 Diffusion audio (text→audio)** — [Stable Audio Open Small](src/models/stable-audio-open-small/): the first latent-diffusion port — T5 conditioning + 8-step DiT + VAE decode fully on device, 11 s stereo 44.1 kHz clip in ~100–130 s (thermal-dependent).
 
 <!-- Drop your demo .mp4 into a GitHub PR/issue, copy the resulting
      https://github.com/user-attachments/assets/<uuid> URL, and replace
@@ -79,6 +81,7 @@ RTF = processing time / audio duration (lower is better; < 1.0 = faster than rea
 | Model | Precision | Params | Architecture | RTF | Audio | Wall (s) | Peak CPU mem (MB) | Notes |
 |---|:-:|---:|---|---:|---:|---:|---:|---|
 | [Whisper-tiny](src/models/whisper-tiny/) | fp16 | 37M | Whisper encoder-decoder (4 enc + 4 dec, d=384) | **0.53** | 109.8 s | ~58.2 | 458 | faster than real time; 9/10 byte-exact; long clips (18–29 s) ~0.40; live streaming + VAD mode |
+| [Moonshine-tiny](src/models/moonshine-tiny/) | fp16 | 27M | Moonshine encoder-decoder (6 enc + 6 dec, d=288, RoPE, raw 16 kHz in — no mel stage) | **0.30** | 8.9 s | ~2.6 | 185 | 3 verification clips (2.6–3.6 s), one-shot process per clip incl. ~0.3 s TTFT, warm, measured 2026-07-07; token-exact vs PyTorch on all clips; clips ≤25 s (encoder cap 1024 frames) |
 
 ### Music generation
 
