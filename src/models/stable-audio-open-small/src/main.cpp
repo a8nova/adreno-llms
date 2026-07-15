@@ -150,42 +150,52 @@ int main(int argc, char** argv) {
 
     const int C = MODEL_CONFIG::DIT_LATENT_CHANNELS; // 64
 
-    // ── conditioning: on-device T5 for arbitrary prompts, with the pushed
-    // asset files as the deterministic-replay fallback (validation runs set
-    // NNOPT_COND_FROM_ASSETS=1 to force byte-identical reference inputs). ──
+    // ── conditioning for the ONE-SHOT paths (single-step + full pipeline):
+    // on-device T5 for arbitrary prompts, with the pushed asset files as the
+    // deterministic-replay fallback (validation runs set NNOPT_COND_FROM_ASSETS=1
+    // to force byte-identical reference inputs).
+    //
+    // In --serve mode we MUST NOT run this: the persistent loop below computes
+    // conditioning per stdin prompt from its own T5 encoder, and at startup the
+    // prompt is empty — so the asset fallback would fire and try to open the
+    // reference-replay assets/*.bin, which are NOT shipped in production. That
+    // would kill the process before SERVE_READY. See the serve branch below. ──
     std::vector<float> cross_cond, global_emb;
-    const char* force_assets = std::getenv("NNOPT_COND_FROM_ASSETS");
-    bool cond_on_device = false;
-    if (!(force_assets && force_assets[0] == '1') && !prompt.empty()) {
-        T5CondEncoder t5;
-        const auto t5_t0 = std::chrono::steady_clock::now();
-        if (t5.load("weights/t5_encoder.fp16.bin", "weights/t5_encoder.fp16.meta.json",
-                    "weights/t5_tokenizer.bin", "weights/seconds_table.bin")) {
-            int n_real = 0;
-            if (t5.compute(prompt, seconds_total, cross_cond, global_emb, &n_real)) {
-                cond_on_device = true;
-                const double t5_sec = std::chrono::duration<double>(
-                    std::chrono::steady_clock::now() - t5_t0).count();
-                NNOPT_CHECKPOINT_FMT("T5 conditioning ON DEVICE: %d real tokens, %.2fs",
-                                     n_real, t5_sec);
-                printf("BENCHMARK conditioning_sec: %.3f\n", t5_sec);
-                // dump for cosine validation against the reference target
-                write_bin("t5_cond_dump.bin", cross_cond);
+    int cross_seq = 0;
+    if (!serve_mode) {
+        const char* force_assets = std::getenv("NNOPT_COND_FROM_ASSETS");
+        bool cond_on_device = false;
+        if (!(force_assets && force_assets[0] == '1') && !prompt.empty()) {
+            T5CondEncoder t5;
+            const auto t5_t0 = std::chrono::steady_clock::now();
+            if (t5.load("weights/t5_encoder.fp16.bin", "weights/t5_encoder.fp16.meta.json",
+                        "weights/t5_tokenizer.bin", "weights/seconds_table.bin")) {
+                int n_real = 0;
+                if (t5.compute(prompt, seconds_total, cross_cond, global_emb, &n_real)) {
+                    cond_on_device = true;
+                    const double t5_sec = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - t5_t0).count();
+                    NNOPT_CHECKPOINT_FMT("T5 conditioning ON DEVICE: %d real tokens, %.2fs",
+                                         n_real, t5_sec);
+                    printf("BENCHMARK conditioning_sec: %.3f\n", t5_sec);
+                    // dump for cosine validation against the reference target
+                    write_bin("t5_cond_dump.bin", cross_cond);
+                }
+            }
+            if (!cond_on_device) {
+                NNOPT_CHECKPOINT("T5 weights unavailable — falling back to asset conditioning");
             }
         }
         if (!cond_on_device) {
-            NNOPT_CHECKPOINT("T5 weights unavailable — falling back to asset conditioning");
+            if (!read_bin("assets/cross_attn_cond.bin", cross_cond)) return 1;
+            if (!read_bin("assets/global_embed.bin", global_emb)) return 1;
         }
+        // cross_cond is [1, cross_seq, 768]; cross_seq = size / 768
+        cross_seq = (int)cross_cond.size() / MODEL_CONFIG::DIT_COND_TOKEN_DIM;
+        NNOPT_CHECKPOINT_FMT("cross_seq=%d global_emb=%zu cond_source=%s",
+                             cross_seq, global_emb.size(),
+                             cond_on_device ? "device_t5" : "assets");
     }
-    if (!cond_on_device) {
-        if (!read_bin("assets/cross_attn_cond.bin", cross_cond)) return 1;
-        if (!read_bin("assets/global_embed.bin", global_emb)) return 1;
-    }
-    // cross_cond is [1, cross_seq, 768]; cross_seq = size / 768
-    int cross_seq = (int)cross_cond.size() / MODEL_CONFIG::DIT_COND_TOKEN_DIM;
-    NNOPT_CHECKPOINT_FMT("cross_seq=%d global_emb=%zu cond_source=%s",
-                         cross_seq, global_emb.size(),
-                         cond_on_device ? "device_t5" : "assets");
 
     if (single_step) {
         std::vector<float> x, tvec;
