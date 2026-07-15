@@ -167,6 +167,17 @@ else()
     )
     if(ANDROID AND TARGET clblast)
         target_compile_options(clblast PRIVATE "-include" "sstream")
+        # Keep libclblast.so from re-exporting the static libc++ symbols it
+        # pulls in (ANDROID_STL=c++_static). Without this the shared lib exports
+        # libc++ internals (e.g. std::__throw_length_error) as WEAK globals; the
+        # main executable then BINDS those references to libclblast.so at link
+        # time (UND imports) instead of its own static libc++. At runtime the
+        # app's shared libclblast.so (a different, stripped build) doesn't export
+        # them → "cannot locate symbol ..._throw_length_error" and the engine
+        # won't even link. --exclude-libs,ALL hides all static-archive symbols
+        # from the .so's dynamic table, so the executable stays self-contained
+        # (binds its own static libc++) and runs against ANY libclblast.so build.
+        target_link_options(clblast PRIVATE "-Wl,--exclude-libs,ALL")
     endif()
     include_directories(${clblast_SOURCE_DIR}/include)
 endif()
@@ -316,6 +327,12 @@ if(ANDROID)
         # time, but the DT_NEEDED on it doesn't cascade.
         "-Wl,--no-copy-dt-needed-entries"
         "-Wl,-rpath,/vendor/lib64:/vendor/lib:/system/lib64:/system/lib"
+        # Google Play requires 16 KB-aligned load segments; NDK r26d still
+        # defaults to 4 KB (-z max-page-size=4096). Without this the packaged
+        # lib<key>.so is 4 KB-aligned and Edgi's verifyNativeLibAlignment gate
+        # (build.gradle.kts) fails the release build. Every port that ships to
+        # the app needs this flag — see the 16 KB-alignment note in memory.
+        "-Wl,-z,max-page-size=16384"
     )
     set_target_properties(stable_audio_open_small_inference PROPERTIES
         INSTALL_RPATH "/vendor/lib64:/vendor/lib:/system/lib64:/system/lib"
