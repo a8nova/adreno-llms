@@ -1,0 +1,35 @@
+{
+ "prompt": "<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n",
+ "prompt_ids": [
+  151644,
+  872,
+  198,
+  3838,
+  374,
+  279,
+  6722,
+  315,
+  9625,
+  30,
+  151645,
+  198,
+  151644,
+  77091,
+  198
+ ],
+ "output_ids": [
+  59604,
+  198,
+  151668,
+  271,
+  785,
+  6722,
+  315,
+  9625,
+  374,
+  12095,
+  13,
+  151645
+ ],
+ "output_text": "Paris\n</think>\n\nThe capital of France is Paris."
+}
