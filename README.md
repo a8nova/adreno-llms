@@ -51,7 +51,9 @@ Decode tok/s = warm 3-run median, greedy (`--temperature 0`), 32-token generatio
 | [LFM2.5-350M](src/models/lfm2-5-350m/) | **int8** | 350M | Hybrid conv+attn | 13.67 | **0.81** | 1015 | +19.6% vs fp16 |
 | [LFM2.5-350M](src/models/lfm2-5-350m/) | **Q4** | 350M | Hybrid conv+attn | **14.54** | **0.79** | **719** | +27.2% vs fp16; ALU-bound nibble unpack |
 | [Granite-4.0-350M](src/models/granite-4-0-350m/) | fp16 | 350M | Dense decoder + GQA | 10.19 | 2.41 | 2580 | IBM Granite (instruct); 71% of 10 GB/s ceiling |
-| [Qwen2.5-0.5B-Instruct](src/models/qwen2-5-0-5b/) | fp16 | 500M | LLaMA + GQA | 10.36 | 3.66 | 2720 | Largest in the repo; 70% of 14 GB/s ceiling |
+| [Qwen2.5-0.5B-Instruct](src/models/qwen2-5-0-5b/) | fp16 | 500M | LLaMA + GQA | 10.36 | 3.66 | 2720 | Largest fp16 model; 70% of 14 GB/s ceiling |
+| [Bonsai-8B](src/models/bonsai/) | **Q1_0** | 8B | Qwen3 + GQA (1-bit) | **1.96** | 7.15 | 2946 | Largest model in the repo; 1.125 bit/weight, never dequantized; token-exact vs llama.cpp; decode is ALU-issue-bound on the 1-bit unpack. 64-tok, measured 2026-07-18 |
+| [Bonsai-4B](src/models/bonsai/) | **Q1_0** | 4B | Qwen3 + GQA (1-bit) | **3.08** | 4.10 | 1828 | Same dim-generic runtime as 8B (one `libbonsai.so`); ~1.7× faster (half the params). 64-tok, measured 2026-07-18 |
 
 ### Vision-language
 

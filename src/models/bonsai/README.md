@@ -40,17 +40,18 @@ From this directory, with an Android device connected over `adb`:
 
 ## Performance
 
-Razr 2020 / Adreno 620 / Snapdragon 765G, Q1_0, greedy (`chat`/`gen`), 64-token warm decode.
-Token-exact vs the llama.cpp oracle (3/3 goldens).
+Razr 2020 / Adreno 620 / Snapdragon 765G, Q1_0, greedy, 64-token warm decode, measured 2026-07-18.
+8B is token-exact vs the llama.cpp oracle (3/3 goldens).
 
-| | Decode tok/s | Load (warm) | Weights |
-|---|---:|---:|---:|
-| Bonsai-8B | **1.95** | ~3.5 s | 1.16 GB |
-| Bonsai-4B | _pending on-device benchmark_ | — | 574 MB |
+| | Decode tok/s | TTFT (s) | Peak mem (MB) | Weights |
+|---|---:|---:|---:|---:|
+| Bonsai-8B | **1.96** | 7.15 | 2946 | 1.16 GB |
+| Bonsai-4B | **3.08** | 4.10 | 1828 | 574 MB |
 
-1.95 tok/s is the hard floor for a token-exact 1-bit 8B decode on this 2020 GPU — the decode is
-**ALU-issue-bound on the 1-bit unpack**, not memory-bound (memory has ~5× headroom). The full
-optimization ladder and the closed dead ends are in [BENCHMARK.md](./BENCHMARK.md).
+1.96 tok/s is the hard floor for a token-exact 1-bit 8B decode on this 2020 GPU — the decode is
+**ALU-issue-bound on the 1-bit unpack**, not memory-bound (memory has ~5× headroom). The 4B shares
+the same dim-generic runtime and runs ~1.7× faster (half the params). The full optimization ladder
+and the closed dead ends are in [BENCHMARK.md](./BENCHMARK.md).
 
 ## Layout
 

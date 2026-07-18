@@ -12,7 +12,7 @@
 #   qwen2-5-0-5b  smollm2-135m-instruct  whisper-tiny  kokoro-82m
 #   musicgen-small  seamless-m4t-unity-small  openvoice-v2  smolvlm-256m-instruct
 #   pocket-tts  moonshine-tiny  depth-anything-v2-small  stable-audio-open-small
-#   functiongemma-270m-it
+#   functiongemma-270m-it  bonsai (Q1_0 1-bit; fetches 8B + 4B + tokenizer)
 #
 # Per model, this fetches the base set the runtime needs:
 #   weights/model.fp16.bin
@@ -41,7 +41,7 @@ HF_BRANCH="${HF_BRANCH:-main}"
 HF_BASE="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}"
 
 
-MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m smolvlm-256m-instruct mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m pocket-tts musicgen-small seamless-m4t-unity-small openvoice-v2 functiongemma-270m-it moonshine-tiny depth-anything-v2-small stable-audio-open-small)
+MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m smolvlm-256m-instruct mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m pocket-tts musicgen-small seamless-m4t-unity-small openvoice-v2 functiongemma-270m-it moonshine-tiny depth-anything-v2-small stable-audio-open-small bonsai)
 BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
 # whisper-tiny + moonshine-tiny (ASR), musicgen-small (text→music),
 # seamless-m4t-unity-small (speech translation) and functiongemma-270m-it
@@ -186,6 +186,27 @@ fetch_one() {
 
   local weights_dir="${REPO_ROOT}/src/models/${model}/weights"
   mkdir -p "${weights_dir}"
+
+  # Bonsai is Q1_0 (1-bit .nnb, not model.fp16.bin), and its two sizes live under
+  # separate HF subdirs. One dim-generic runtime reads whichever .nnb is in
+  # weights/, so fetch BOTH sizes (8B + 4B) + the shared tokenizer — then
+  # `./scripts/deploy_android.sh` (8B) and `BONSAI_NNB=bonsai4b.nnb ./scripts/deploy_android.sh`
+  # (4B) both work without a re-fetch.
+  if [ "${model}" = "bonsai" ]; then
+    echo ">>> bonsai (Q1_0 1-bit — fetching 8B + 4B + shared tokenizer)"
+    local _bonsai=("bonsai-8b-q1/tokenizer.json:tokenizer.json"
+                   "bonsai-8b-q1/bonsai8b.nnb:bonsai8b.nnb"
+                   "bonsai-4b-q1/bonsai4b.nnb:bonsai4b.nnb")
+    local pair
+    for pair in "${_bonsai[@]}"; do
+      echo "    ${pair##*:}"
+      curl --location --continue-at - --fail-with-body --progress-bar \
+           --retry 3 --retry-delay 5 \
+           --output "${weights_dir}/${pair##*:}" "${HF_BASE}/${pair%%:*}"
+    done
+    echo "    done — total $(du -sh "${weights_dir}" | awk '{print $1}')"
+    return 0
+  fi
 
   echo ">>> ${model} (--quant ${QUANT})"
   while IFS= read -r f; do
