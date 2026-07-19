@@ -150,7 +150,11 @@ else()
         GIT_TAG 1.6.3
         GIT_SHALLOW TRUE
     )
-    set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static library" FORCE)
+    if(ANDROID)
+        set(BUILD_SHARED_LIBS ON CACHE BOOL "Android: build CLBlast shared (deployed via Deploy)" FORCE)
+    else()
+        set(BUILD_SHARED_LIBS OFF CACHE BOOL "Host: link CLBlast statically" FORCE)
+    endif()
     set(SAMPLES OFF CACHE BOOL "Disable samples" FORCE)
     set(TUNERS OFF CACHE BOOL "Disable tuners" FORCE)
     set(CLIENTS OFF CACHE BOOL "Disable clients" FORCE)

@@ -40,11 +40,14 @@ for m in "${models[@]}"; do
     bad "${m}: a script still defaults NNOPT_DTYPE to fp32 (should be fp16)"
   fi
 
-  # 5. deploy must push libclblast.so (it is dynamically linked at launch).
-  #    Allowed exception: a script that explicitly documents static linking.
+  # 5. If the model LINKS CLBlast, its deploy must push libclblast.so (it is
+  #    dynamically linked at launch). Models with no CLBlast dependency — e.g.
+  #    bonsai's custom 1-bit GEMV kernels — legitimately never reference it.
   dep="${sdir}/deploy_android.sh"
-  if [ -f "$dep" ] && ! grep -qiE 'clblast' "$dep"; then
-    bad "${m}: deploy_android.sh never references libclblast.so (clean deploy will fail to link)"
+  if grep -rqiE 'clblast' "${MODELS_DIR}/${m}/CMakeLists.txt" "${sdir}/build.sh" 2>/dev/null; then
+    if [ -f "$dep" ] && ! grep -qiE 'clblast' "$dep"; then
+      bad "${m}: links CLBlast but deploy_android.sh never pushes libclblast.so (clean deploy will fail to link)"
+    fi
   fi
 done
 

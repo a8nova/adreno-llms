@@ -139,14 +139,16 @@ else()
         GIT_TAG 1.6.3
         GIT_SHALLOW TRUE
     )
-    # Static-link CLBlast (both Android and host) so the binary is SELF-CONTAINED,
-    # matching every other port. A shared libclblast.so makes the binary import
-    # libc++ symbols (e.g. std::__throw_length_error) from that .so at runtime;
-    # with the main binary on static libc++ (ANDROID_STL=c++_static) those fail to
-    # resolve ("cannot locate symbol … CANNOT LINK EXECUTABLE"). Static CLBlast +
-    # static libc++ depends on nothing under lib/, so it runs as-is — nothing to
-    # push to $REMOTE_DIR/lib and no libc++_shared.so needed.
-    set(BUILD_SHARED_LIBS OFF CACHE BOOL "Static CLBlast: self-contained binary" FORCE)
+    # Android: build CLBlast SHARED (one libclblast.so shipped for all models,
+    # deployed to $REMOTE_DIR/lib). Verified self-contained: the shared CLBlast
+    # statically links libc++ (no libc++_shared.so NEEDED), so the old
+    # std::__throw_length_error resolution concern does not occur — the production
+    # dynamic models (granite/whisper/…) all run this way. Host: static.
+    if(ANDROID)
+        set(BUILD_SHARED_LIBS ON CACHE BOOL "Android: build CLBlast shared (deployed via Deploy)" FORCE)
+    else()
+        set(BUILD_SHARED_LIBS OFF CACHE BOOL "Host: link CLBlast statically" FORCE)
+    endif()
     set(SAMPLES OFF CACHE BOOL "Disable samples" FORCE)
     set(TUNERS OFF CACHE BOOL "Disable tuners" FORCE)
     set(CLIENTS OFF CACHE BOOL "Disable clients" FORCE)
