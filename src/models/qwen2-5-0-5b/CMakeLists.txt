@@ -150,7 +150,17 @@ else()
         GIT_TAG 1.6.3
         GIT_SHALLOW TRUE
     )
-    set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static library" FORCE)
+    # On Android the canonical pattern is: build CLBlast as a shared lib,
+    # deploy libclblast.so to $REMOTE_DIR/lib/, set LD_LIBRARY_PATH at run.
+    # Deploy auto-pushes any *.so under build/<dtype>/_deps/*-build/ to
+    # $REMOTE_DIR/lib/ — and run_android.sh prepends $REMOTE_DIR/lib to
+    # LD_LIBRARY_PATH. So shared-link "just works". On non-Android hosts
+    # we keep static-link to avoid runtime-loader path concerns.
+    if(ANDROID)
+        set(BUILD_SHARED_LIBS ON CACHE BOOL "Android: build CLBlast shared (deployed via Deploy)" FORCE)
+    else()
+        set(BUILD_SHARED_LIBS OFF CACHE BOOL "Host: link CLBlast statically" FORCE)
+    endif()
     set(SAMPLES OFF CACHE BOOL "Disable samples" FORCE)
     set(TUNERS OFF CACHE BOOL "Disable tuners" FORCE)
     set(CLIENTS OFF CACHE BOOL "Disable clients" FORCE)

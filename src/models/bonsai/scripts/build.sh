@@ -75,13 +75,18 @@ echo "Using Android NDK: $ANDROID_NDK"
 echo "Target ABI: arm64-v8a / API 21"
 
 # ------------------------------------------------------------------ OpenCL deps
-# Headers + libOpenCL.so link stub live under $HOME/.nnopt/deps/opencl.
-OPENCL_DEPS="${OPENCL_DEPS:-$HOME/.nnopt/deps/opencl}"
+# Headers + libOpenCL.so link stub. Prefer the repo-standard cache the CI
+# populates ($ADRENO_LLMS_CACHE/opencl via scripts/ci/setup_opencl_stub.sh);
+# fall back to the legacy nnopt location for local dev. Override with OPENCL_DEPS.
+ADRENO_LLMS_CACHE="${ADRENO_LLMS_CACHE:-$HOME/.cache/adreno-llms}"
+OPENCL_DEPS="${OPENCL_DEPS:-$ADRENO_LLMS_CACHE/opencl}"
+[ -f "$OPENCL_DEPS/include/CL/cl.h" ] || OPENCL_DEPS="$HOME/.nnopt/deps/opencl"
 OPENCL_INC="${OPENCL_INC:-$OPENCL_DEPS/include}"
 OPENCL_LIB="${OPENCL_LIB:-$OPENCL_DEPS/lib/android-arm64-v8a/libOpenCL.so}"
 
 if [ ! -f "$OPENCL_INC/CL/cl.h" ]; then
     echo "ERROR: OpenCL headers not found at $OPENCL_INC (expected CL/cl.h)" >&2
+    echo "  Run scripts/ci/setup_opencl_stub.sh (device-free) or set OPENCL_DEPS." >&2
     exit 1
 fi
 if [ ! -f "$OPENCL_LIB" ]; then

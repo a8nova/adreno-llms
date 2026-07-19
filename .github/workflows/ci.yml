@@ -28,6 +28,7 @@ jobs:
       fail-fast: false
       matrix:
         model:
+          - bonsai
           - depth-anything-v2-small
           - functiongemma-270m-it
           - granite-4-0-350m
@@ -67,7 +68,11 @@ jobs:
 
       - name: Verify a binary was produced
         run: |
-          bin=$(find "src/models/${{ matrix.model }}/build/fp16" -maxdepth 1 -type f -name '*_inference_fp16' | head -1)
+          if [ "${{ matrix.model }}" = "bonsai" ]; then
+            bin=$(find "src/models/bonsai/build" -maxdepth 1 -type f -name 'bonsai_inference' | head -1)   # ships fp32 (1-bit weights)
+          else
+            bin=$(find "src/models/${{ matrix.model }}/build/fp16" -maxdepth 1 -type f -name '*_inference_fp16' | head -1)
+          fi
           test -n "$bin" || { echo "no fp16 binary produced"; exit 1; }
           file "$bin" | grep -q 'ARM aarch64' || { echo "binary is not arm64"; file "$bin"; exit 1; }
           echo "OK: $bin"
@@ -79,7 +84,11 @@ jobs:
       # least not pull in libc++_shared.so or surprise deps.
       - name: Check binary is app-linkable
         run: |
-          bin=$(find "src/models/${{ matrix.model }}/build/fp16" -maxdepth 1 -type f -name '*_inference_fp16' | head -1)
+          if [ "${{ matrix.model }}" = "bonsai" ]; then
+            bin=$(find "src/models/bonsai/build" -maxdepth 1 -type f -name 'bonsai_inference' | head -1)   # ships fp32 (1-bit weights)
+          else
+            bin=$(find "src/models/${{ matrix.model }}/build/fp16" -maxdepth 1 -type f -name '*_inference_fp16' | head -1)
+          fi
           strict=""; [ "${{ matrix.model }}" = "openvoice-v2" ] && strict="--strict"
           ANDROID_NDK="$ANDROID_NDK_LATEST_HOME" bash scripts/ci/check_self_contained.sh "$bin" $strict
 
@@ -90,5 +99,22 @@ jobs:
       # parse; mirrors Edgi's verifyNativeLibAlignment so they can't drift).
       - name: Check binary is 16 KB-page aligned (Google Play)
         run: |
-          bin=$(find "src/models/${{ matrix.model }}/build/fp16" -maxdepth 1 -type f -name '*_inference_fp16' | head -1)
+          if [ "${{ matrix.model }}" = "bonsai" ]; then
+            bin=$(find "src/models/bonsai/build" -maxdepth 1 -type f -name 'bonsai_inference' | head -1)   # ships fp32 (1-bit weights)
+          else
+            bin=$(find "src/models/${{ matrix.model }}/build/fp16" -maxdepth 1 -type f -name '*_inference_fp16' | head -1)
+          fi
           bash scripts/ci/check_16kb_alignment.sh "$bin"
+
+      # CLBlast must be linked DYNAMICALLY (one shared libclblast.so shipped for the
+      # whole app), never statically baked into each binary — static duplicates ~3 MB
+      # per model. This gate fails a regression back to static (exempts openvoice-v2's
+      # intentional self-contained build and models that use no CLBlast at all).
+      - name: Check CLBlast is dynamically linked
+        run: |
+          if [ "${{ matrix.model }}" = "bonsai" ]; then
+            bin=$(find "src/models/bonsai/build" -maxdepth 1 -type f -name 'bonsai_inference' | head -1)
+          else
+            bin=$(find "src/models/${{ matrix.model }}/build/fp16" -maxdepth 1 -type f -name '*_inference_fp16' | head -1)
+          fi
+          ANDROID_NDK="$ANDROID_NDK_LATEST_HOME" bash scripts/ci/check_clblast_dynamic.sh "$bin" "${{ matrix.model }}"

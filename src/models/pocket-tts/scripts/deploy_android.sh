@@ -74,15 +74,24 @@ else
     exit 2
 fi
 
-# Push CLBlast if present in workspace lib/ — needed when the binary
-# was linked against -lclblast. Refuse silently-missing the file.
-if [ -f "lib/libclblast.so" ]; then
-    echo "Pushing libclblast.so..."
-    $ADB push lib/libclblast.so $REMOTE_DIR/lib/libclblast.so
-fi
-if [ -f "build/libclblast.so" ]; then
-    echo "Pushing build/libclblast.so..."
-    $ADB push build/libclblast.so $REMOTE_DIR/lib/libclblast.so
+# Push CLBlast shared lib when we linked dynamically (Android builds CLBlast
+# shared). The FetchContent build emits it under build/<dtype>/_deps/clblast-build/;
+# check every known output location so a dynamic binary never hits
+# 'library "libclblast.so" not found' at runtime.
+CLBLAST_SO=""
+for cand in \
+    "build/fp16/_deps/clblast-build/libclblast.so" \
+    "build/_deps/clblast-build/libclblast.so" \
+    "build/fp16/libclblast.so" \
+    "build/libclblast.so" \
+    "lib/libclblast.so"; do
+    if [ -f "$cand" ]; then CLBLAST_SO="$cand"; break; fi
+done
+if [ -n "$CLBLAST_SO" ]; then
+    echo "Pushing CLBlast runtime ($CLBLAST_SO)..."
+    $ADB push "$CLBLAST_SO" $REMOTE_DIR/lib/libclblast.so
+else
+    echo "Note: libclblast.so not found in build outputs; assuming CLBlast statically linked"
 fi
 
 # Push weights matching the dtype (model.bin OR model.fp16.bin — never both).

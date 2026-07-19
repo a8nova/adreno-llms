@@ -126,13 +126,22 @@ set(CLBlast_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(CLBlast_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
 set(CLBlast_BUILD_CLIENTS OFF CACHE BOOL "" FORCE)
 set(CLBlast_WITH_CLHPP OFF CACHE BOOL "" FORCE)
-# Force static-only.
-set(CLBlast_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
-set(CLBlast_STATIC_LIBRARY ON  CACHE BOOL "" FORCE)
-# Some CLBlast versions use these option names instead.
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-set(CLBlast_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-set(CLBlast_BUILD_STATIC ON CACHE BOOL "" FORCE)
+# Android: build CLBlast SHARED — one libclblast.so is shipped once for all
+# models (deployed by deploy_android.sh + LD_LIBRARY_PATH set by run_android.sh),
+# instead of baking a ~3 MB static copy into every model binary. Host: static.
+if(ANDROID)
+  set(CLBlast_SHARED_LIBRARY ON  CACHE BOOL "" FORCE)
+  set(CLBlast_STATIC_LIBRARY OFF CACHE BOOL "" FORCE)
+  set(BUILD_SHARED_LIBS ON  CACHE BOOL "" FORCE)
+  set(CLBlast_BUILD_SHARED ON  CACHE BOOL "" FORCE)
+  set(CLBlast_BUILD_STATIC OFF CACHE BOOL "" FORCE)
+else()
+  set(CLBlast_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+  set(CLBlast_STATIC_LIBRARY ON  CACHE BOOL "" FORCE)
+  set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+  set(CLBlast_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+  set(CLBlast_BUILD_STATIC ON  CACHE BOOL "" FORCE)
+endif()
 # Propagate our OpenCL headers path to CLBlast's FindOpenCL.
 if(DEFINED OPENCL_INCLUDE_DIR)
   set(OPENCL_INCLUDE_DIRS ${OPENCL_INCLUDE_DIR} CACHE PATH "" FORCE)
@@ -150,15 +159,8 @@ else()
   message(FATAL_ERROR "CLBlast target not found (expected clblast_static or clblast).")
 endif()
 
-# Fail fast if we accidentally linked against a shared CLBlast target.
-foreach(_tgt IN ITEMS clblast clblast_static)
-  if(TARGET ${_tgt})
-    get_target_property(_tgt_type ${_tgt} TYPE)
-    if(_tgt_type STREQUAL "SHARED_LIBRARY")
-      message(FATAL_ERROR "CLBlast resolved to a SHARED_LIBRARY target (${_tgt}). This would require libclblast.so on device.")
-    endif()
-  endif()
-endforeach()
+# On Android CLBlast is intentionally SHARED (deployed as libclblast.so); on host
+# it stays static. Either target type is fine here.
 
 target_include_directories(SmolLM2_135M_Instruct_inference PRIVATE ${clblast_SOURCE_DIR}/include)
 # Suffix the binary with NNOPT_BIN_SUFFIX so fp32 (<name>_inference) and fp16
