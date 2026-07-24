@@ -89,6 +89,10 @@ static bool read_input_ids_bin(const std::string& path, std::vector<int32_t>& ou
 }
 
 int main(int argc, char** argv) {
+    // Build marker — lets us confirm from the engine log which binary is
+    // actually running. Bump the tag on every device-facing engine change.
+    fprintf(stderr, "[engine] kokoro build: reqd-subgroup-gate v2 "
+                    "(dot8 + reqd_sub_group_size fallbacks)\n");
     // (No version banner — debug_utils does not define one, and emitting an
     // undefined macro here was breaking every fresh-port build.)
     // Argument parsing: positional "prompt" + optional flags.

@@ -403,6 +403,34 @@ cl_program nnopt_build_program_cached(cl_context ctx,
         return nullptr;
     }
     err = clBuildProgram(prog, 1, &dev, opts, nullptr, nullptr);
+    // OpenCL 3.0 driver quirk (observed on Adreno 730 / SM8450): a device may
+    // ADVERTISE cl_qcom_dot_product8 in CL_DEVICE_EXTENSIONS yet its 3.0
+    // front-end rejects the `#pragma OPENCL EXTENSION ... : enable` and the
+    // qcom_dot8_acc builtin. The extension string is therefore NOT a reliable
+    // signal (this is why the dot8 paths compile-probe rather than string-check).
+    // The vendor pragma often only compiles under the 1.2 front-end, so on a
+    // build failure retry ONCE with -cl-std=CL1.2 before giving up. This never
+    // changes behaviour for kernels that already build (Adreno 620 hits none of
+    // this), and it is the difference between the int8 fast path and the fp16
+    // fallback on the 730. If the retry also fails, we return nullptr as before
+    // and the caller drops to fp16.
+    if (err != CL_SUCCESS && opts && !strstr(opts, "-cl-std")) {
+        clReleaseProgram(prog);
+        std::string retry_opts = std::string("-cl-std=CL1.2 ") + opts;
+        prog = clCreateProgramWithSource(ctx, 1, &source, &src_len, &err);
+        if (prog && err == CL_SUCCESS) {
+            cl_int rerr = clBuildProgram(prog, 1, &dev, retry_opts.c_str(),
+                                         nullptr, nullptr);
+            if (rerr == CL_SUCCESS) {
+                NNOPT_ERROR_FMT("nnopt_build_program_cached[%s]: built with "
+                                "-cl-std=CL1.2 fallback (3.0 front-end rejected "
+                                "the vendor pragma)", cache_key);
+                err = CL_SUCCESS;
+            } else {
+                err = rerr;   // report the retry's failure below
+            }
+        }
+    }
     if (err != CL_SUCCESS) {
         size_t log_sz = 0;
         clGetProgramBuildInfo(prog, dev, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_sz);
