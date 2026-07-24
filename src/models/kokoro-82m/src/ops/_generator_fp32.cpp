@@ -1657,6 +1657,32 @@ __kernel void sin_act_f32(__global float* y, int N) {
 }
 )CLC";
 
+// Compile-probe cl_qcom_reqd_sub_group_size. The extension STRING is not
+// trustworthy (Adreno 730 / SM8450 advertises cl_qcom_dot_product8 yet its
+// 3.0 compiler rejects it), so the only reliable signal is: does a kernel
+// using the attribute actually build. Cached after the first call.
+static bool device_has_reqd_subgroup(OpenCLContext& cl_ctx) {
+    static int cached = -1;
+    if (cached != -1) return cached == 1;
+    const char* probe =
+        "#pragma OPENCL EXTENSION cl_qcom_reqd_sub_group_size : enable\n"
+        "__attribute__((qcom_reqd_sub_group_size(\"full\")))\n"
+        "__kernel void p(__global int* o){ *o = (int)get_local_id(0); }";
+    cl_int e = CL_SUCCESS;
+    cl_program pr = clCreateProgramWithSource(cl_ctx.context(), 1, &probe,
+                                              nullptr, &e);
+    bool ok = false;
+    if (pr && e == CL_SUCCESS) {
+        cl_device_id d = cl_ctx.device();
+        ok = (clBuildProgram(pr, 1, &d, "", nullptr, nullptr) == CL_SUCCESS);
+    }
+    if (pr) clReleaseProgram(pr);
+    cached = ok ? 1 : 0;
+    fprintf(stderr, "[engine] cl_qcom_reqd_sub_group_size usable: %s\n",
+            ok ? "yes" : "no (using compiler-default wave)");
+    return ok;
+}
+
 static bool ensure_built_gf(OpenCLContext& cl_ctx) {
     if (g_kf_f16_to_f32) return true;
     cl_int err = CL_SUCCESS;
@@ -1666,10 +1692,24 @@ static bool ensure_built_gf(OpenCLContext& cl_ctx) {
     // gets its own cached binary.
     // Default = FULL wave (swept 2026-06-06: conv 1556→1068 ms with (4,32)+full;
     // half/compiler-default both slower). NNOPT_HT_WAVE=none|half overrides.
-    std::string gf_opts = "-cl-fast-relaxed-math -DHT_WAVE_FULL=1";
+    //
+    // BUT the wave attribute needs cl_qcom_reqd_sub_group_size, which some
+    // Adreno drivers (e.g. 730/SM8450) do NOT support. Hard-coding the flag
+    // there made the fp16 conv FALLBACK unbuildable — so after dot8 also failed,
+    // the model produced no output. Gate the flag on a compile-probe: full-wave
+    // where the driver supports it (620 keeps its −31% win), compiler-default
+    // wave otherwise (still correct, just not wave-pinned).
+    const bool have_reqd = device_has_reqd_subgroup(cl_ctx);
+    std::string gf_opts = "-cl-fast-relaxed-math";
+    if (have_reqd) gf_opts += " -DHT_WAVE_FULL=1";
     if (const char* w = std::getenv("NNOPT_HT_WAVE")) {
         if (w[0] == 'n')      gf_opts = "-cl-fast-relaxed-math";
-        else if (w[0] == 'h') gf_opts = "-cl-fast-relaxed-math -DHT_WAVE_HALF=1";
+        else if (w[0] == 'h') gf_opts = have_reqd
+                                   ? "-cl-fast-relaxed-math -DHT_WAVE_HALF=1"
+                                   : "-cl-fast-relaxed-math";
+        else if (w[0] == 'f') gf_opts = have_reqd
+                                   ? "-cl-fast-relaxed-math -DHT_WAVE_FULL=1"
+                                   : "-cl-fast-relaxed-math";
     }
     g_gf_prog = nnopt_build_program_cached(cl_ctx.context(), dev, k_gf_src,
                                             gf_opts.c_str(), "generator_fp32", &err);
