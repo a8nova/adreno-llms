@@ -64,6 +64,7 @@ Workload: `"Describe this image."` + sample JPEG. TTFT includes image preprocess
 | [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) | fp16 | 256M | SigLIP + LLaMA (GQA) | 82.5 | **10.20** | 14.0 | 1227 | 29% of realistic BW ceiling; REPL with prewarm: 13.3 tok/s |
 | [LFM2.5-VL-450M](src/models/lfm2-5-vl-450m/) | fp16 | 450M | SigLIP-2 (12L bidir) + LFM2 hybrid (conv+attn) | 47.6 | **10.00** | 128.6 | 2197 | Multi-tile (up to 10× 512² + thumb); 1797-token prompt; bidir attn dominates TTFT |
 | [LFM2.5-VL-450M](src/models/lfm2-5-vl-450m/) | **int8** | 450M | SigLIP-2 (12L bidir) + LFM2 hybrid (conv+attn) | 46.4 | 9.7 | 130.4 | **2071** | Per-row symmetric; -50% disk; matches PyTorch fp32 ref byte-for-byte (first 7 tokens) |
+| [Bonsai-27B](src/models/bonsai-27b/) | **Q1_0** | 27B | Qwen3-VL tower + qwen35 hybrid (48 Gated-DeltaNet + 16 attn) | 9.7 | **8.0** | 21.1 | 3959 | Largest model in the repo by 3×; 1.125 bit/weight, never dequantized; 3.6 GB resident so **Adreno 8xx only**. Vision tower cosine 1.000000 vs `transformers`. 128 image tokens, measured on Adreno 840 2026-07-28 |
 
 
 ### Text-to-speech

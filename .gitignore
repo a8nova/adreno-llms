@@ -92,3 +92,7 @@ src/models/v3/
 
 # Local-only build helpers with machine-specific absolute paths — never committed.
 /build_all_for_*.sh
+
+# BrowserStack SDK CLI logs (written into the model dir when running device tests)
+log/
+*.log
