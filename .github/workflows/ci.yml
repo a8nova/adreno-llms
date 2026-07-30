@@ -29,6 +29,7 @@ jobs:
       matrix:
         model:
           - bonsai
+          - bonsai-27b
           - depth-anything-v2-small
           - functiongemma-270m-it
           - granite-4-0-350m
@@ -66,16 +67,27 @@ jobs:
           cd "src/models/${{ matrix.model }}"
           ANDROID_NDK="$ANDROID_NDK_LATEST_HOME" ./scripts/build.sh --release
 
+      # Where the binary lands depends on the dtype the port ships. The Bonsai ports
+      # are 1-bit and ship fp32 (build/<name>_inference); everything else ships fp16
+      # (build/fp16/<name>_inference_fp16). Resolved ONCE here — it used to be an
+      # inline if/else repeated in all four checks below, so adding a port meant
+      # editing the same condition four times and any miss failed as "no binary".
+      - name: Locate the built binary
+        run: |
+          m="${{ matrix.model }}"
+          case "$m" in
+            bonsai|bonsai-27b)
+              bin=$(find "src/models/$m/build" -maxdepth 1 -type f -name '*_inference' | head -1) ;;
+            *)
+              bin=$(find "src/models/$m/build/fp16" -maxdepth 1 -type f -name '*_inference_fp16' | head -1) ;;
+          esac
+          test -n "$bin" || { echo "no binary produced for $m"; exit 1; }
+          echo "BIN=$bin" >> "$GITHUB_ENV"
+
       - name: Verify a binary was produced
         run: |
-          if [ "${{ matrix.model }}" = "bonsai" ]; then
-            bin=$(find "src/models/bonsai/build" -maxdepth 1 -type f -name 'bonsai_inference' | head -1)   # ships fp32 (1-bit weights)
-          else
-            bin=$(find "src/models/${{ matrix.model }}/build/fp16" -maxdepth 1 -type f -name '*_inference_fp16' | head -1)
-          fi
-          test -n "$bin" || { echo "no fp16 binary produced"; exit 1; }
-          file "$bin" | grep -q 'ARM aarch64' || { echo "binary is not arm64"; file "$bin"; exit 1; }
-          echo "OK: $bin"
+          file "$BIN" | grep -q 'ARM aarch64' || { echo "binary is not arm64"; file "$BIN"; exit 1; }
+          echo "OK: $BIN"
 
       # Catches the "runs via adb, CANNOT LINK in-app" class: a binary that needs a
       # shared lib the host app's jniLibs don't ship (libclblast.so / libc++_shared.so)
@@ -84,13 +96,8 @@ jobs:
       # least not pull in libc++_shared.so or surprise deps.
       - name: Check binary is app-linkable
         run: |
-          if [ "${{ matrix.model }}" = "bonsai" ]; then
-            bin=$(find "src/models/bonsai/build" -maxdepth 1 -type f -name 'bonsai_inference' | head -1)   # ships fp32 (1-bit weights)
-          else
-            bin=$(find "src/models/${{ matrix.model }}/build/fp16" -maxdepth 1 -type f -name '*_inference_fp16' | head -1)
-          fi
           strict=""; [ "${{ matrix.model }}" = "openvoice-v2" ] && strict="--strict"
-          ANDROID_NDK="$ANDROID_NDK_LATEST_HOME" bash scripts/ci/check_self_contained.sh "$bin" $strict
+          ANDROID_NDK="$ANDROID_NDK_LATEST_HOME" bash scripts/ci/check_self_contained.sh "$BIN" $strict
 
       # Google Play (Android 15 / API 35+) REJECTS an AAB whose bundled .so isn't 16 KB
       # (0x4000)-page aligned, and it fails to load on 16 KB-page devices. NDK r26d defaults
@@ -99,12 +106,7 @@ jobs:
       # parse; mirrors Edgi's verifyNativeLibAlignment so they can't drift).
       - name: Check binary is 16 KB-page aligned (Google Play)
         run: |
-          if [ "${{ matrix.model }}" = "bonsai" ]; then
-            bin=$(find "src/models/bonsai/build" -maxdepth 1 -type f -name 'bonsai_inference' | head -1)   # ships fp32 (1-bit weights)
-          else
-            bin=$(find "src/models/${{ matrix.model }}/build/fp16" -maxdepth 1 -type f -name '*_inference_fp16' | head -1)
-          fi
-          bash scripts/ci/check_16kb_alignment.sh "$bin"
+          bash scripts/ci/check_16kb_alignment.sh "$BIN"
 
       # CLBlast must be linked DYNAMICALLY (one shared libclblast.so shipped for the
       # whole app), never statically baked into each binary — static duplicates ~3 MB
@@ -112,9 +114,4 @@ jobs:
       # intentional self-contained build and models that use no CLBlast at all).
       - name: Check CLBlast is dynamically linked
         run: |
-          if [ "${{ matrix.model }}" = "bonsai" ]; then
-            bin=$(find "src/models/bonsai/build" -maxdepth 1 -type f -name 'bonsai_inference' | head -1)
-          else
-            bin=$(find "src/models/${{ matrix.model }}/build/fp16" -maxdepth 1 -type f -name '*_inference_fp16' | head -1)
-          fi
-          ANDROID_NDK="$ANDROID_NDK_LATEST_HOME" bash scripts/ci/check_clblast_dynamic.sh "$bin" "${{ matrix.model }}"
+          ANDROID_NDK="$ANDROID_NDK_LATEST_HOME" bash scripts/ci/check_clblast_dynamic.sh "$BIN" "${{ matrix.model }}"

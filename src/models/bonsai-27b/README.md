@@ -9,7 +9,7 @@ Adreno 8xx GPUs, running at **1.125 bit/weight** (Q1_0) with **no dequantization
 - **Vision:** Qwen3-VL tower, 27 blocks, verified cosine **1.000000** against the real
   `transformers` `Qwen3VLVisionModel`
 - **Precision:** Q1_0 weights, fp32 activations, fp32 lm_head store
-- **Measured:** 8.0 tok/s decode, 9.7 tok/s prefill on an Adreno 840 — see [BENCHMARK.md](./BENCHMARK.md)
+- **Measured on an Adreno 840:** **7.5 tok/s** decode, **10 tok/s** prefill — see [BENCHMARK.md](./BENCHMARK.md)
 
 ## Not a fourth Bonsai size — a second architecture
 
@@ -42,8 +42,8 @@ accumulators with no position index. `DeviceModel::reset_state()` exists for exa
 ## Quickstart
 
 ```bash
-# 1. Convert the GGUFs into weights/ (see below) — the repo-level
-#    scripts/fetch_weights.sh does not carry this model yet
+# 1. Fetch the weights (4.4 GB; BONSAI27B_NO_VISION=1 skips the 630 MB tower)
+../../../scripts/fetch_weights.sh bonsai-27b
 
 # 2. Build (fp32 activations is the default; BONSAI_VISION=1 adds the tower)
 BONSAI_VISION=1 ./scripts/build.sh --release

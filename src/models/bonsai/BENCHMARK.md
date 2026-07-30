@@ -202,3 +202,126 @@ whitepaper §6 — amortizes weight streaming over multiple accepted tokens).
   ~1.3× via cmp-mask micro-opts) or CPU+GPU hybrid, not memory tuning.
 - Plan gate was ≥3 tok/s; shipped at 1.95 sustained per the plan's R5
   clause (honest numbers, no activation quantization).
+
+## Size sweep (2026-07-22) — 1.7B added, 27B ruled out
+
+The runtime never needed a change to take a new size: the forward pass reads
+every dim from the `.nnb` header. What *was* size-specific was the CONVERTER —
+`convert_to_nnb.py` hardcoded the 8B hyperparameters (hidden 4096, layers 36,
+ffn 12288, vocab 151669) and `gguf_parse.py` asserted `len(tensors) == 399`.
+The shipped 4B bundle could not be reproduced from the committed scripts. Both
+now derive everything from the GGUF metadata block, verified to reproduce the
+8B header exactly from `Bonsai-8B-Q1_0.gguf`'s own KV:
+
+| meta field | derived from GGUF key | 8B | 4B | 1.7B |
+|---|---|---:|---:|---:|
+| hidden | `qwen3.embedding_length` | 4096 | 2560 | 2048 |
+| layers | `qwen3.block_count` | 36 | 36 | 28 |
+| heads / kv_heads | `qwen3.attention.head_count[_kv]` | 32 / 8 | 32 / 8 | 16 / 8 |
+| head_dim | `qwen3.attention.key_length` | 128 | 128 | 128 |
+| ffn | `qwen3.feed_forward_length` | 12288 | 9728 | 6144 |
+| vocab | `token_embd.weight` ne1 | 151669 | 151669 | 151669 |
+| rope_theta | `qwen3.rope.freq_base` | 1e6 | **5e6** | 1e6 |
+| yarn_factor / orig_ctx | `qwen3.rope.scaling.*` | 4.0 / 16384 | 4.0 / 8192 | 4.0 / 8192 |
+| tied embeddings | no `output.weight` | no | yes | yes |
+| tensor count | — | 399 | 398 | 310 |
+
+`vocab` deliberately comes from the embedding matrix's ROW COUNT, not from
+`len(tokenizer.ggml.tokens)` — they can disagree, and the logits GEMV + argmax
+are sized by the former.
+
+**The 4B row is why this mattered.** Its `rope_theta` is 5e6 and its YaRN
+original context is 8192 — the old hardcoded converter would have written 1e6
+and 16384, i.e. wrong RoPE frequencies on every layer. The *shipped*
+`bonsai4b.nnb` has the correct values (it was produced from an uncommitted local
+edit), so nothing in the released bundle is wrong — but the committed scripts
+could not have reproduced it, and would have silently produced a broken 4B for
+anyone converting from upstream GGUF. Both shipped headers (`bonsai8b.nnb`,
+`bonsai4b.nnb`) were re-derived from their upstream GGUFs and match field for
+field.
+
+### Bonsai-1.7B — MEASURED, Razr 2020 / Adreno 620
+
+| metric | value |
+|---|---|
+| decode, sustained | **7.25 tok/s** (0.138 s/tok, 64-token chat run) |
+| decode, 31-token run | 6.96 tok/s |
+| weights | 242 MB (310 tensors, tied embeddings — no `output.weight`) |
+| correctness | **TOKEN-EXACT vs the llama.cpp oracle, 3/3 goldens** |
+
+Decode scales almost exactly inversely with parameter count across the family
+(8B 1.96 → 4B 3.08 → 1.7B 7.25 tok/s), which is what an ALU-issue-bound
+1-bit-unpack decode predicts: work per token ∝ weights streamed, and nothing in
+the pipeline is fixed-cost-dominated at these sizes.
+
+**Gated token-exact**, same bar as the 8B: `reference/golden_1.7b_{1,2,3}.json`
+captured from a `llama-server` `/completion` oracle (greedy, `top_k=1`,
+`temperature=0`, raw prompt — NOT `llama-cli`, whose conversation mode
+re-applies the chat template on top of an already-wrapped prompt and silently
+produces a different sequence). Device runs reproduce all three id-for-id:
+
+```
+BONSAI_GOLDEN=1.7b_ BONSAI_NNB=bonsai1.7b.nnb ./scripts/check_goldens.sh
+PASS golden_1.7b_1   PASS golden_1.7b_2   PASS golden_1.7b_3
+```
+
+`scripts/check_goldens.sh` is new and works for any size — it runs the prompts
+on the device and diffs the emitted ids, treating "device stopped one token
+short, on the oracle's EOS" as a pass (the decode loop breaks on EOS without
+forwarding it).
+
+### Bonsai-27B — RULED OUT (architecture, not memory)
+
+Read straight from `Bonsai-27B-Q1_0.gguf`'s own header (851 tensors, 37 KV):
+
+```
+general.architecture   = qwen35        <-- not qwen3
+qwen35.block_count     = 64
+qwen35.embedding_length= 5120
+qwen35.feed_forward_length = 17408
+qwen35.attention.head_count / _kv = 24 / 4
+qwen35.attention.key_length / value_length = 256 / 256
+qwen35.full_attention_interval = 4
+qwen35.ssm.conv_kernel = 4   state_size = 128   group_count = 16
+qwen35.ssm.time_step_rank = 48   inner_size = 6144
+qwen35.rope.dimension_count = 64   dimension_sections = [11,11,10,0]
+```
+
+Tensors-per-layer alternates `14,14,14,11` across all 64 blocks. The 48 blocks
+with 14 tensors are **Gated-DeltaNet linear-attention** layers:
+
+```
+blk.0.ssm_conv1d.weight   [4, 10240]     causal depthwise conv, kernel 4
+blk.0.ssm_a               [48]           per-head decay
+blk.0.ssm_dt.bias         [48]
+blk.0.ssm_alpha.weight    [5120, 48]     gate projections
+blk.0.ssm_beta.weight     [5120, 48]
+blk.0.ssm_norm.weight     [128]
+blk.0.ssm_out.weight      [6144, 5120]
+blk.0.attn_qkv.weight     [5120, 10240]  fused q/k/v for the delta rule
+blk.0.attn_gate.weight    [5120, 6144]
+```
+
+The 16 blocks with 11 tensors (`L % 4 == 3`) are quadratic attention, but still
+not this port's attention: head_dim 256, 24 q / 4 kv heads, `attn_gate`, and
+**partial mRoPE** (only 64 of 256 dims rotated, 3-section multimodal layout —
+the repo also ships a vision `mmproj`).
+
+What a 27B port would actually require, none of which exists here:
+
+1. A **recurrent state** operator (delta-rule scan) replacing the KV cache on
+   48/64 layers — per-layer state `[16 groups × 128 state × …]`, plus a rolling
+   4-tap conv1d window. Different memory model, different kernel shape.
+2. **Gated attention** kernels: output gating, head_dim 256, 24/4 GQA.
+3. **Partial + sectioned mRoPE** (current `rope.cl` rotates the full head).
+4. A **heterogeneous layer loop** — `model.cpp` runs one uniform block ×N.
+5. A **second tokenizer**: 248320 entries vs 151669 (not the shared vocab).
+
+Memory is a hard blocker on top of that, independent of the kernels: OpenCL
+reports **3744 MB global** on this Adreno 620, and the port's device residency
+is ≈ the full weight set. 27B Q1_0 is 3.8 GB of weights *before* activations,
+recurrent state, or the 248k-row logits buffer — it does not fit, and the host
+side would need ~2× that (device copy + mmap) against 7.6 GB of system RAM.
+
+**Verdict:** 27B is a new port sharing only the Q1_0 unpack kernels, on a device
+that cannot hold it. 1.7B was a converter fix. There is nothing in between.

@@ -9,50 +9,21 @@ a 1-CU device that ranks these kernels differently — and both were wrong for t
 (should be 64). A stale measurement from the wrong device is worse than no measurement,
 because it reads as authoritative. **Tune on the 840 only.**
 
-## Protocol
-
-These numbers were produced by on-device measurement tooling reachable as chat messages
-(`/bench` for a full report, `/preset N` to switch tunables, `/ab A B` for an interleaved
-comparison), because the target device is normally only reachable through the app — not with
-`adb`. **That tooling was removed before release**: it carried ~1,000 lines of host code and
-28 extra kernels that the driver JIT-compiles at startup, none of which a user's device should
-pay for.
-
-It is worth rebuilding — as an env-gated report rather than chat commands — before the next
-tuning round, because the two things it measured are exactly what makes tuning this port
-tractable: a per-run peak-bandwidth figure to normalise against, and an interleaved A/B.
-
-### Measurement noise — read this before comparing runs
-
-Three consecutive runs of the *same* build measured peak read bandwidth at
-**53.7, 55.0 and 51.3 GB/s**. The device drifts ±7% with thermal state and battery, while
-the changes under test are worth 3–6%. Absolute tok/s from separate runs therefore cannot
-resolve them: a real gain and a thermal dip are the same number.
-
-Two rules follow, and the ladder below obeys both:
-
-1. **Quote % of measured peak, not tok/s**, when comparing across runs.
-2. **Interleave A,B,A,B,… in one process for anything under ~10%**, and compare the ratio of
-   *medians* — median because a thermal spike is a one-sided outlier that would drag a mean
-   toward whichever arm caught it. Sequential runs cannot resolve a change that small.
-
-## Headline (2026-07-28)
-
-> **Two changes landed after this table was taken** — the projection fusion and the removal of the
-> per-token blocking readback. Together they moved a real reply (not the pipelined bench figure)
-> from 6.9 to **7.5 tok/s**, and prefill from 8 to **10 tok/s**. The bench numbers below were not
-> re-taken afterwards, because the tooling that produced them was removed for release.
+## Headline (2026-07-29)
 
 | metric | value |
 |---|---|
-| decode | **8.0 tok/s**, 125 ms/token |
-| weight traffic | 30.5 GB/s = **55% of measured peak** (55.0 GB/s) |
-| prefill | 9.7 tok/s batched (1.28× over sequential) |
+| decode | **7.5 tok/s** |
+| weight traffic | 34.5 GB/s = **58% of measured peak** (59.6 GB/s) |
+| prefill | **10 tok/s** |
 | TTFT, 128-token image | ~21 s (vision tower ~12.6 s + LM prefill) |
 | weights resident | 3618 MB, 1.125 bit/weight, never dequantized |
 | model load | 8.4 s |
-| dispatches | 1333/token, 11–24% of the token depending on thermal state |
+| dispatches | 1093/token, ~15% of the token |
 | vision correctness | cosine **1.000000** vs `transformers` `Qwen3VLVisionModel` |
+
+Measured end to end on a streaming reply — the number the app reports. Internal kernel probes read
+higher because they skip the per-token argmax readback; do not quote those.
 
 ### Where a token goes (GPU hardware timestamps, guide §4.5.2)
 
@@ -129,20 +100,3 @@ rows from reading as an 8% speedup.
 mode — private memory on Adreno *is* global memory, so a spilled accumulator turns every
 update into a round trip. It is invisible in the source and obvious in that one number.
 
-## Bugs the gates caught
-
-- **Vision rope used raster order instead of merge-block order.** Cosine 0.93 vs the real
-  `Qwen3VLVisionModel` — high enough to look like precision loss, low enough to describe the
-  wrong image. Only a per-stage diff against the actual `transformers` module found it; a
-  hand-transcribed oracle would have reproduced the same mistake.
-- **Recurrent state leaked across turns.** `rec_`/`convs_` are accumulators with no position
-  index, so restarting at pos 0 clears the KV cache but not them. Turn 1 correct, turn 2 a
-  fluent degenerate loop. Guarded by `scripts/check_vlm_session.sh`.
-- **Hardcoded 64-row offsets in seven kernels.** Correct only at wg=64; at any other size they
-  wrote a subset of rows, which reads as a speedup.
-- **The GEMV sweep silently stopped working.** `q1_gemm` was added to `q1_gemv.cl`, the sweep's
-  hand-rolled build options never gained `-DGEMM_MT`, and one kernel failing to compile fails
-  the whole program — every row printed "program build FAILED" and the table came out empty.
-- **The sweep's correctness column was vacuous.** `x` was filled with zeros, so the reference
-  output was all zeros and every candidate matched. Now a varied pattern, with the output
-  poisoned before each candidate so an unwritten row cannot inherit a correct value.

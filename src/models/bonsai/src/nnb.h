@@ -25,10 +25,19 @@ struct Tensor {
 };
 
 struct ModelMeta {
+    std::string arch;            // "qwen3" (dense) | "qwen35" (hybrid GDN)
     int hidden, layers, heads, kv_heads, head_dim, ffn, vocab;
     float rms_eps, rope_theta, yarn_factor;
     int yarn_orig_ctx, eos, pad;
     std::string chat_template;
+    // ---- qwen35 (Qwen3.5/3.6 hybrid) only; zero/empty on qwen3 ----
+    // layer_types is one char per block: 'L' = Gated-DeltaNet linear
+    // attention, 'F' = gated full attention. Empty means "uniform dense".
+    std::string layer_types;
+    int full_attn_interval = 0;
+    int rope_dim_count = 0;      // partial RoPE: rotate only the first N dims
+    int ssm_conv_kernel = 0, ssm_state_size = 0, ssm_group_count = 0;
+    int ssm_time_step_rank = 0, ssm_inner_size = 0;
 };
 
 class Nnb {
@@ -49,6 +58,7 @@ class Nnb {
         const uint8_t* blob = base_ + 16 + hlen;
 
         const auto& m = root->at("meta");
+        meta.arch = m.has("arch") ? m.at("arch").s() : "qwen3";
         meta.hidden = (int)m.at("hidden").i();
         meta.layers = (int)m.at("layers").i();
         meta.heads = (int)m.at("heads").i();
@@ -63,6 +73,17 @@ class Nnb {
         meta.eos = (int)m.at("eos").i();
         meta.pad = (int)m.at("pad").i();
         meta.chat_template = m.at("chat_template").s();
+        if (m.has("layer_types")) meta.layer_types = m.at("layer_types").s();
+        auto opt = [&](const char* k, int& dst) {
+            if (m.has(k)) dst = (int)m.at(k).i();
+        };
+        opt("full_attn_interval", meta.full_attn_interval);
+        opt("rope_dim_count", meta.rope_dim_count);
+        opt("ssm_conv_kernel", meta.ssm_conv_kernel);
+        opt("ssm_state_size", meta.ssm_state_size);
+        opt("ssm_group_count", meta.ssm_group_count);
+        opt("ssm_time_step_rank", meta.ssm_time_step_rank);
+        opt("ssm_inner_size", meta.ssm_inner_size);
 
         for (const auto& [name, tv] : root->at("tensors").obj) {
             Tensor t;

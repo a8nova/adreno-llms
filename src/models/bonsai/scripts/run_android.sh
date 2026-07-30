@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run Bonsai-8B inference on the Android device.
+# Run Bonsai inference on the Android device (any size — one dim-generic binary).
 # Convention matches adreno-llms qwen2-5-0-5b/scripts/run_android.sh.
 # Usage: ./scripts/run_android.sh "<prompt>" [max_tokens] [mode]
 #   mode: gen (raw completion, default) | chat (ChatML wrap) | encode
@@ -18,7 +18,8 @@ case "$BONSAI_STORAGE" in
     *) echo "ERROR: BONSAI_STORAGE must be fp32 or fp16 (got '$BONSAI_STORAGE')" >&2; exit 1 ;;
 esac
 BINARY_NAME="bonsai_inference${BIN_SUFFIX}"
-NNB="${BONSAI_NNB:-bonsai8b.nnb}"   # override BONSAI_NNB=bonsai4b.nnb for the 4B bundle
+# Which size to run. Default 8B; override BONSAI_NNB=bonsai4b.nnb / bonsai1.7b.nnb.
+NNB="${BONSAI_NNB:-bonsai8b.nnb}"
 
 if [ $# -lt 1 ]; then
     echo "Usage: $0 \"<prompt>\" [max_tokens] [gen|chat|encode]"
@@ -29,7 +30,7 @@ PROMPT="$1"
 MAX_TOKENS="${2:-64}"
 MODE="${3:-gen}"
 
-echo "Running Bonsai-8B on device ($MODE, $MAX_TOKENS tokens)..." >&2
+echo "Running $NNB on device ($MODE, $MAX_TOKENS tokens)..." >&2
 
 # Escape single quotes for nested adb shell
 ESCAPED_PROMPT=$(printf '%s' "$PROMPT" | sed "s/'/'\\\\''/g")

@@ -197,10 +197,18 @@ static void run_reply(DeviceModel& model, Tokenizer& tok, const Nnb& nnb,
 // Edgi's VLM protocol (ProcessEngine::describeImage), byte for byte:
 //   spawn:  --interactive --temperature 0 --max-tokens N --image-size N
 //   stdin:  optional "/newchat\n"          - start a NEW conversation (drops the KV cache)
+//           optional "/system <nbytes>\n" + raw bytes + "\n"    - system prompt for this conversation
 //           optional "/hist U|A <nbytes>\n" + raw bytes + "\n"  - replay a prior turn into it
+//           optional "/params <maxTokens>\n" - reply cap for the next turn
 //           "/reset\n"                       - clear the pending image (sent every turn)
-//           optional "/image <path>\n"
+//           optional "/image <path>\n"        - a vision turn; omit for a text turn
 //           "<prompt>\n"
+//
+// This is the ONE conversation protocol — text and image turns are the same turn with and without
+// an image, which is why /image is optional rather than a separate mode. It replaces the older
+// `--serve` GEN framing, whose fatal property was that it re-prefilled the ENTIRE transcript on
+// every turn: `reset_state()` then forward from position 0, so a 5th message paid for all four
+// before it. At ~100 ms/token of prefill that is ~80 s of recomputation the KV cache already held.
 //   stdout: reply tokens, streamed
 //   stderr: "✓ turn" ends the turn
 // The prompt arrives collapsed to ONE line, so a single getline per field is correct.
@@ -231,13 +239,15 @@ struct VlmSession {
     int pos = 0;
     int p = 0;
     std::vector<std::array<int, 3>> thw;
+    std::string system;        // conversation-level; emitted once at the head of a fresh context
+    bool system_done = false;
     bool open_reply = false;
     // The stop token was already forwarded by the decode loop's lookahead step, so the next turn
     // must NOT emit <|im_end|> again — the cache would then hold two of them.
     bool eos_forwarded = false;
     std::vector<std::pair<char, std::string>> pending_hist;   // replayed transcript, see /hist
     void clear() { pos = 0; p = 0; thw.clear(); open_reply = false; eos_forwarded = false;
-                   pending_hist.clear(); }
+                   pending_hist.clear(); system_done = false; }
 };
 
 // Run one turn, appending to the session rather than restarting it.
@@ -255,6 +265,11 @@ static void run_turn(DeviceModel& model, Tokenizer& tok, const Nnb& nnb, VlmSess
     std::vector<int> pre, post;
     auto assemble = [&]() {
         std::string head;
+        // The system turn belongs to the CONTEXT, not the turn: it is emitted once when the context
+        // is fresh and then lives in the KV cache like any other prefix. Re-emitting it per turn
+        // would stack copies of it in the transcript.
+        if (!s.system_done && !s.system.empty())
+            head += "<|im_start|>system\n" + s.system + "<|im_end|>\n";
         if (s.open_reply) head += s.eos_forwarded ? "\n" : "<|im_end|>\n";   // close the reply
         for (auto& h : s.pending_hist)
             head += std::string("<|im_start|>") + (h.first == 'U' ? "user" : "assistant") + "\n" +
@@ -280,6 +295,7 @@ static void run_turn(DeviceModel& model, Tokenizer& tok, const Nnb& nnb, VlmSess
         assemble();
     }
     s.pending_hist.clear();
+    s.system_done = !s.system.empty() || s.system_done;
 
     // ── multimodal position ids ────────────────────────────────────────────
     // Text tokens advance t == h == w together. IMAGE tokens share one temporal id and carry their
@@ -403,6 +419,23 @@ static int vlm_main(int argc, char** argv, Tokenizer& tok, const Nnb& nnb,
                 std::cin.get();   // trailing newline
                 sess.pending_hist.push_back({role == 'A' ? 'A' : 'U', txt});
             }
+            continue;
+        }
+        // Length-prefixed, like /hist and for the same reason: a system prompt contains newlines and
+        // a getline protocol would silently truncate it at the first one.
+        if (line.rfind("/system ", 0) == 0) {
+            long n = atol(line.c_str() + 8);
+            if (n >= 0 && n < (1 << 20)) {
+                std::string txt((size_t)n, '\0');
+                if (n) std::cin.read(&txt[0], n);
+                std::cin.get();
+                if (txt != sess.system) { sess.system = txt; sess.system_done = false; }
+            }
+            continue;
+        }
+        if (line.rfind("/params ", 0) == 0) {
+            const int mt = atoi(line.c_str() + 8);
+            if (mt > 0) n_gen = mt;
             continue;
         }
         if (line.rfind("/reset", 0) == 0) { image_path.clear(); continue; }

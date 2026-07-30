@@ -1,7 +1,7 @@
 #!/bin/bash
-# Deploy Bonsai-8B to Android device via ADB.
+# Deploy Bonsai to an Android device via ADB (any size — one dim-generic binary).
 # Convention matches adreno-llms qwen2-5-0-5b/scripts/deploy_android.sh.
-# The 1.15 GB .nnb is pushed ONCE and skipped when the size matches.
+# The .nnb is pushed ONCE and skipped when the size matches.
 
 set -e
 
@@ -20,7 +20,7 @@ BINARY_NAME="bonsai_inference${BIN_SUFFIX}"
 
 # Which size to deploy. Weights live in weights/ (fetched from HF, gitignored);
 # the shared dim-generic runtime reads whichever .nnb is present. Default 8B;
-# override BONSAI_NNB=bonsai4b.nnb for the 4B bundle.
+# override BONSAI_NNB=bonsai4b.nnb / bonsai1.7b.nnb for the smaller bundles.
 NNB="${BONSAI_NNB:-bonsai8b.nnb}"
 
 if ! command -v $ADB &> /dev/null; then
@@ -39,7 +39,8 @@ $ADB push "$BUILD_DIR/$BINARY_NAME" "$REMOTE_DIR/" >/dev/null
 for f in kernels/*.cl; do $ADB push "$f" "$REMOTE_DIR/kernels/" >/dev/null; done
 $ADB push weights/tokenizer.json "$REMOTE_DIR/model/" >/dev/null
 
-# model .nnb: push once; skip when remote size matches (1.15 GB for 8B)
+# model .nnb: push once; skip when remote size matches (1.15 GB 8B / 574 MB 4B /
+# 242 MB 1.7B)
 LOCAL_SIZE=$(stat -f%z weights/$NNB 2>/dev/null || stat -c%s weights/$NNB)
 REMOTE_SIZE=$($ADB shell "stat -c%s $REMOTE_DIR/model/$NNB 2>/dev/null" | tr -d '\r' || true)
 if [ "$LOCAL_SIZE" != "$REMOTE_SIZE" ]; then

@@ -1,14 +1,15 @@
 #!/bin/bash
-# Deploy Bonsai to an Android device via ADB (any size — one dim-generic binary).
-# Convention matches adreno-llms qwen2-5-0-5b/scripts/deploy_android.sh.
-# The .nnb is pushed ONCE and skipped when the size matches.
+# Deploy Bonsai-27B to an Android device via ADB.
+# The .nnb is pushed ONCE and skipped when the size already matches.
 
 set -e
 
 cd "$(dirname "$0")/.."
 
 ADB="${ADB:-adb}"
-REMOTE_DIR="${REMOTE_DIR:-/data/local/tmp/bonsai}"
+# NOT /data/local/tmp/bonsai — that is the 4B/8B port's directory, and sharing it
+# means whichever deployed last wins (different architecture, different binary).
+REMOTE_DIR="${REMOTE_DIR:-/data/local/tmp/bonsai27b}"
 
 BONSAI_STORAGE="${BONSAI_STORAGE:-fp32}"
 case "$BONSAI_STORAGE" in
@@ -18,10 +19,11 @@ case "$BONSAI_STORAGE" in
 esac
 BINARY_NAME="bonsai27b_inference${BIN_SUFFIX}"
 
-# Which size to deploy. Weights live in weights/ (fetched from HF, gitignored);
-# the shared dim-generic runtime reads whichever .nnb is present. Default 8B;
-# override BONSAI_NNB=bonsai4b.nnb / bonsai1.7b.nnb for the smaller bundles.
-NNB="${BONSAI_NNB:-bonsai8b.nnb}"
+# Weights live in weights/ (fetched from HF, gitignored). There is exactly one
+# 27B .nnb — the 4B/8B names this script used to default to belong to the other
+# port and would have deployed nothing this runtime can load.
+NNB="${BONSAI_NNB:-bonsai27b.nnb}"
+VISION_NNB="${BONSAI_VISION_NNB:-bonsai27b-vision.nnb}"
 
 if ! command -v $ADB &> /dev/null; then
     echo "ERROR: adb not found in PATH"
@@ -49,6 +51,28 @@ if [ "$LOCAL_SIZE" != "$REMOTE_SIZE" ]; then
 else
     echo "Model unchanged on device — skipped."
 fi
+# CLBlast — the vision tower's GEMMs are dynamically linked against it, so a
+# vision build that does not find it on the device dies at launch with
+# 'library "libclblast.so" not found'. CMake FetchContent builds it under the
+# model's build dir; a text-only build simply has none to push.
+CLBLAST_LIB=$(find "$BUILD_DIR" -name libclblast.so 2>/dev/null | head -1)
+if [ -n "$CLBLAST_LIB" ]; then
+    $ADB shell "mkdir -p $REMOTE_DIR/lib"
+    $ADB push "$CLBLAST_LIB" "$REMOTE_DIR/lib/libclblast.so" >/dev/null
+    echo "  libclblast.so deployed"
+fi
+
+# Vision tower, when it was built and fetched. Optional: the engine loads it
+# lazily on the first image, so a text-only session never needs it.
+if [ -f "weights/$VISION_NNB" ]; then
+    V_LOCAL=$(stat -f%z "weights/$VISION_NNB" 2>/dev/null || stat -c%s "weights/$VISION_NNB")
+    V_REMOTE=$($ADB shell "stat -c%s $REMOTE_DIR/model/$VISION_NNB 2>/dev/null" | tr -d '\r' || true)
+    if [ "$V_LOCAL" != "$V_REMOTE" ]; then
+        echo "Pushing $VISION_NNB ($((V_LOCAL / 1048576)) MB) ..."
+        $ADB push "weights/$VISION_NNB" "$REMOTE_DIR/model/"
+    fi
+fi
+
 $ADB shell "chmod +x $REMOTE_DIR/$BINARY_NAME"
 
 echo "==================================="

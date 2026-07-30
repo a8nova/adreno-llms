@@ -12,7 +12,7 @@
 #   qwen2-5-0-5b  smollm2-135m-instruct  whisper-tiny  kokoro-82m
 #   musicgen-small  seamless-m4t-unity-small  openvoice-v2  smolvlm-256m-instruct
 #   pocket-tts  moonshine-tiny  depth-anything-v2-small  stable-audio-open-small
-#   functiongemma-270m-it  bonsai (Q1_0 1-bit; fetches 8B + 4B + tokenizer)
+#   functiongemma-270m-it  bonsai (Q1_0 1-bit; fetches 8B + 4B + 1.7B + tokenizer)
 #
 # Per model, this fetches the base set the runtime needs:
 #   weights/model.fp16.bin
@@ -41,7 +41,7 @@ HF_BRANCH="${HF_BRANCH:-main}"
 HF_BASE="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}"
 
 
-MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m smolvlm-256m-instruct mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m pocket-tts musicgen-small seamless-m4t-unity-small openvoice-v2 functiongemma-270m-it moonshine-tiny depth-anything-v2-small stable-audio-open-small bonsai)
+MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m smolvlm-256m-instruct mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m pocket-tts musicgen-small seamless-m4t-unity-small openvoice-v2 functiongemma-270m-it moonshine-tiny depth-anything-v2-small stable-audio-open-small bonsai bonsai-27b)
 BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
 # whisper-tiny + moonshine-tiny (ASR), musicgen-small (text→music),
 # seamless-m4t-unity-small (speech translation) and functiongemma-270m-it
@@ -187,16 +187,40 @@ fetch_one() {
   local weights_dir="${REPO_ROOT}/src/models/${model}/weights"
   mkdir -p "${weights_dir}"
 
-  # Bonsai is Q1_0 (1-bit .nnb, not model.fp16.bin), and its two sizes live under
-  # separate HF subdirs. One dim-generic runtime reads whichever .nnb is in
-  # weights/, so fetch BOTH sizes (8B + 4B) + the shared tokenizer — then
-  # `./scripts/deploy_android.sh` (8B) and `BONSAI_NNB=bonsai4b.nnb ./scripts/deploy_android.sh`
-  # (4B) both work without a re-fetch.
+  # Bonsai-27B: same Q1_0 1-bit format, DIFFERENT architecture (qwen35 hybrid
+  # Gated-DeltaNet), so it has its own runtime and its own fetch. Two towers:
+  # the 3.8 GB text .nnb and a 630 MB vision tower. The tower is skippable —
+  # BONSAI27B_NO_VISION=1 fetches text only, which is 630 MB less to pull for
+  # anyone who only wants chat. It is resident-only and needs an 8xx-class GPU.
+  if [ "${model}" = "bonsai-27b" ]; then
+    echo ">>> bonsai-27b (Q1_0 1-bit, qwen35 hybrid — 3.8 GB text + 0.6 GB vision)"
+    local _b27=("bonsai27b.nnb" "tokenizer.json")
+    [ -z "${BONSAI27B_NO_VISION:-}" ] && _b27+=("bonsai27b-vision.nnb")
+    local f
+    for f in "${_b27[@]}"; do
+      echo "    ${f}"
+      curl --location --continue-at - --fail-with-body --progress-bar \
+           --retry 3 --retry-delay 5 \
+           --output "${weights_dir}/${f}" "${HF_BASE}/bonsai-27b-q1/${f}"
+    done
+    echo "    done — total $(du -sh "${weights_dir}" | awk '{print $1}')"
+    return 0
+  fi
+
+  # Bonsai is Q1_0 (1-bit .nnb, not model.fp16.bin), and each size lives under
+  # its own HF subdir. One dim-generic runtime reads whichever .nnb is in
+  # weights/, so fetch ALL sizes (8B + 4B + 1.7B) + the shared tokenizer (every
+  # Bonsai size uses the same 151669-entry vocab) — then
+  # `./scripts/deploy_android.sh` (8B) and
+  # `BONSAI_NNB=bonsai1.7b.nnb ./scripts/deploy_android.sh` both work without a
+  # re-fetch. Bonsai-27B is NOT here: it is a different architecture (qwen35
+  # hybrid Gated-DeltaNet), not a size this runtime can execute.
   if [ "${model}" = "bonsai" ]; then
-    echo ">>> bonsai (Q1_0 1-bit — fetching 8B + 4B + shared tokenizer)"
+    echo ">>> bonsai (Q1_0 1-bit — fetching 8B + 4B + 1.7B + shared tokenizer)"
     local _bonsai=("bonsai-8b-q1/tokenizer.json:tokenizer.json"
                    "bonsai-8b-q1/bonsai8b.nnb:bonsai8b.nnb"
-                   "bonsai-4b-q1/bonsai4b.nnb:bonsai4b.nnb")
+                   "bonsai-4b-q1/bonsai4b.nnb:bonsai4b.nnb"
+                   "bonsai-1.7b-q1/bonsai1.7b.nnb:bonsai1.7b.nnb")
     local pair
     for pair in "${_bonsai[@]}"; do
       echo "    ${pair##*:}"

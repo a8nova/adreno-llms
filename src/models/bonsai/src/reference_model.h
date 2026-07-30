@@ -106,7 +106,11 @@ class Model {
         }
         rmsnorm(x_, f32("output_norm.weight"), xb_);
         logits_.resize(m_.vocab);
-        gemv("output.weight", xb_, logits_);
+        // Tied embeddings (Bonsai-4B / 1.7B): no output.weight — the logits
+        // head reuses token_embd, same [hidden, vocab] Q1 layout. Mirrors
+        // DeviceModel::upload_weights().
+        gemv(nnb_.has("output.weight") ? "output.weight" : "token_embd.weight",
+             xb_, logits_);
         return logits_;
     }
 
