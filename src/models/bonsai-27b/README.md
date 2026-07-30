@@ -9,7 +9,8 @@ Adreno 8xx GPUs, running at **1.125 bit/weight** (Q1_0) with **no dequantization
 - **Vision:** Qwen3-VL tower, 27 blocks, verified cosine **1.000000** against the real
   `transformers` `Qwen3VLVisionModel`
 - **Precision:** Q1_0 weights, fp32 activations, fp32 lm_head store
-- **Measured on an Adreno 840:** **7.5 tok/s** decode, **10 tok/s** prefill — see [BENCHMARK.md](./BENCHMARK.md)
+- **Measured on a Galaxy Z Fold 8 Ultra** (Adreno 840): **7.5 tok/s** decode, **10 tok/s** prefill —
+  see [BENCHMARK.md](./BENCHMARK.md)
 
 ## Not a fourth Bonsai size — a second architecture
 
@@ -89,8 +90,8 @@ gated, **the text decode path is not.**
 The kernel geometry (`Q1_WG`, `Q1_ROWS`, `GEMM_MT`, `SK_TARGET_GROUPS`, `SK_MAX_SPLITS`) is
 compile-time in `src/model.h`, and every value there was measured on the device it targets.
 
-**Measure on the Adreno 840 only.** This port shipped two constants measured on an Adreno 620 —
-a 1-CU part that ranks these kernels differently — and both were wrong for the target. The
+**Measure on an Adreno 840 (Galaxy Z Fold 8 Ultra).** Two of this port's constants were inherited
+from a 1-CU part that ranks these kernels differently, and both were wrong for the target. The
 on-device measurement tooling that settled them was removed before release; see
 [BENCHMARK.md](./BENCHMARK.md) for what it did and why it is worth rebuilding before the next
 tuning round.

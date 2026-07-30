@@ -1,13 +1,13 @@
-# Benchmark log — Bonsai-27B on Adreno 840 (Q1_0, 1-bit)
+# Benchmark log — Bonsai-27B on Galaxy Z Fold 8 Ultra (Q1_0, 1-bit)
 
-All numbers below are from an **Adreno 840, 12 CU, 5542 MB** (Snapdragon 8-Elite-class).
-Nothing here was measured on another part.
+All numbers below are from a **Samsung Galaxy Z Fold 8 Ultra** — Adreno 840, 12 CU, 5542 MB of
+GPU-visible memory (Snapdragon 8-Elite class). Nothing here was measured on another part.
 
-That constraint is not pedantry. This port shipped two constants tuned on an Adreno 620 —
-a 1-CU device that ranks these kernels differently — and both were wrong for the 840:
-`GEMM_MT=4` (should be 2) and the "x-reuse beats occupancy" verdict behind `Q1_WG=128`
-(should be 64). A stale measurement from the wrong device is worse than no measurement,
-because it reads as authoritative. **Tune on the 840 only.**
+That constraint is not pedantry. Two of this port's tuning constants were inherited from a
+1-CU device that ranks these kernels differently, and both were wrong here: `GEMM_MT=4`
+(should be 2) and the "x-reuse beats occupancy" verdict behind `Q1_WG=128` (should be 64).
+A measurement from the wrong part is worse than no measurement, because it reads as
+authoritative. **Measure on this device.**
 
 ## Headline (2026-07-29)
 
@@ -74,7 +74,7 @@ rows from reading as an 8% speedup.
 | `select()` over branches (§8.5) | ships | branch-free tail handling |
 | `-cl-fast-relaxed-math` | ships | |
 | fp32 lm_head store | correctness | fp16 logits at ‖·‖≥200 collide on argmax; first few tokens match the reference then diverge |
-| **`Q1_WG` 128 → 64** | **1.16×** (0.37 → 0.32 ms) | ~1.10× e2e; this shape is 64% of weight traffic. Inverted the Adreno-620 verdict, as predicted |
+| **`Q1_WG` 128 → 64** | **1.16×** (0.37 → 0.32 ms) | ~1.10× e2e; this shape is 64% of weight traffic. Inverts the inherited "x-reuse beats occupancy" verdict — this part is short of parallelism, not of per-group work |
 | **`GEMM_MT` 4 → 2** | **1.21×** (12.82 → 10.56 ms) | batched prefill 1.03× → **1.28×**; ~5 s off TTFT |
 | `SK_MAX_SPLITS` 8 → 32 | +1% of peak | 8 was a ceiling the probe never got past, not an optimum |
 | `SK_TARGET_GROUPS` 160 → 320 | +1.6% | interleaved A/B; 96 measured worse (129.2 ms), so 320 is a peak not a slope |
