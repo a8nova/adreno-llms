@@ -52,6 +52,19 @@ else()
     message(STATUS "BONSAI storage fp32 (default)")
 endif()
 
+# ──────────────────────────────────────────────────────────────────────
+# BONSAI_HOST_ONLY: build the CPU reference forward with NO OpenCL at all.
+# This is the development loop for a NEW ARCHITECTURE: reference_model.h is
+# self-contained (mmap'd .nnb + q1_row_decode + fp32 gemv), so the math can be
+# iterated on the dev machine in seconds and diffed against the llama.cpp
+# oracle, before a single kernel is written. Device correctness is then a
+# translation problem with a known-good target rather than a search.
+#   ./scripts/build_host.sh   ->  build/host/bonsai_ref
+# ──────────────────────────────────────────────────────────────────────
+if(BONSAI_HOST_ONLY)
+    message(STATUS "BONSAI_HOST_ONLY=1 — CPU reference only, no OpenCL")
+else()
+
 # OpenCL headers/library supplied by the porting orchestrator / build.sh via -D.
 if(DEFINED OPENCL_INCLUDE_DIR)
     message(STATUS "Using OpenCL headers from: ${OPENCL_INCLUDE_DIR}")
@@ -77,6 +90,8 @@ endif()
 # Bonsai is BONSAI_OPENCL-only (the device model). CL 1.2 target.
 add_compile_definitions(BONSAI_OPENCL=1 CL_TARGET_OPENCL_VERSION=120)
 
+endif()
+
 # Layer sources (out-of-line DeviceModel method bodies).
 set(LAYER_SOURCES
     src/layers/attention.cpp
@@ -86,14 +101,21 @@ set(LAYER_SOURCES
 )
 
 # Source files (test_q1.cpp is a standalone unit test — NOT in the build).
-set(SOURCES
-    src/main.cpp
-    src/model.cpp
-    src/tokenizer.cpp
-    src/opencl_context.cpp
-    src/prof.cpp
-    ${LAYER_SOURCES}
-)
+if(BONSAI_HOST_ONLY)
+    # No model.cpp / opencl_context.cpp / layers — those ARE the device model.
+    # prof.cpp is excluded too: it profiles CL events (includes <CL/cl.h>) and
+    # main.cpp never references it.
+    set(SOURCES src/main.cpp src/tokenizer.cpp)
+else()
+    set(SOURCES
+        src/main.cpp
+        src/model.cpp
+        src/tokenizer.cpp
+        src/opencl_context.cpp
+        src/prof.cpp
+        ${LAYER_SOURCES}
+    )
+endif()
 
 add_executable(bonsai_inference ${SOURCES})
 target_include_directories(bonsai_inference PRIVATE src/ src/layers/)
@@ -101,8 +123,12 @@ set_target_properties(bonsai_inference PROPERTIES
     OUTPUT_NAME "bonsai_inference${BONSAI_BIN_SUFFIX}"
 )
 
-# Link OpenCL (+ liblog on Android).
-target_link_libraries(bonsai_inference ${OPENCL_LIBRARIES})
+# Link OpenCL (+ liblog on Android). Host-only build links nothing extra.
+if(BONSAI_HOST_ONLY)
+    set_target_properties(bonsai_inference PROPERTIES OUTPUT_NAME "bonsai_ref")
+else()
+    target_link_libraries(bonsai_inference ${OPENCL_LIBRARIES})
+endif()
 
 if(ANDROID)
     target_link_libraries(bonsai_inference log)

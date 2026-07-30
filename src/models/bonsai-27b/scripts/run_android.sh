@@ -17,7 +17,7 @@ case "$BONSAI_STORAGE" in
     fp16) BIN_SUFFIX="_f16" ;;
     *) echo "ERROR: BONSAI_STORAGE must be fp32 or fp16 (got '$BONSAI_STORAGE')" >&2; exit 1 ;;
 esac
-BINARY_NAME="bonsai_inference${BIN_SUFFIX}"
+BINARY_NAME="bonsai27b_inference${BIN_SUFFIX}"
 # Which size to run. Default 8B; override BONSAI_NNB=bonsai4b.nnb / bonsai1.7b.nnb.
 NNB="${BONSAI_NNB:-bonsai8b.nnb}"
 

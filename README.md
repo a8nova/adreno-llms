@@ -54,6 +54,7 @@ Decode tok/s = warm 3-run median, greedy (`--temperature 0`), 32-token generatio
 | [Qwen2.5-0.5B-Instruct](src/models/qwen2-5-0-5b/) | fp16 | 500M | LLaMA + GQA | 10.36 | 3.66 | 2720 | Largest fp16 model; 70% of 14 GB/s ceiling |
 | [Bonsai-8B](src/models/bonsai/) | **Q1_0** | 8B | Qwen3 + GQA (1-bit) | **1.96** | 7.15 | 2946 | Largest model in the repo; 1.125 bit/weight, never dequantized; token-exact vs llama.cpp; decode is ALU-issue-bound on the 1-bit unpack. 64-tok, measured 2026-07-18 |
 | [Bonsai-4B](src/models/bonsai/) | **Q1_0** | 4B | Qwen3 + GQA (1-bit) | **3.08** | 4.10 | 1828 | Same dim-generic runtime as 8B (one `libbonsai.so`); ~1.7× faster (half the params). 64-tok, measured 2026-07-18 |
+| [Bonsai-1.7B](src/models/bonsai/) | **Q1_0** | 1.7B | Qwen3 + GQA (1-bit) | **7.31** | 1.46 | 1062 | Smallest Bonsai; same `libbonsai.so`. Peak is 4.4× its 242 MB of weights — the KV cache is a near-fixed cost, so it dominates at this size. 64-tok, measured 2026-07-30 |
 
 ### Vision-language
 
@@ -64,6 +65,7 @@ Workload: `"Describe this image."` + sample JPEG. TTFT includes image preprocess
 | [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) | fp16 | 256M | SigLIP + LLaMA (GQA) | 82.5 | **10.20** | 14.0 | 1227 | 29% of realistic BW ceiling; REPL with prewarm: 13.3 tok/s |
 | [LFM2.5-VL-450M](src/models/lfm2-5-vl-450m/) | fp16 | 450M | SigLIP-2 (12L bidir) + LFM2 hybrid (conv+attn) | 47.6 | **10.00** | 128.6 | 2197 | Multi-tile (up to 10× 512² + thumb); 1797-token prompt; bidir attn dominates TTFT |
 | [LFM2.5-VL-450M](src/models/lfm2-5-vl-450m/) | **int8** | 450M | SigLIP-2 (12L bidir) + LFM2 hybrid (conv+attn) | 46.4 | 9.7 | 130.4 | **2071** | Per-row symmetric; -50% disk; matches PyTorch fp32 ref byte-for-byte (first 7 tokens) |
+| [Bonsai-27B](src/models/bonsai-27b/) | **Q1_0** | 27B | Qwen3-VL tower + qwen35 hybrid (48 Gated-DeltaNet + 16 attn) | 9.7 | **8.0** | 21.1 | 3959 | Largest model in the repo by 3×; 1.125 bit/weight, never dequantized; 3.6 GB resident so **Adreno 8xx only**. Vision tower cosine 1.000000 vs `transformers`. 128 image tokens, measured on Adreno 840 2026-07-28 |
 
 
 ### Text-to-speech

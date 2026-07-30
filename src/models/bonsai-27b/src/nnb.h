@@ -17,7 +17,12 @@
 #include "json_mini.h"
 
 struct Tensor {
-    enum Kind { Q1, F32 } kind;
+    // Q1  — GGUF-native 18-byte units (fp16 scale + 128 sign bits), interleaved.
+    // Q1T — the SAME bytes pre-repacked at conversion time into two contiguous
+    //       K-major streams: bits[u*N+row] (16B) then scales[u*N+row] (2B).
+    //       This is the layout the GEMV kernel wants, so a streaming runtime can
+    //       memcpy a block straight from the mmap with no CPU transform.
+    enum Kind { Q1, F32, Q1T } kind;
     std::vector<int64_t> dims;   // [ne0(=input, contiguous), ne1(=output)]
     const uint8_t* data = nullptr;
     size_t nbytes = 0;
@@ -30,6 +35,8 @@ struct ModelMeta {
     float rms_eps, rope_theta, yarn_factor;
     int yarn_orig_ctx, eos, pad;
     std::string chat_template;
+    // "device" when Q1 weights are pre-repacked (kind q1t); "gguf" otherwise.
+    std::string weight_layout;
     // ---- qwen35 (Qwen3.5/3.6 hybrid) only; zero/empty on qwen3 ----
     // layer_types is one char per block: 'L' = Gated-DeltaNet linear
     // attention, 'F' = gated full attention. Empty means "uniform dense".
@@ -73,6 +80,7 @@ class Nnb {
         meta.eos = (int)m.at("eos").i();
         meta.pad = (int)m.at("pad").i();
         meta.chat_template = m.at("chat_template").s();
+        meta.weight_layout = m.has("weight_layout") ? m.at("weight_layout").s() : "gguf";
         if (m.has("layer_types")) meta.layer_types = m.at("layer_types").s();
         auto opt = [&](const char* k, int& dst) {
             if (m.has(k)) dst = (int)m.at(k).i();
@@ -87,7 +95,8 @@ class Nnb {
 
         for (const auto& [name, tv] : root->at("tensors").obj) {
             Tensor t;
-            t.kind = tv->at("kind").s() == "q1" ? Tensor::Q1 : Tensor::F32;
+            const std::string k = tv->at("kind").s();
+            t.kind = k == "q1" ? Tensor::Q1 : (k == "q1t" ? Tensor::Q1T : Tensor::F32);
             for (const auto& d : tv->at("dims").arr) t.dims.push_back(d->i());
             t.data = blob + (size_t)tv->at("offset").i();
             t.nbytes = (size_t)tv->at("nbytes").i();
@@ -105,6 +114,30 @@ class Nnb {
         return it->second;
     }
     bool has(const std::string& name) const { return tensors_.count(name) != 0; }
+    const std::unordered_map<std::string, Tensor>& tensors() const { return tensors_; }
+
+    /**
+     * Drop the page cache backing [p, p+n) now that it has been copied to the device.
+     *
+     * On an Adreno the GPU shares system RAM, so a `CL_MEM_COPY_HOST_PTR` upload makes the SAME bytes
+     * resident TWICE: once as faulted-in pages of this mmap, once as the driver's device buffer. For a
+     * 3.6 GB model that is ~7.2 GB of RSS for 3.6 GB of weights, and the process gets OOM-killed near
+     * the end of the upload — silently, so it surfaces as "the model produced no output".
+     *
+     * Safe because this runtime is RESIDENT-ONLY: once a tensor is on the GPU its mmap pages are never
+     * read again. MADV_DONTNEED on a read-only MAP_PRIVATE file mapping just discards clean pages; if
+     * anything did touch them they would fault back in from the file, correct but slow.
+     *
+     * Page-aligned INWARD (start rounds up, end rounds down) so we never discard a page that also
+     * holds a neighbouring tensor we haven't uploaded yet.
+     */
+    void release(const void* p, size_t n) const {
+        if (!p || !n) return;
+        const uintptr_t pg = (uintptr_t)sysconf(_SC_PAGESIZE);
+        const uintptr_t start = ((uintptr_t)p + pg - 1) & ~(pg - 1);
+        const uintptr_t end = ((uintptr_t)p + n) & ~(pg - 1);
+        if (end > start) madvise((void*)start, (size_t)(end - start), MADV_DONTNEED);
+    }
 
     ModelMeta meta;
 

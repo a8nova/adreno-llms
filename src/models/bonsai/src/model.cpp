@@ -3,8 +3,36 @@
 // kernel dispatch helpers live in layers/{attention,mlp,embedding,layer_norm}.cpp.
 #include "model.h"
 
+// Architectures this runtime has kernels for. The forward pass below is a
+// uniform dense decoder: fused QKV, QK-norm, GQA over a per-token KV cache,
+// full RoPE, SwiGLU MLP. A hybrid stack ("qwen35" — 3 Gated-DeltaNet linear
+// blocks per gated-attention block, partial mRoPE, recurrent state instead of
+// a KV cache) shares only the Q1 GEMV kernels. Converting such a model is
+// allowed (see scripts/convert_to_nnb.py) so its layout can be developed
+// against, but executing it here would silently produce garbage — so refuse.
+static bool arch_has_kernels(const std::string& arch) {
+    return arch.empty() || arch == "qwen3";
+}
+
 DeviceModel::DeviceModel(const Nnb& nnb, OpenCLContext& ocl, const std::string& kdir)
     : nnb_(nnb), m_(nnb.meta), ocl_(ocl) {
+    if (!arch_has_kernels(m_.arch)) {
+        fprintf(stderr,
+                "FATAL: no device kernels for architecture '%s'.\n"
+                "  This runtime implements a uniform dense decoder (qwen3).\n",
+                m_.arch.c_str());
+        if (!m_.layer_types.empty()) {
+            const size_t nl = std::count(m_.layer_types.begin(),
+                                         m_.layer_types.end(), 'L');
+            fprintf(stderr,
+                    "  This model is hybrid: %zu of %d blocks are Gated-DeltaNet\n"
+                    "  linear attention, which needs a recurrent-state operator\n"
+                    "  (conv1d window + delta-rule scan), gated attention, and a\n"
+                    "  per-layer-kind forward loop. None of those exist yet.\n",
+                    nl, m_.layers);
+        }
+        exit(5);
+    }
     build_programs(kdir);
     upload_weights();
     make_scratch();

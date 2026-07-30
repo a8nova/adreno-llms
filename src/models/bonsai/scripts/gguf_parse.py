@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""GGUF v3 parser for the Bonsai-8B Q1_0 port (P0.2).
+"""GGUF v3 parser for the Bonsai Q1_0 port (P0.2). Size-agnostic.
 
 Pure stdlib. Emits:
   model/manifest.json   — header, all KV metadata (scalars), tensor table with
                           {name, dims, type, offset, nbytes, bits_per_elem}
   model/tokenizer.json  — full tokenizer arrays (tokens, token_type, merges)
                           + chat template
-Asserts the plan's §1.2 ground truth: 399 tensors, types ⊆ {0, 41},
-type-41 bits/elem == 1.125 on every tensor.
+Asserts the Q1_0 ground truth that holds for EVERY Bonsai size: types ⊆
+{0 (f32 norms), 41 (Q1_0)} and type-41 bits/elem == 1.125. The tensor count
+is reported, never asserted — it is a function of block_count (1.7B: 283,
+4B/8B: 399, 27B: 851).
 """
 import json
 import struct
@@ -77,12 +79,14 @@ def main(path):
         t['numel'] = numel
         t['bits_per_elem'] = round(t['nbytes'] * 8 / numel, 6)
 
-    # ---- assertions from the plan §1.2 ----
+    # ---- assertions from the plan §1.2 (size-agnostic) ----
     types = sorted({t['type'] for t in tensors})
     n41 = sum(1 for t in tensors if t['type'] == 41)
     n0 = sum(1 for t in tensors if t['type'] == 0)
-    print(f'tensors={len(tensors)}  types={types}  type41={n41}  f32={n0}')
-    assert len(tensors) == 399, len(tensors)
+    arch = kv.get('general.architecture', '?')
+    blocks = kv.get(f'{arch}.block_count', '?')
+    print(f'arch={arch}  blocks={blocks}  tensors={len(tensors)}  '
+          f'types={types}  type41={n41}  f32={n0}')
     assert set(types) <= {0, 41}, types
     bad = [t for t in tensors if t['type'] == 41
            and abs(t['bits_per_elem'] - 1.125) > 1e-9]
@@ -104,10 +108,13 @@ def main(path):
     }
     (out_dir / 'manifest.json').write_text(json.dumps(manifest, indent=1))
     print(f'data_start={data_start}  wrote manifest.json + tokenizer.json')
-    # headline metadata for the port
-    for k in ('general.file_type', 'qwen3.rope.scaling.factor',
-              'qwen3.rope.scaling.original_context_length',
-              'qwen3.rope.freq_base', 'qwen3.context_length',
+    # headline metadata for the port (arch prefix varies: qwen3 / qwen35 / ...)
+    for k in ('general.file_type', f'{arch}.embedding_length',
+              f'{arch}.attention.head_count', f'{arch}.attention.head_count_kv',
+              f'{arch}.attention.key_length', f'{arch}.feed_forward_length',
+              f'{arch}.rope.scaling.factor',
+              f'{arch}.rope.scaling.original_context_length',
+              f'{arch}.rope.freq_base', f'{arch}.context_length',
               'tokenizer.ggml.eos_token_id'):
         v = kv.get(k, tok.get(k, '<missing>'))
         print(f'  {k} = {v}')
