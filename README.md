@@ -54,6 +54,7 @@ Decode tok/s = warm 3-run median, greedy (`--temperature 0`), 32-token generatio
 | [Qwen2.5-0.5B-Instruct](src/models/qwen2-5-0-5b/) | fp16 | 500M | LLaMA + GQA | 10.36 | 3.66 | 2720 | Largest fp16 model; 70% of 14 GB/s ceiling |
 | [Bonsai-8B](src/models/bonsai/) | **Q1_0** | 8B | Qwen3 + GQA (1-bit) | **1.96** | 7.15 | 2946 | Largest model in the repo; 1.125 bit/weight, never dequantized; token-exact vs llama.cpp; decode is ALU-issue-bound on the 1-bit unpack. 64-tok, measured 2026-07-18 |
 | [Bonsai-4B](src/models/bonsai/) | **Q1_0** | 4B | Qwen3 + GQA (1-bit) | **3.08** | 4.10 | 1828 | Same dim-generic runtime as 8B (one `libbonsai.so`); ~1.7× faster (half the params). 64-tok, measured 2026-07-18 |
+| [Bonsai-1.7B](src/models/bonsai/) | **Q1_0** | 1.7B | Qwen3 + GQA (1-bit) | **7.31** | 1.46 | 1062 | Smallest Bonsai; same `libbonsai.so`. Peak is 4.4× its 242 MB of weights — the KV cache is a near-fixed cost, so it dominates at this size. 64-tok, measured 2026-07-30 |
 
 ### Vision-language
 

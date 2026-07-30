@@ -258,7 +258,8 @@ struct VlmSession {
 // advancing continuously across all three and across every previous turn.
 static void run_turn(DeviceModel& model, Tokenizer& tok, const Nnb& nnb, VlmSession& s,
                      const std::string& user, const std::vector<float>& emb,
-                     int n_img, int hidden, int n_gen, int grid_h, int grid_w) {
+                     int n_img, int hidden, int n_gen, int grid_h, int grid_w,
+                     int answer_reserve = 0) {
     using clk = std::chrono::steady_clock;
     const std::string think = getenv("BONSAI_THINK") ? "<think>\n" : "<think>\n\n</think>\n\n";
 
@@ -343,11 +344,47 @@ static void run_turn(DeviceModel& model, Tokenizer& tok, const Nnb& nnb, VlmSess
     // buffer argmax wrote, so step i+1 can be enqueued before step i's token has been looked at.
     // The readback then waits on work that is already finished instead of draining the pipeline,
     // which is the whole difference between the bench number and what a reply actually gets.
+    // Echo the opening tag the TEMPLATE already put in the prompt.
+    //
+    // In reasoning mode the prompt ends with "<think>\n", so the model resumes INSIDE the block and
+    // its output carries only the reasoning plus a closing "</think>". A reader of the stream then
+    // sees a close with no open and cannot tell reasoning from answer — which is exactly how the
+    // 27B's reasoning ended up rendered as its reply while the 4B/8B (whose template appends
+    // nothing, so the model emits its own "<think>") displayed correctly. Emitting it here makes the
+    // stream self-describing and identical in shape for every Bonsai.
+    if (getenv("BONSAI_THINK")) { fputs("<think>\n", stdout); fflush(stdout); }
+
+    // Reserve the tail of the budget for the ANSWER.
+    //
+    // Reasoning and answer spend from one budget, so a model that reasons past the whole cap returns
+    // nothing at all — Bonsai-4B did exactly that for 768 tokens and 9 minutes. When the reasoning
+    // has spent everything but the reserve, close the block FOR it: forward "</think>" through the
+    // model so the KV cache and the recurrent state both see the boundary, and the model carries on
+    // in answering mode. Cutting the text without forwarding the tokens would leave the model still
+    // inside the block and produce more reasoning.
+    const bool thinking = getenv("BONSAI_THINK") != nullptr;
+    const std::vector<int> close_ids = thinking ? tok.encode("</think>\n\n") : std::vector<int>{};
+    const int reserve = (thinking && answer_reserve > 0 && answer_reserve < n_gen) ? answer_reserve : 0;
+    bool think_closed = !thinking;
+
     int cur = post.back(), produced = 0, steps = 0;
     model.seed_token(cur);
     int slot = -1;
     bool eos_fwd = false;
     for (int i = 0; i < n_gen && s.pos < DeviceModel::CTX_CAP; ++i) {
+        if (!think_closed && reserve > 0 && produced >= n_gen - reserve && !close_ids.empty()) {
+            // Drain the in-flight step first: the pipelined loop has a token queued that would
+            // otherwise land after the close and read as reasoning again.
+            if (slot >= 0) { cur = model.read_token_slot(slot); slot = -1; }
+            for (int id : close_ids) {
+                if (s.pos >= DeviceModel::CTX_CAP) break;
+                model.forward(id, s.pos++, false);
+                ++steps;
+            }
+            model.seed_token(close_ids.back());
+            fputs("</think>\n\n", stdout); fflush(stdout);
+            think_closed = true;
+        }
         if (slot < 0) { slot = model.forward_dev(s.pos++, true); ++steps; }
         // Enqueue the NEXT step first — it needs no host input — so the GPU stays fed across the
         // read below. Not on the last iteration: that one would consume a position and advance the
@@ -389,6 +426,8 @@ static void run_turn(DeviceModel& model, Tokenizer& tok, const Nnb& nnb, VlmSess
 static int vlm_main(int argc, char** argv, Tokenizer& tok, const Nnb& nnb,
                     OpenCLContext& ocl, DeviceModel& model, const std::string& kdir) {
     int n_gen = 256;
+    // Tokens held back for the answer when a reasoning model is running; 0 disables the guard.
+    int answer_reserve = 0;
     for (int i = 1; i < argc; ++i)
         if (!strcmp(argv[i], "--max-tokens") && i + 1 < argc) n_gen = atoi(argv[++i]);
 
@@ -433,9 +472,13 @@ static int vlm_main(int argc, char** argv, Tokenizer& tok, const Nnb& nnb,
             }
             continue;
         }
+        // "/params <maxTokens> [answerReserve]" — reply cap, and how much of it is held back for
+        // the ANSWER. See the reserve logic in run_turn: without it a reasoning model can spend the
+        // entire budget thinking and return nothing, which is what Bonsai-4B did for 768 tokens.
         if (line.rfind("/params ", 0) == 0) {
-            const int mt = atoi(line.c_str() + 8);
-            if (mt > 0) n_gen = mt;
+            int mt = 0, rsv = -1;
+            if (sscanf(line.c_str() + 8, "%d %d", &mt, &rsv) >= 1 && mt > 0) n_gen = mt;
+            if (rsv >= 0) answer_reserve = rsv;
             continue;
         }
         if (line.rfind("/reset", 0) == 0) { image_path.clear(); continue; }
@@ -523,7 +566,7 @@ static int vlm_main(int argc, char** argv, Tokenizer& tok, const Nnb& nnb,
         }
 
         run_turn(model, tok, nnb, sess, prompt, vis_emb, vis_emb.empty() ? 0 : gh * gw,
-                 nnb.meta.hidden, n_gen, gh, gw);
+                 nnb.meta.hidden, n_gen, gh, gw, answer_reserve);
         // The image belongs to the turn that carried it, not to the session: it is already in the KV
         // cache, so keeping it pending would re-encode the tower AND duplicate it in context on the
         // next question. Follow-ups see it through the cache.
