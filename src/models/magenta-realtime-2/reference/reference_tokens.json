@@ -1,0 +1,12 @@
+{
+  "produced_by": "_run_reference.py",
+  "script_version": "2026-06-16-auto-dep-install-retry-v6",
+  "framework": "mlx",
+  "mlx_version": "unknown",
+  "python_version": "3.11.14",
+  "model_id": "google/magenta-realtime-2",
+  "prompt": "disco funk",
+  "max_new_tokens": 7,
+  "instrumentation_kind": "class-call-wrap",
+  "reference_text": ""
+}
