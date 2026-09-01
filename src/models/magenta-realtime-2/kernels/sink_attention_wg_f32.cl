@@ -5,8 +5,12 @@
 // (80-NB295-11 §3.2.5), so twelve items is twelve lanes of a single CU with the other eleven idle.
 // This is the temporal cross-attention, 12 calls per frame.
 //
-// The query attends to exactly two things — the learned sink and the current key — so the work is
-// two dot products over D plus a D-wide output blend. Each is spread across the workgroup here.
+// The query attends to the learned sink and to the conditioning source. Upstream's cross-attention
+// holds a 41-frame ring of source vectors plus the current one (42 keys); within a chunk the
+// conditioning is constant, so all 42 keys are BIT-IDENTICAL (measured: logit spread exactly 0).
+// Attending over N identical keys is algebraically the same as attending over one whose logit is
+// raised by ln(N), so `log_n` carries the whole ring at zero cost. log_n=0 ⇒ kv = [sink, source],
+// which is the self-attention case and the port's pre-2026-09 behaviour.
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 #define WG 64
 
@@ -19,7 +23,8 @@ void sink_attention_wg_f32(
     __global float*       out,          // [H*D]
     const int H,
     const int D,
-    const float inv_sqrt_d) {
+    const float inv_sqrt_d,
+    const float log_n) {       // ln(number of identical source keys); 0 for a single key
   const int h   = get_group_id(0);
   const int lid = get_local_id(0);
   if (h >= H) return;
@@ -47,7 +52,7 @@ void sink_attention_wg_f32(
     barrier(CLK_LOCAL_MEM_FENCE);
   }
   if (lid == 0) {
-    const float a = rs[0], b = rc[0];
+    const float a = rs[0], b = rc[0] + log_n;
     const float mx = a > b ? a : b;
     const float e0 = exp(a - mx), e1 = exp(b - mx);
     const float z = e0 + e1;

@@ -9,6 +9,10 @@
 //   softmax([s_sink, s_cur]) → (w0, w1)
 //   out[h,d] = w0*sink_v[h,d] + w1*v[h,d]
 //
+// log_n raises the source logit by ln(N) to stand in for N identical source keys — the
+// cross-attention path's 42-deep conditioning ring (see sink_attention_wg_f32.cl). Self-attention
+// passes 0.0, which leaves the math exactly as it was.
+//
 // qkv layout: [q(H*D) | k(H*D) | v(H*D)] fp32 (output of qkv_proj linear).
 // sink_k/sink_v/per_dim_scale fp16 (vload_half). out [H*D] fp32. One work-item per head.
 
@@ -22,7 +26,8 @@ __kernel void sink_attention_f32(
     __global float*       out,          // [H*D]
     const int H,
     const int D,
-    const float inv_sqrt_d) {
+    const float inv_sqrt_d,
+    const float log_n) {
   const int h = get_global_id(0);
   if (h >= H) return;
   const int HD = H * D;
@@ -40,6 +45,7 @@ __kernel void sink_attention_f32(
     s_sink += qd * vload_half(qb + d, sink_k);
     s_cur  += (qd * sv) * qkv[kb + d];
   }
+  s_cur += log_n;
   const float mx = s_sink > s_cur ? s_sink : s_cur;
   const float e0 = exp(s_sink - mx), e1 = exp(s_cur - mx);
   const float z = e0 + e1;

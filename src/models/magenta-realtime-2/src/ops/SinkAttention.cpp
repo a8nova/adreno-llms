@@ -95,6 +95,10 @@ cl_mem SinkAttention_forward(
     clSetKernelArg(ski, 5, sizeof(int), &H);
     clSetKernelArg(ski, 6, sizeof(int), &D);
     clSetKernelArg(ski, 7, sizeof(float), &inv_sqrt_d);
+    // Self-attention has exactly one non-sink key, so no ring to stand in for. The argument exists
+    // because the kernel is shared with the cross-attention path, which does have one.
+    const float sink_log_n = 0.0f;
+    clSetKernelArg(ski, 8, sizeof(float), &sink_log_n);
     size_t sg = (size_t)H;
     // profEnqueue, and the per-site INSTANCE: a raw clEnqueueNDRangeKernel on the shared `sk` both
     // skipped the profiler and re-armed a kernel object a recording may already reference.

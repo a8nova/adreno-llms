@@ -3,7 +3,30 @@
 //
 // Q from the (normed) decoder hidden state; K/V from an external source (the encoder
 // conditioning, dim 256). Same learnable sink (sink_key/value_embeddings) + per_dim_scale
-// as SinkAttention. Single source position (captured source = [1,1,256]) ⇒ kv = [sink, source].
+// as SinkAttention.
+//
+// ── conditioning ring depth (kMaxSrc) ──────────────────────────────────────────────────────────
+// Upstream is use_streaming_cross_attention=True with max_past_horizon=41 for mrt2_small
+// (magenta_rt/mlx/model.py:415,495): it re-runs the conditioning encoder EVERY frame
+// (mlx/depthformer.py:1085-1088) and keeps a 41-frame KV ring, so a step attends over
+// [sink, source x min(pos+1, 42)]. This port encodes the block once per chunk, so it had
+// kv = [sink, source] — one key against upstream's 42.
+//
+// That is not a small difference. The sink is the learned "attend to nothing" escape hatch, and
+// shrinking the denominator from 42 sources to 1 hands it far more of the softmax mass. Measured
+// against the real mrt2_small weights (2026-09-01, two prompts, 1464 cross-attn calls): sink mass
+// 0.57-0.64 upstream vs 0.88 here, i.e. this port was delivering 29-34% of the reference's
+// conditioning, with 0.67-0.75 mean relative L2 error on the context vector in all 12 layers.
+// Layers 2,3,5,7,8,9,11 sat at 0.93-0.99 sink — effectively no conditioning at all.
+//
+// The fix is exact rather than an approximation: within a chunk the conditioning is constant, so
+// all 42 source keys are bit-identical (measured logit spread exactly 0.0), and attending over N
+// identical keys equals attending over one whose logit is raised by ln(N). So the ring costs one
+// scalar. Verified against upstream to 2e-06 (float32 noise).
+//
+// `start_pos` carries the absolute frame index (0-based, persistent across serve-mode chunks,
+// reset only with the session) — it was previously unused on this path. NNOPT_XATTNDEPTH overrides
+// the depth for A/B: 1 restores the pre-fix behaviour, no rebuild needed.
 //
 //   q  = hidden @ q_proj.weight.T        [H*D]            (q_proj: in_dim -> H*D)
 //   kv = source @ kv_proj.weight.T       [2*H*D]          (kv_proj: src_dim -> 2*H*D)
@@ -31,7 +54,7 @@ cl_mem CrossAttention_forward(
     cl_mem* k_cache_inout, cl_mem* v_cache_inout, cl_mem encoder_hidden_states,
     const char* weight_prefix, const char* prenorm_prefix)
 {
-    (void)layer_idx;(void)start_pos;(void)k_cache_inout;(void)v_cache_inout;
+    (void)layer_idx;(void)k_cache_inout;(void)v_cache_inout;
     const std::string wp = weight_prefix ? std::string(weight_prefix) : std::string();
     if (wp.empty() || !input) { NNOPT_ERROR("CrossAttention: null wp/input"); return nullptr; }
     if (!encoder_hidden_states) { NNOPT_ERROR("CrossAttention: null source"); return nullptr; }
@@ -49,6 +72,22 @@ cl_mem CrossAttention_forward(
     const int H = sksh[1], D = sksh[2];
     if (hd != H*D || kv_out != 2*H*D) { NNOPT_ERROR("CrossAttention: dim mismatch"); return nullptr; }
     const float inv_sqrt_d = 1.0f / std::sqrt((float)D);
+
+    // Ring depth: 41 past frames + the current one. Read once per toggle epoch, like the other
+    // NNOPT_ switches, so the per-frame path stays free of getenv.
+    static const int kMaxSrc = 42;
+    static int max_src = -1, max_src_epoch = -1;
+    if (max_src_epoch != nnopt_toggle_epoch()) {
+        const char* e = std::getenv("NNOPT_XATTNDEPTH");
+        max_src = (e && *e) ? std::atoi(e) : kMaxSrc;
+        if (max_src < 1) max_src = 1;
+        max_src_epoch = nnopt_toggle_epoch();
+    }
+    // start_pos < 0 means "caller has no frame counter" (the non-streaming op-test path), which is
+    // frame 0 — one source, ln(1) = 0, byte-identical to the old behaviour.
+    const int n_src = (start_pos < 0) ? 1
+                    : (start_pos + 1 < max_src ? start_pos + 1 : max_src);
+    const float log_n = std::log((float)n_src);
 
     cl_int err = CL_SUCCESS;
     // One workgroup per head instead of one work ITEM per head — the same serial-launch bug as the
@@ -99,6 +138,7 @@ cl_mem CrossAttention_forward(
     clSetKernelArg(sk,2,sizeof(cl_mem),&sink_v); clSetKernelArg(sk,3,sizeof(cl_mem),&pds);
     clSetKernelArg(sk,4,sizeof(cl_mem),&out); clSetKernelArg(sk,5,sizeof(int),&H);
     clSetKernelArg(sk,6,sizeof(int),&D); clSetKernelArg(sk,7,sizeof(float),&inv_sqrt_d);
+    clSetKernelArg(sk,8,sizeof(float),&log_n);
     // Through profEnqueue so cross-attention finally appears in the profile at all.
     cl_int xerr;
     if (par) { const size_t sg=(size_t)H*64, sl=64; xerr = cl_ctx.profEnqueue(sk,1,&sg,&sl,"xattn"); }

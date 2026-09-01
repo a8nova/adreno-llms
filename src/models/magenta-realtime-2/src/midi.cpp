@@ -101,12 +101,16 @@ bool midi_apply_to_conditioning(const MidiState& midi, std::vector<int32_t>& tok
 
 
 // CFG scales, discretized the way magenta_rt does it: CFG = -1.0 + step * code, so 3.0 is code 20
-// at the musiccoca/notes step of 0.2 and code 4 at the drums step of 1.0. These three channels are
-// the model's own "how hard should I follow each conditioning stream" input — the notes one is the
-// MIDI-following strength. Left at the port's long-standing 3.0/3.0/3.0 on purpose: changing it
-// would break the byte-identity gate, and there is no on-device objective to auto-tune it against,
-// so it must not become a flag either (HANDOFF-recordable-queues.md §6).
-static const int kCfg[3] = {20, 20, 4};
+// at the musiccoca/notes step of 0.2 and 1.0 is code 2 at the drums step of 1.0. These three
+// channels are the model's own "how hard should I follow each conditioning stream" input — the
+// notes one is the MIDI-following strength.
+//
+// {3.0, 1.0, 1.0}, matching the reference oracle the port is A/B'd against
+// (~/Downloads/magenta-ref-mac/settings.json, and MagentaRT2System's own cfg_scales default in
+// magenta_rt/mlx/system.py:256). This was 3.0/3.0/3.0 until 2026-09-01. Only musiccoca was ever
+// right: the common render leaves all 128 note channels at -1 and then asked the model to follow
+// that empty conditioning at 3.0, which no upstream path does.
+static const int kCfg[3] = {20, 10, 2};
 
 bool midi_build_conditioning(const std::vector<int32_t>& style_tokens, const MidiState* midi,
                              std::vector<int32_t>& out) {
