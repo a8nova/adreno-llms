@@ -189,7 +189,7 @@ __kernel void conv1d_2dh(
         }
     }
     #pragma unroll
-    for(int n=0;n<NC;++n) if(co0+n<Cout) for(int t=0;t<TILE_T;++t){ int to=to0+t; if(to<Tout) vstore_half(acc[n][t],(size_t)(co0+n)*Tout+to,out); }
+    for(int n=0;n<NC;++n) if(co0+n<Cout) for(int t=0;t<TILE_T;++t){ int to=to0+t; if(to<Tout) vstore_half((float)acc[n][t],(size_t)(co0+n)*Tout+to,out); }
 }
 #endif
 

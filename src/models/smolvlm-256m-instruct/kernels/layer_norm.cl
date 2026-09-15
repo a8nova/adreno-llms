@@ -99,7 +99,7 @@ void layernorm_forward(
     const float v = (float)LOAD(x, base + c);
     const float w = (float)LOAD(weight, c);
     const float b = (float)LOAD(bias, c);
-    STORE(out, base + c, (storage_t)((v - mean) * inv_std * w + b));
+    STORE(out, base + c, ((v - mean) * inv_std * w + b));
   }
 #else
   // FP32 path.
@@ -141,7 +141,7 @@ void layernorm_forward(
     const float v = (float)LOAD(x, base + c);
     const float w = (float)LOAD(weight, c);
     const float b = (float)LOAD(bias, c);
-    STORE(out, base + c, (storage_t)((v - mean) * inv_std * w + b));
+    STORE(out, base + c, ((v - mean) * inv_std * w + b));
   }
 #endif
 }

@@ -52,13 +52,13 @@ void rms_norm_residual_forward(
   }
   for (int c = (C4 << 2) + lid; c < cols; c += WG_SIZE) {
     float v = (float)LOAD(x, base + c) + (float)LOAD(residual, base + c);
-    STORE(x, base + c, (storage_t)v);
+    STORE(x, base + c, v);
     ss += v * v;
   }
 #else
   for (int c = lid; c < cols; c += WG_SIZE) {
     float v = (float)LOAD(x, base + c) + (float)LOAD(residual, base + c);
-    STORE(x, base + c, (storage_t)v);
+    STORE(x, base + c, v);
     ss += v * v;
   }
 #endif
@@ -79,13 +79,13 @@ void rms_norm_residual_forward(
   for (int c = (C4 << 2) + lid; c < cols; c += WG_SIZE) {
     float xv = (float)LOAD(x, base + c);
     float wv = (float)LOAD(weight, c);
-    STORE(out, base + c, (storage_t)(xv * inv_rms * wv));
+    STORE(out, base + c, (xv * inv_rms * wv));
   }
 #else
   for (int c = lid; c < cols; c += WG_SIZE) {
     float xv = (float)LOAD(x, base + c);
     float wv = (float)LOAD(weight, c);
-    STORE(out, base + c, (storage_t)(xv * inv_rms * wv));
+    STORE(out, base + c, (xv * inv_rms * wv));
   }
 #endif
 }
@@ -144,13 +144,13 @@ void rms_norm_forward(
   for (int c = (C4b << 2) + lid; c < cols; c += WG_SIZE) {
     float xv = (float)LOAD(x, base + c);
     float wv = (float)LOAD(weight, c);
-    STORE(out, base + c, (storage_t)(xv * inv_rms * wv));
+    STORE(out, base + c, (xv * inv_rms * wv));
   }
 #else
   for (int c = lid; c < cols; c += WG_SIZE) {
     float xv = (float)LOAD(x, base + c);
     float wv = (float)LOAD(weight, c);
-    STORE(out, base + c, (storage_t)(xv * inv_rms * wv));
+    STORE(out, base + c, (xv * inv_rms * wv));
   }
 #endif
 }

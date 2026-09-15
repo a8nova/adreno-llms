@@ -200,11 +200,88 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
     cl_command_queue_properties q_props = 0;
     {
         const char* a = std::getenv("NNOPT_PROFILE");
+        // Self-arms in a diagnostic build: the app cannot set env vars for a
+        // measurement run, and the per-kernel breakdown is the only thing that
+        // says WHICH shape to tune (GEMV turned out to be 96.9% of GPU time,
+        // dominated by N=4608 rather than the lm_head everyone assumes).
+#ifdef NNOPT_PROFILE_DEFAULT_ON
+        static const char* kProfileOn = "1";
+        const char* b = std::getenv("NNOPT_KERNEL_PROFILE"); if (!b) b = kProfileOn;
+#else
         const char* b = std::getenv("NNOPT_KERNEL_PROFILE");
+#endif
         if ((a && a[0] == '1') || (b && b[0] == '1')) q_props |= CL_QUEUE_PROFILING_ENABLE;
     }
     queue_ = clCreateCommandQueue(context_, device_, q_props, &err);
     if (err != CL_SUCCESS) return false;
+
+    // ── CLBlast device-query probe ──────────────────────────────────────────
+    // CLBlast fails on PowerVR GE8320 with "clGetDeviceInfo: -30", but every
+    // query our own code makes succeeds on the same device. The difference is
+    // the CALL FORM, not the parameter:
+    //
+    //   CLBlast (clpp11.hpp:390-396):  clGetDeviceInfo(d, p, 0, nullptr, &bytes)   <- size probe
+    //                                  clGetDeviceInfo(d, p, bytes, &val, nullptr)
+    //   Ours:                          clGetDeviceInfo(d, p, sizeof(v), &v, nullptr)
+    //
+    // A driver that rejects the size-probe form fails for CLBlast on a parameter
+    // that works fine for us. This prints both forms per parameter so the failing
+    // one is named instead of guessed. Enable with NNOPT_CL_PROBE=1.
+    // Self-arms in the diagnostic build (same define as the dispatch tracer) because
+    // the app has no known env-var plumbing to the engine process. NNOPT_CL_PROBE=0
+    // forces it off.
+    // Always on: ~20 lines printed once at init, negligible cost, and it is the
+    // only way to see a driver's clGetDeviceInfo behaviour from a user's log.
+    // NNOPT_CL_PROBE=0 forces it off.
+    { const char* pv = std::getenv("NNOPT_CL_PROBE"); const bool probe_on = !(pv && pv[0] == '0');
+    if (probe_on) {
+        // These two are OpenCL 2.0-only and our headers are pinned to 1.2, so the
+        // enum names do not exist at compile time. Define the numeric values so the
+        // probe can ASK a 1.2 device for them — the whole point is to see whether a
+        // 2.0-only query returns -30 here.
+        #ifndef CL_DEVICE_IMAGE_PITCH_ALIGNMENT
+          #define CL_DEVICE_IMAGE_PITCH_ALIGNMENT 0x104A
+        #endif
+        #ifndef CL_DEVICE_IMAGE_BASE_ADDRESS_ALIGNMENT
+          #define CL_DEVICE_IMAGE_BASE_ADDRESS_ALIGNMENT 0x104B
+        #endif
+        struct Q { const char* name; cl_device_info id; size_t sz; };
+        const Q qs[] = {
+            {"CL_DEVICE_NAME",                    CL_DEVICE_NAME,                    0},
+            {"CL_DEVICE_VENDOR",                  CL_DEVICE_VENDOR,                  0},
+            {"CL_DEVICE_VERSION",                 CL_DEVICE_VERSION,                 0},
+            {"CL_DEVICE_OPENCL_C_VERSION",        CL_DEVICE_OPENCL_C_VERSION,        0},
+            {"CL_DEVICE_EXTENSIONS",              CL_DEVICE_EXTENSIONS,              0},
+            {"CL_DRIVER_VERSION",                 CL_DRIVER_VERSION,                 0},
+            {"CL_DEVICE_PLATFORM",                CL_DEVICE_PLATFORM,                sizeof(cl_platform_id)},
+            {"CL_DEVICE_TYPE",                    CL_DEVICE_TYPE,                    sizeof(cl_device_type)},
+            {"CL_DEVICE_MAX_COMPUTE_UNITS",       CL_DEVICE_MAX_COMPUTE_UNITS,       sizeof(cl_uint)},
+            {"CL_DEVICE_MAX_CLOCK_FREQUENCY",     CL_DEVICE_MAX_CLOCK_FREQUENCY,     sizeof(cl_uint)},
+            {"CL_DEVICE_MAX_WORK_GROUP_SIZE",     CL_DEVICE_MAX_WORK_GROUP_SIZE,     sizeof(size_t)},
+            {"CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS",CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS,sizeof(cl_uint)},
+            {"CL_DEVICE_MAX_WORK_ITEM_SIZES",     CL_DEVICE_MAX_WORK_ITEM_SIZES,     0},
+            {"CL_DEVICE_LOCAL_MEM_SIZE",          CL_DEVICE_LOCAL_MEM_SIZE,          sizeof(cl_ulong)},
+            {"CL_DEVICE_GLOBAL_MEM_SIZE",         CL_DEVICE_GLOBAL_MEM_SIZE,         sizeof(cl_ulong)},
+            {"CL_DEVICE_MAX_MEM_ALLOC_SIZE",      CL_DEVICE_MAX_MEM_ALLOC_SIZE,      sizeof(cl_ulong)},
+            {"CL_DEVICE_IMAGE_SUPPORT",           CL_DEVICE_IMAGE_SUPPORT,           sizeof(cl_bool)},
+            {"CL_DEVICE_IMAGE_PITCH_ALIGNMENT",   CL_DEVICE_IMAGE_PITCH_ALIGNMENT,   sizeof(cl_uint)},
+            {"CL_DEVICE_IMAGE_BASE_ADDRESS_ALIGNMENT", CL_DEVICE_IMAGE_BASE_ADDRESS_ALIGNMENT, sizeof(cl_uint)},
+        };
+        fprintf(stderr, "NNOPT_CL_PROBE: param | size-probe(CLBlast form) | direct(our form)\n");
+        for (const auto& q : qs) {
+            size_t bytes = 0;
+            const cl_int e_size = clGetDeviceInfo(device_, q.id, 0, nullptr, &bytes);
+            unsigned char buf[8192];
+            cl_int e_direct = CL_SUCCESS;
+            const size_t want = q.sz ? q.sz : (bytes && bytes <= sizeof(buf) ? bytes : sizeof(buf));
+            e_direct = clGetDeviceInfo(device_, q.id, want, buf, nullptr);
+            fprintf(stderr, "NNOPT_CL_PROBE: %-42s size=%-4d(bytes=%zu) direct=%-4d %s\n",
+                    q.name, (int)e_size, bytes, (int)e_direct,
+                    (e_size != CL_SUCCESS || e_direct != CL_SUCCESS) ? "<<<< FAILS" : "");
+        }
+        fflush(stderr);
+    }
+    }
 
     // ── One-time device banner (matches mms-tts format). Always shown — it's
     // small + useful. Debug builds additionally dump the full extensions list.

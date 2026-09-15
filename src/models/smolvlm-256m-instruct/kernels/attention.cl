@@ -121,7 +121,7 @@ void gqa_attn_scores_tiled(
   const int abs_q_pos = (seq_k - seq_q) + tq;
   const int score_idx = (qh * seq_q + tq) * seq_k + tk;
   if (tk > abs_q_pos) {
-    STORE(scores, score_idx, (storage_t)(-3.402823466e+38f));
+    STORE(scores, score_idx, (-3.402823466e+38f));
     return;
   }
 
@@ -133,7 +133,7 @@ void gqa_attn_scores_tiled(
     float4 kv = convert_float4(vload4(0, &k_tile[lc][d4 * 4]));
     acc += dot(qv, kv);
   }
-  STORE(scores, score_idx, (storage_t)(acc * scale));
+  STORE(scores, score_idx, (acc * scale));
 }
 
 // scores[qh, tq, tk] = scale * dot(q[tq, qh, :], k_cache[tk, kvh, :])
@@ -173,7 +173,7 @@ __kernel void gqa_attn_scores_image(
   const int score_idx = (qh * seq_q + tq) * seq_k + tk;
 
   if (tk > abs_q_pos) {
-    STORE(scores, score_idx, (storage_t)(-3.402823466e+38f));
+    STORE(scores, score_idx, (-3.402823466e+38f));
     return;
   }
 
@@ -194,7 +194,7 @@ __kernel void gqa_attn_scores_image(
 #else
   // fp32 path falls through to the buffer kernel.
 #endif
-  STORE(scores, score_idx, (storage_t)(acc * scale));
+  STORE(scores, score_idx, (acc * scale));
 }
 
 __kernel void gqa_attn_scores(
@@ -220,7 +220,7 @@ __kernel void gqa_attn_scores(
   const int score_idx = (qh * seq_q + tq) * seq_k + tk;
 
   if (tk > abs_q_pos) {
-    STORE(scores, score_idx, (storage_t)(-3.402823466e+38f));
+    STORE(scores, score_idx, (-3.402823466e+38f));
     return;
   }
 
@@ -256,7 +256,7 @@ __kernel void gqa_attn_scores(
   }
 #endif
 
-  STORE(scores, score_idx, (storage_t)(acc * scale));
+  STORE(scores, score_idx, (acc * scale));
 }
 
 // Stable row-softmax over last dimension (seq_k).
@@ -296,7 +296,7 @@ void gqa_softmax(
   for (int c = lid; c < seq_k; c += SM_WG) {
     float v = (float)LOAD(scores, base + c);
     float e = native_exp(v - row_max);
-    STORE(scores, base + c, (storage_t)e);
+    STORE(scores, base + c, e);
     ls += e;
   }
   float row_sum = sub_group_reduce_add(ls);
@@ -305,7 +305,7 @@ void gqa_softmax(
   const float inv = native_recip(row_sum + 1e-20f);
   for (int c = lid; c < seq_k; c += SM_WG) {
     float e = (float)LOAD(scores, base + c);
-    STORE(scores, base + c, (storage_t)(e * inv));
+    STORE(scores, base + c, (e * inv));
   }
 }
 
@@ -371,10 +371,10 @@ void gqa_attn_out_decode(
   }
   if (lid == 0) {
     const int out_idx = qh * head_dim + d4 * 4;
-    STORE(out, out_idx + 0, (storage_t)r0[0]);
-    STORE(out, out_idx + 1, (storage_t)r1[0]);
-    STORE(out, out_idx + 2, (storage_t)r2[0]);
-    STORE(out, out_idx + 3, (storage_t)r3[0]);
+    STORE(out, out_idx + 0, r0[0]);
+    STORE(out, out_idx + 1, r1[0]);
+    STORE(out, out_idx + 2, r2[0]);
+    STORE(out, out_idx + 3, r3[0]);
   }
 }
 
@@ -469,10 +469,10 @@ void gqa_attn_out_decode_image(
   }
   if (lid == 0) {
     const int out_idx = qh * head_dim + d4 * 4;
-    STORE(out, out_idx + 0, (storage_t)r0[0]);
-    STORE(out, out_idx + 1, (storage_t)r1[0]);
-    STORE(out, out_idx + 2, (storage_t)r2[0]);
-    STORE(out, out_idx + 3, (storage_t)r3[0]);
+    STORE(out, out_idx + 0, r0[0]);
+    STORE(out, out_idx + 1, r1[0]);
+    STORE(out, out_idx + 2, r2[0]);
+    STORE(out, out_idx + 3, r3[0]);
   }
 }
 
@@ -553,10 +553,10 @@ void gqa_attn_out_tiled(
 
   if (tq < seq_q) {
     const int out_idx = tq * q_dim + qh * head_dim + d4 * 4;
-    STORE(out, out_idx + 0, (storage_t)acc.s0);
-    STORE(out, out_idx + 1, (storage_t)acc.s1);
-    STORE(out, out_idx + 2, (storage_t)acc.s2);
-    STORE(out, out_idx + 3, (storage_t)acc.s3);
+    STORE(out, out_idx + 0, acc.s0);
+    STORE(out, out_idx + 1, acc.s1);
+    STORE(out, out_idx + 2, acc.s2);
+    STORE(out, out_idx + 3, acc.s3);
   }
 }
 
@@ -609,10 +609,10 @@ __kernel void gqa_attn_out_image(
     acc += p * vv;
   }
   const int out_idx = tq * q_dim + qh * head_dim + d4 * 4;
-  STORE(out, out_idx + 0, (storage_t)acc.s0);
-  STORE(out, out_idx + 1, (storage_t)acc.s1);
-  STORE(out, out_idx + 2, (storage_t)acc.s2);
-  STORE(out, out_idx + 3, (storage_t)acc.s3);
+  STORE(out, out_idx + 0, acc.s0);
+  STORE(out, out_idx + 1, acc.s1);
+  STORE(out, out_idx + 2, acc.s2);
+  STORE(out, out_idx + 3, acc.s3);
 #else
   // fp32 path not currently used for prefill; fall through to the buffer kernel.
 #endif
@@ -653,10 +653,10 @@ __kernel void gqa_attn_out(
   }
 
   const int out_idx = tq * q_dim + qh * head_dim + d4 * 4;
-  STORE(out, out_idx + 0, (storage_t)acc.s0);
-  STORE(out, out_idx + 1, (storage_t)acc.s1);
-  STORE(out, out_idx + 2, (storage_t)acc.s2);
-  STORE(out, out_idx + 3, (storage_t)acc.s3);
+  STORE(out, out_idx + 0, acc.s0);
+  STORE(out, out_idx + 1, acc.s1);
+  STORE(out, out_idx + 2, acc.s2);
+  STORE(out, out_idx + 3, acc.s3);
 #else
   float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
   for (int tk = 0; tk < seq_k; ++tk) {
@@ -669,9 +669,9 @@ __kernel void gqa_attn_out(
   }
 
   const int out_idx = tq * q_dim + qh * head_dim + d4 * 4;
-  STORE(out, out_idx + 0, (storage_t)acc0);
-  STORE(out, out_idx + 1, (storage_t)acc1);
-  STORE(out, out_idx + 2, (storage_t)acc2);
-  STORE(out, out_idx + 3, (storage_t)acc3);
+  STORE(out, out_idx + 0, acc0);
+  STORE(out, out_idx + 1, acc1);
+  STORE(out, out_idx + 2, acc2);
+  STORE(out, out_idx + 3, acc3);
 #endif
 }

@@ -36,5 +36,5 @@ __kernel void mlp_gelu(
   const float inner = 0.7978845608f * (g + 0.044715f * g3);
   const float y = 0.5f * g * (1.0f + tanh(inner));
 
-  STORE(out, i, (storage_t)y);
+  STORE(out, i, y);
 }

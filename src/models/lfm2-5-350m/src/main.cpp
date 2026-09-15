@@ -25,6 +25,13 @@
 // STREAM-style microbenchmark — measures the practical streaming-read
 // ceiling on this device for both buffer-cache and texture-cache reads.
 // Triggered via NNOPT_BW_PROBE=1, runs and exits before LLM work begins.
+//
+// EVERY line this function prints MUST start with NNOPT_. ProcessEngine.kt's
+// diag() mirrors engine stderr into logcat only for lines beginning NNOPT_ /
+// BENCHMARK / ERROR; anything else lands in the on-disk diag file and is then
+// readable only by OCR'ing the in-app Engine log dialog one screenshot at a
+// time. Bare "STREAM..." prefixes cost a full BrowserStack session that
+// produced no readable probe output at all.
 // Adapted from qwen2.5-0.5B/.../src/main.cpp:run_bw_probe.
 static int run_bw_probe(OpenCLContext& cl_ctx) {
     using namespace std::chrono;
@@ -32,7 +39,23 @@ static int run_bw_probe(OpenCLContext& cl_ctx) {
     cl_command_queue q = cl_ctx.queue();
     cl_int err = CL_SUCCESS;
 
-    const size_t TOTAL_BYTES   = 256ull * 1024 * 1024;     // 256 MB ≫ L2
+    // 256 MB is comfortably past any L2 so every read goes to DRAM, but a
+    // constrained part may refuse a single allocation that large. Clamp to the
+    // device's own limit and round DOWN to a power of two, because every size
+    // below divides TOTAL_BYTES and a ragged clamp would leave a partial tail.
+    size_t TOTAL_BYTES = 256ull * 1024 * 1024;
+    {
+        cl_ulong max_alloc = 0;
+        clGetDeviceInfo(cl_ctx.device(), CL_DEVICE_MAX_MEM_ALLOC_SIZE,
+                        sizeof(max_alloc), &max_alloc, nullptr);
+        if (max_alloc > 0 && (cl_ulong)TOTAL_BYTES > max_alloc) {
+            size_t pow2 = 1ull << 20;
+            while ((pow2 << 1) <= (size_t)max_alloc) pow2 <<= 1;
+            TOTAL_BYTES = pow2;
+            std::cerr << "NNOPT_STREAM: clamped probe buffer to " << (TOTAL_BYTES >> 20)
+                      << " MB (device max alloc " << (max_alloc >> 20) << " MB)\n";
+        }
+    }
     const size_t TOTAL_HALVES  = TOTAL_BYTES / 2;
     const size_t TOTAL_VEC4    = TOTAL_HALVES / 4;          // # fp16x4 elements
     const size_t WG            = 64;
@@ -42,7 +65,8 @@ static int run_bw_probe(OpenCLContext& cl_ctx) {
     cl_mem src = clCreateBuffer(ctx, CL_MEM_READ_ONLY,  TOTAL_BYTES,                    nullptr, &err);
     if (err != CL_SUCCESS) { std::cerr << "src alloc fail " << err << "\n"; return 1; }
     cl_mem dce = clCreateBuffer(ctx, CL_MEM_READ_WRITE, TOTAL_THREADS * sizeof(float),  nullptr, &err);
-    if (err != CL_SUCCESS) { std::cerr << "dce alloc fail " << err << "\n"; return 1; }
+    if (err != CL_SUCCESS) { std::cerr << "dce alloc fail " << err << "\n";
+                             clReleaseMemObject(src); return 1; }
     {
         const cl_uchar pat[2] = {0x00, 0x3c};   // fp16 1.0 little-endian
         clEnqueueFillBuffer(q, src, pat, 2, 0, TOTAL_BYTES, 0, nullptr, nullptr);
@@ -50,10 +74,13 @@ static int run_bw_probe(OpenCLContext& cl_ctx) {
     }
 
     cl_program prog = cl_ctx.build_program_from_file("kernels/gemv_m1.cl");
-    if (!prog) { std::cerr << "build kernels/gemv_m1.cl fail\n"; return 1; }
+    if (!prog) { std::cerr << "build kernels/gemv_m1.cl fail\n";
+                 clReleaseMemObject(dce); clReleaseMemObject(src); return 1; }
 
     cl_kernel k_buf = clCreateKernel(prog, "gemv_stream_buf", &err);
-    if (err != CL_SUCCESS) { std::cerr << "createKernel buf " << err << "\n"; return 1; }
+    if (err != CL_SUCCESS) { std::cerr << "createKernel buf " << err << "\n";
+                             clReleaseProgram(prog); clReleaseMemObject(dce);
+                             clReleaseMemObject(src); return 1; }
 
     int iters_per_thread = (int)(TOTAL_VEC4 / TOTAL_THREADS);
     clSetKernelArg(k_buf, 0, sizeof(cl_mem), &src);
@@ -73,11 +100,107 @@ static int run_bw_probe(OpenCLContext& cl_ctx) {
         double gbs  = (double)TOTAL_BYTES / secs / 1e9;
         if (gbs > best_buf_gbs) best_buf_gbs = gbs;
     }
-    std::cerr << "STREAM[buf]: " << TOTAL_BYTES/(1024.0*1024.0) << " MB read "
+    std::cerr << "NNOPT_STREAM[buf]: " << TOTAL_BYTES/(1024.0*1024.0) << " MB read "
               << "→ " << best_buf_gbs << " GB/s (best of 5)\n";
 
+    // ── Access-pattern matrix (round 3) ──────────────────────────────────────
+    // The q4 sweep's GB/s column counts USEFUL bytes. But gemv_m1_q4_row_t —
+    // which carries 100% of q4 decode traffic on PowerVR — has lane n read row
+    // n with 4-byte uchar4 loads, so neighbouring lanes sit K/2 bytes apart.
+    // If each of those loads pulls a full line that only one lane consumes,
+    // real DRAM traffic is a multiple of the reported figure, and the
+    // "4% of the bandwidth ceiling AND 4% of the ALU ceiling" paradox dissolves.
+    //
+    // COAL and ROW below move identical bytes with identical thread counts and
+    // identical loads per thread. Only the address mapping differs, so the
+    // ratio IS the coalescing tax. Load width is swept alongside because the
+    // live kernel issues 4-byte loads and widening them is itself a candidate.
+    //
+    // Two back-to-back passes: the clock here is a DVFS readout, not a pinned
+    // value (400 and 500 MHz have both been reported against a 650 MHz spec),
+    // so a pass-to-pass delta is sustained-load drift and any conclusion
+    // smaller than that delta is noise.
+    {
+        cl_uint mhz = 0, cus = 0;
+        clGetDeviceInfo(cl_ctx.device(), CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(cus), &cus, nullptr);
+
+        const size_t MAX_THREADS = TOTAL_BYTES / 512;   // smallest row = most threads
+        cl_mem sink = clCreateBuffer(ctx, CL_MEM_READ_WRITE, MAX_THREADS * sizeof(float), nullptr, &err);
+        if (err != CL_SUCCESS) { std::cerr << "NNOPT_STREAM_PAT: sink alloc fail " << err << "\n";
+                                 clReleaseKernel(k_buf); clReleaseProgram(prog);
+                                 clReleaseMemObject(dce); clReleaseMemObject(src); return 1; }
+
+        struct WidthCfg { const char* suffix; int vbytes; };
+        const WidthCfg kWidths[]   = { {"u4", 4}, {"u8", 8}, {"u16", 16} };
+        const int      kRowBytes[] = { 512, 1280 };   // q4 row at K=1024 and K=2560
+
+        auto time_pattern = [&](const char* kname, size_t threads, int loads_per_row,
+                                double bytes) -> double {
+            cl_int e = CL_SUCCESS;
+            cl_kernel k = clCreateKernel(prog, kname, &e);
+            if (e != CL_SUCCESS) {
+                std::cerr << "NNOPT_STREAM_PAT: createKernel " << kname << " err=" << e << "\n";
+                return 0.0;
+            }
+            clSetKernelArg(k, 0, sizeof(cl_mem), &src);
+            clSetKernelArg(k, 1, sizeof(cl_mem), &sink);
+            clSetKernelArg(k, 2, sizeof(int),    &loads_per_row);
+            size_t lws = 64, gws = threads;
+            double best = 0.0;
+            for (int trial = 0; trial < 5; ++trial) {
+                clEnqueueNDRangeKernel(q, k, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+                if (clFinish(q) != CL_SUCCESS) {
+                    // CL_SUCCESS from enqueue only means QUEUED; a fault surfaces here.
+                    std::cerr << "NNOPT_STREAM_PAT: " << kname << " DISPATCH FAIL\n";
+                    clReleaseKernel(k);
+                    return 0.0;
+                }
+                auto t0 = high_resolution_clock::now();
+                clEnqueueNDRangeKernel(q, k, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+                clFinish(q);
+                auto t1 = high_resolution_clock::now();
+                double gbs = bytes / duration<double>(t1 - t0).count() / 1e9;
+                if (gbs > best) best = gbs;
+            }
+            clReleaseKernel(k);
+            return best;
+        };
+
+        for (int pass = 0; pass < 2; ++pass) {
+            clGetDeviceInfo(cl_ctx.device(), CL_DEVICE_MAX_CLOCK_FREQUENCY, sizeof(mhz), &mhz, nullptr);
+            std::cerr << "NNOPT_STREAM_PAT: pass " << pass << "  clock=" << mhz
+                      << " MHz  cus=" << cus << "\n";
+            std::cerr << "NNOPT_STREAM_PAT:  row_B  width   threads    MB   COAL GB/s    ROW GB/s     tax\n";
+            for (int rb : kRowBytes) {
+                const size_t threads = (TOTAL_BYTES / (size_t)rb) & ~(size_t)63;
+                const double bytes   = (double)threads * (double)rb;
+                for (const WidthCfg& w : kWidths) {
+                    if (rb % w.vbytes) continue;
+                    const int lpr = rb / w.vbytes;
+                    char kc[64], kr[64];
+                    snprintf(kc, sizeof kc, "stream_coal_%s", w.suffix);
+                    snprintf(kr, sizeof kr, "stream_row_%s",  w.suffix);
+                    const double c = time_pattern(kc, threads, lpr, bytes);
+                    const double r = time_pattern(kr, threads, lpr, bytes);
+                    char line[192];
+                    snprintf(line, sizeof line,
+                             "NNOPT_STREAM_PAT: %6d  %5s  %8zu  %4.0f  %10.2f  %10.2f  %6.2fx\n",
+                             rb, w.suffix, threads, bytes / (1024.0 * 1024.0), c, r,
+                             (r > 0.0 ? c / r : 0.0));
+                    std::cerr << line;
+                }
+            }
+        }
+        std::cerr << "NNOPT_STREAM_PAT: tax = COAL/ROW. tax ~1.0 means the hypothesis is dead and\n"
+                     "NNOPT_STREAM_PAT: the q4 wall is not a coalescing problem; tax >> 1.0 is the\n"
+                     "NNOPT_STREAM_PAT: headroom a lane-interleaved weight layout can recover.\n";
+        clReleaseMemObject(sink);
+    }
+
     cl_kernel k_img = clCreateKernel(prog, "gemv_stream_img", &err);
-    if (err != CL_SUCCESS) { std::cerr << "createKernel img " << err << "\n"; return 1; }
+    if (err != CL_SUCCESS) { std::cerr << "createKernel img " << err << "\n";
+                             clReleaseKernel(k_buf); clReleaseProgram(prog);
+                             clReleaseMemObject(dce); clReleaseMemObject(src); return 1; }
 
     const int img_w = 4096;
     const int img_h = (int)(TOTAL_VEC4 / img_w);
@@ -118,16 +241,25 @@ static int run_bw_probe(OpenCLContext& cl_ctx) {
         double gbs   = bytes / secs / 1e9;
         if (gbs > best_img_gbs) best_img_gbs = gbs;
     }
-    std::cerr << "STREAM[img]: " << ((double)img_h*img_w*8.0)/(1024.0*1024.0) << " MB read via image2d "
+    std::cerr << "NNOPT_STREAM[img]: " << ((double)img_h*img_w*8.0)/(1024.0*1024.0) << " MB read via image2d "
               << "→ " << best_img_gbs << " GB/s (best of 5)\n";
 
-    // Roofline summary using LFM2.5's per-token weight footprint.
-    const double weight_mb = 676.0;
-    std::cerr << "\n=== Practical roofline for LFM2.5-350M-Base (676 MB/token fp16) ===\n"
-              << "  Buffer-cache ceiling: " << best_buf_gbs << " GB/s → max "
-              <<  (best_buf_gbs * 1000.0 / weight_mb) << " tok/s\n"
-              << "  Texture-cache ceiling: " << best_img_gbs << " GB/s → max "
-              <<  (best_img_gbs * 1000.0 / weight_mb) << " tok/s\n";
+    // Roofline summary. Two footprints: the 350M fp16 figure this probe shipped
+    // with, and the 230M q4 figure actually under optimisation on Rogue (143
+    // MB/token of GEMV traffic, from the round-2 per-shape budget).
+    struct Footprint { const char* label; double mb; };
+    const Footprint kFootprints[] = {
+        { "LFM2.5-350M-Base fp16", 676.0 },
+        { "LFM2.5-230M q4_0",      143.0 },
+    };
+    std::cerr << "\n=== Practical roofline ===\n";
+    for (const Footprint& f : kFootprints) {
+        std::cerr << "  " << f.label << " (" << f.mb << " MB/token)\n"
+                  << "    buffer  " << best_buf_gbs << " GB/s -> max "
+                  << (best_buf_gbs * 1000.0 / f.mb) << " tok/s\n"
+                  << "    texture " << best_img_gbs << " GB/s -> max "
+                  << (best_img_gbs * 1000.0 / f.mb) << " tok/s\n";
+    }
 
     clReleaseMemObject(img);
     clReleaseKernel(k_img);
@@ -460,9 +592,36 @@ int main(int argc, char* argv[]) {
     std::cerr << "Device: " << cl_ctx.device_description() << std::endl;
     NNOPT_CHECKPOINT("OpenCL initialized");
 
-    // Bandwidth probe — exits before LLM work. Toggle with NNOPT_BW_PROBE=1.
-    if (const char* bw = std::getenv("NNOPT_BW_PROBE"); bw && bw[0] == '1') {
-        return run_bw_probe(cl_ctx);
+    // Bandwidth probe — exits before LLM work. NNOPT_BW_PROBE=1, or build with
+    // -DNNOPT_BW_PROBE_DEFAULT_ON=1 (then NNOPT_BW_PROBE=0 forces it off). The
+    // Edgi app has no env plumbing of its own, so the define is the only way to
+    // reach this from an APK — same shape as NNOPT_SWEEP_DEFAULT_ON.
+    {
+        const char* bw = std::getenv("NNOPT_BW_PROBE");
+#ifdef NNOPT_BW_PROBE_DEFAULT_ON
+        const bool bw_on = !(bw && bw[0] == '0');
+#else
+        const bool bw_on = bw && bw[0] == '1';
+#endif
+        if (bw_on) {
+            const int rc = run_bw_probe(cl_ctx);
+            // An env-triggered CLI run is probe-only and exits, as before. A
+            // define-triggered APK build falls through instead: a BrowserStack
+            // session costs a 270 MB model download, so one launch has to yield
+            // the probe, the q4 sweep AND an end-to-end tok/s number. rc==0 is
+            // the path that releases every probe allocation; anything else
+            // exits rather than leaking 256 MB into the model load.
+#ifdef NNOPT_BW_PROBE_DEFAULT_ON
+            // Diagnostic only — a failed probe must never take the run down
+            // with it. A BrowserStack session costs a 270 MB model download,
+            // and losing the sweep and the tok/s number because a scratch
+            // allocation was refused would waste the whole session.
+            if (rc != 0) std::cerr << "NNOPT_STREAM: probe failed (rc=" << rc
+                                   << "), continuing to model load\n";
+#else
+            return rc;
+#endif
+        }
     }
     // cl_qcom_recordable_queues probe — exits before LLM work. Toggle with NNOPT_RECORD_PROBE=1.
     if (const char* rp = std::getenv("NNOPT_RECORD_PROBE"); rp && rp[0] == '1') {
@@ -563,6 +722,8 @@ int main(int argc, char* argv[]) {
             }
         }
         std::cerr << "NNOPT_QUANT=q4: registered " << registered << " q4 weights for GEMV fast path" << std::endl;
+        // Optional on-device kernel sweep (NNOPT_SWEEP=1). No-op otherwise.
+        nnopt_q4_sweep(cl_ctx.queue());
     }
 
     // Create model. Constructor stores refs only — kernel builds and per-layer

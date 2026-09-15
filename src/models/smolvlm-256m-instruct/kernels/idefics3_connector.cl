@@ -34,7 +34,10 @@ __kernel void idefics3_connector_noop(
     // Not used by the intended execution path, but safe if invoked.
     int gid = (int)get_global_id(0);
     if (gid < n_elements) {
-        storage_t v = (storage_t)LOAD(x, gid);
+        // STORE expands to vstore_half(), which OpenCL defines only for float.
+        // Holding the value as storage_t (= half) first made the call ambiguous
+        // on strict compilers (PowerVR Rogue rejects it; Adreno promoted silently).
+        float v = (float)LOAD(x, gid);
         STORE(out, gid, v);
     }
 }

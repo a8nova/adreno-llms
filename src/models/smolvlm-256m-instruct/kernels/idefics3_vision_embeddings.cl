@@ -115,5 +115,5 @@ __kernel void embedding_gather_add(
 
     const float e = (float)LOAD(embeddings, emb_idx);
     const float p = (float)LOAD(position_weight, pos_idx);
-    STORE(out, emb_idx, (storage_t)(e + p));
+    STORE(out, emb_idx, (e + p));
 }

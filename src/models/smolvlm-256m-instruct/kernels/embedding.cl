@@ -29,7 +29,7 @@ __kernel void embedding_forward(
   // This prevents wte OOB reads from crashing or cascading garbage through the graph.
   if (tok < 0 || tok >= vocab_size) {
     const long out_idx = (long)t * (long)hidden_size + (long)h;
-    STORE(out, out_idx, (storage_t)0.0f);
+    STORE(out, out_idx, 0.0f);
     return;
   }
 
@@ -37,5 +37,5 @@ __kernel void embedding_forward(
   const long out_idx = (long)t * (long)hidden_size + (long)h;
 
   const float v = (float)LOAD(wte, wte_idx);
-  STORE(out, out_idx, (storage_t)v);
+  STORE(out, out_idx, v);
 }

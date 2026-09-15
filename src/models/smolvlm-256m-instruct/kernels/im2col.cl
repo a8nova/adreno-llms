@@ -58,5 +58,5 @@ __kernel void im2col_nchw(
   }
 
   const long col_idx = (long)m * (long)K + (long)k;
-  STORE(col, col_idx, (storage_t)v);
+  STORE(col, col_idx, v);
 }
