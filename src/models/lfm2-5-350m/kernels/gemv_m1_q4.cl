@@ -356,3 +356,164 @@ void gemv_m1_k1024_q4_no8_img(
     vstore_half(partial[7][0], 0, out + n_base + 7);
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BUFFER-PATH Q4 GEMV (no image2d_t). Runtime K, 4 outputs per WG, WG=64.
+//
+// WHY THIS EXISTS: every other kernel in this file is an _img variant, so on a
+// device where the texture path is unavailable (PowerVR Rogue GE8320 — see the
+// denylist in utils.cpp) there was NO q4 kernel at all. The fallback chain below
+// it reads W as fp16, which silently reinterprets q4-packed bytes and emits
+// reserved-token garbage. That made q4 unusable there and forced fp16, which
+// costs 3.5x the memory traffic per token (459 MB vs ~129 MB for LFM2.5-230M) on
+// a decode path that is bandwidth-bound.
+//
+// The image binding was never doing anything the buffer cannot: a pixel is just
+// 4 packed bytes at row*(K/8)+pix. Identical arithmetic, identical unpack,
+// identical reduction — only the load differs, so results are bit-comparable
+// with the _img kernels.
+//
+// Requires N % 4 == 0 and K % 32 == 0 (same contract as the _img variants).
+__kernel
+__attribute__((reqd_work_group_size(64, 1, 1)))
+void gemv_m1_q4_no4_buf(
+    __global const half*   x,
+    __global const uchar4* W,        // [N][K/8] packed nibbles, row-major
+    __global const half*   scales,   // [N][K/32] fp16 per-block scale
+    __global half*         out,
+    const int N,
+    const int K) {
+  const int n_base = (int)get_group_id(0) * 4;
+  const int tid    = (int)get_local_id(0);
+  if (n_base >= N) return;
+
+  const int px_per_row = K >> 3;   // pixels (4 bytes = 8 weights) per row
+  const int blk_stride = K >> 5;   // scales per row
+
+  const __global uchar4* w0p = W + (size_t)(n_base + 0) * px_per_row;
+  const __global uchar4* w1p = W + (size_t)(n_base + 1) * px_per_row;
+  const __global uchar4* w2p = W + (size_t)(n_base + 2) * px_per_row;
+  const __global uchar4* w3p = W + (size_t)(n_base + 3) * px_per_row;
+
+  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+
+  // Grid-stride over pixel columns: one kernel covers every K without a
+  // per-K specialisation, and consecutive lanes read consecutive uchar4 —
+  // fully coalesced, which is what matters on a bandwidth-bound decode.
+  for (int pix = tid; pix < px_per_row; pix += 64) {
+    const int x_off = pix * 8;
+    const int blk   = pix >> 2;
+
+    const float4 xv0 = vload_half4(0, x + x_off);
+    const float4 xv1 = vload_half4(0, x + x_off + 4);
+
+    #define Q4_BUF_ROW(ptr, acc, row)                                            \
+      {                                                                          \
+        const uchar4 c = ptr[pix];                                               \
+        const uint4  p = (uint4)((uint)c.x, (uint)c.y, (uint)c.z, (uint)c.w);     \
+        int w0, w1, w2, w3, w4, w5, w6, w7;                                      \
+        UNPACK8_FROM_PIXEL(p, w0, w1, w2, w3, w4, w5, w6, w7);                    \
+        const float d = xv0.x*(float)w0 + xv0.y*(float)w1                        \
+                      + xv0.z*(float)w2 + xv0.w*(float)w3                        \
+                      + xv1.x*(float)w4 + xv1.y*(float)w5                        \
+                      + xv1.z*(float)w6 + xv1.w*(float)w7;                       \
+        acc += d * vload_half((size_t)(n_base + row) * blk_stride + blk, scales);\
+      }
+
+    Q4_BUF_ROW(w0p, acc0, 0)
+    Q4_BUF_ROW(w1p, acc1, 1)
+    Q4_BUF_ROW(w2p, acc2, 2)
+    Q4_BUF_ROW(w3p, acc3, 3)
+    #undef Q4_BUF_ROW
+  }
+
+  __local float partial[4][64];
+  partial[0][tid] = acc0; partial[1][tid] = acc1;
+  partial[2][tid] = acc2; partial[3][tid] = acc3;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int s = 32; s > 0; s >>= 1) {
+    if (tid < s) {
+      partial[0][tid] += partial[0][tid + s]; partial[1][tid] += partial[1][tid + s];
+      partial[2][tid] += partial[2][tid + s]; partial[3][tid] += partial[3][tid + s];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (tid == 0) {
+    vstore_half(partial[0][0], 0, out + n_base + 0);
+    vstore_half(partial[1][0], 0, out + n_base + 1);
+    vstore_half(partial[2][0], 0, out + n_base + 2);
+    vstore_half(partial[3][0], 0, out + n_base + 3);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TEMPLATED buffer-path Q4 GEMV for on-device sweeps.
+//
+// Same math as gemv_m1_q4_no4_buf, but WG_SIZE (threads per group) and Q4_NOUT
+// (output rows per group) are compile-time -D options, so the host can build the
+// same source N times and time each configuration on the REAL device. Sweeping
+// these on-device is the only honest way to pick them: a device iteration costs
+// an APK upload plus a 270 MB model re-download, so guessing one variant per
+// round trip is hopeless — this measures 15-20 in a single run.
+//
+// Local memory is Q4_NOUT * WG_SIZE * 4 B. On a 4 KB device (PowerVR Rogue) the
+// larger corners exceed the budget and simply fail to launch; the sweep reports
+// them as FAIL rather than pretending they ran.
+#ifndef Q4_NOUT
+#define Q4_NOUT 4
+#endif
+
+__kernel
+__attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
+void gemv_m1_q4_buf_t(
+    __global const half*   x,
+    __global const uchar4* W,
+    __global const half*   scales,
+    __global half*         out,
+    const int N,
+    const int K) {
+  const int n_base = (int)get_group_id(0) * Q4_NOUT;
+  const int tid    = (int)get_local_id(0);
+  if (n_base >= N) return;
+
+  const int px_per_row = K >> 3;
+  const int blk_stride = K >> 5;
+
+  float acc[Q4_NOUT];
+  #pragma unroll
+  for (int r = 0; r < Q4_NOUT; ++r) acc[r] = 0.0f;
+
+  for (int pix = tid; pix < px_per_row; pix += WG_SIZE) {
+    const int x_off = pix * 8;
+    const int blk   = pix >> 2;
+    const float4 xv0 = vload_half4(0, x + x_off);
+    const float4 xv1 = vload_half4(0, x + x_off + 4);
+
+    #pragma unroll
+    for (int r = 0; r < Q4_NOUT; ++r) {
+      const uchar4 c = W[(size_t)(n_base + r) * px_per_row + pix];
+      const uint4  p = (uint4)((uint)c.x, (uint)c.y, (uint)c.z, (uint)c.w);
+      int w0, w1, w2, w3, w4, w5, w6, w7;
+      UNPACK8_FROM_PIXEL(p, w0, w1, w2, w3, w4, w5, w6, w7);
+      const float d = xv0.x*(float)w0 + xv0.y*(float)w1 + xv0.z*(float)w2 + xv0.w*(float)w3
+                    + xv1.x*(float)w4 + xv1.y*(float)w5 + xv1.z*(float)w6 + xv1.w*(float)w7;
+      acc[r] += d * vload_half((size_t)(n_base + r) * blk_stride + blk, scales);
+    }
+  }
+
+  __local float partial[Q4_NOUT][WG_SIZE];
+  #pragma unroll
+  for (int r = 0; r < Q4_NOUT; ++r) partial[r][tid] = acc[r];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int s = WG_SIZE / 2; s > 0; s >>= 1) {
+    if (tid < s) {
+      #pragma unroll
+      for (int r = 0; r < Q4_NOUT; ++r) partial[r][tid] += partial[r][tid + s];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (tid == 0) {
+    #pragma unroll
+    for (int r = 0; r < Q4_NOUT; ++r) vstore_half(partial[r][0], 0, out + n_base + r);
+  }
+}

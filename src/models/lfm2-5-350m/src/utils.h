@@ -129,6 +129,11 @@ bool nnopt_register_int8_weight(cl_mem W_int8, cl_mem scale_fp16, int N, int K);
 // Q4 (block-32 symmetric) register. W_q4 holds K/2 packed bytes per row;
 // scale_fp16 holds K/32 fp16 scales per row. pytorch_linear() at M=1 prefers
 // the Q4 path over int8 over fp16.
+// On-device Q4 GEMV configuration sweep (NNOPT_SWEEP=1, or -DNNOPT_SWEEP_DEFAULT_ON).
+// Times gemv_m1_q4_buf_t across (WG_SIZE x Q4_NOUT) against the real weights and
+// checks each against the shipped kernel. Results go to stderr -> logcat.
+void nnopt_q4_sweep(cl_command_queue queue);
+
 bool nnopt_register_q4_weight(cl_mem W_q4, cl_mem scale_fp16, int N, int K);
 
 // MLP w3 + silu_mul fused into one kernel. Reads gate_inout[n] (= w1·x

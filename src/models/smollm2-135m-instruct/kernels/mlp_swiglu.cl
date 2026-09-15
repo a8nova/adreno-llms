@@ -30,5 +30,5 @@ __kernel void silu_mul(__global const storage_t* gate,
     float silu = g * sigmoid_f(g);
     float y = silu * u;
 
-    STORE(out, gid, (storage_t)y);
+    STORE(out, gid, y);
 }

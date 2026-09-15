@@ -144,11 +144,19 @@ else()
         message(STATUS "Pre-built CLBlast not found — fetching from source (first build only)...")
     endif()
     include(FetchContent)
+    # EDGI_POWERVR_GETINFO_PATCH — see third_party/clblast-powervr-getinfo.patch.
+    # CLBlast size-probes clGetDeviceInfo for parameters whose size it already
+    # knows; PowerVR Rogue GE8320 rejects that probe for MAX_CLOCK_FREQUENCY and
+    # MAX_WORK_ITEM_SIZES, and MaxWorkItemSizes() runs on EVERY kernel launch, so
+    # every routine returned -30 and all ports were dead on that GPU. The patched
+    # source lives under build/ which is NOT in git — this PATCH_COMMAND is what
+    # makes the fix survive a clean build. Re-verify if GIT_TAG is bumped.
     FetchContent_Declare(
         clblast
         GIT_REPOSITORY https://github.com/CNugteren/CLBlast.git
         GIT_TAG 1.6.3
         GIT_SHALLOW TRUE
+        PATCH_COMMAND patch -p1 -N -r - < "${CMAKE_CURRENT_SOURCE_DIR}/third_party/clblast-powervr-getinfo.patch" || true
     )
     if(ANDROID)
         set(BUILD_SHARED_LIBS ON CACHE BOOL "Android: build CLBlast shared (deployed via Deploy)" FORCE)

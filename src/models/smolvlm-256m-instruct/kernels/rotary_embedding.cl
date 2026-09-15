@@ -41,8 +41,8 @@ __kernel void rotary_embedding_cos_sin_scale(
     const float c = cos(e) * attention_scaling;
     const float s = sin(e) * attention_scaling;
 
-    STORE(cos_out, gid, (storage_t)c);
-    STORE(sin_out, gid, (storage_t)s);
+    STORE(cos_out, gid, c);
+    STORE(sin_out, gid, s);
 }
 
 // Optional fused kernel: compute emb/cos/sin directly from inv_freq and position_ids.
@@ -81,6 +81,6 @@ __kernel void rotary_embedding_from_inv_freq_and_positions(
     const float c = cos(e) * attention_scaling;
     const float sn = sin(e) * attention_scaling;
 
-    STORE(cos_out, gid, (storage_t)c);
-    STORE(sin_out, gid, (storage_t)sn);
+    STORE(cos_out, gid, c);
+    STORE(sin_out, gid, sn);
 }

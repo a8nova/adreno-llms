@@ -21,5 +21,5 @@ __kernel void add_residual_inplace(
   if (i >= n) return;
   const float a = (float)LOAD(x, i);
   const float b = (float)LOAD(res, i);
-  STORE(x, i, (storage_t)(a + b));
+  STORE(x, i, (a + b));
 }

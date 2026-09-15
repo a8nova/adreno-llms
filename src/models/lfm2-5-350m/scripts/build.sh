@@ -37,6 +37,20 @@ done
 
 # Dtype: NNOPT_DTYPE=fp16 builds the half-precision binary into build/fp16/
 # with -DNNOPT_DTYPE=fp16. Default is now fp16 (fp32 is untested/unsupported).
+# NNOPT_EXTRA_CMAKE: extra args forwarded verbatim to the cmake configure step.
+# Used for opt-in diagnostic builds so their defaults never leak into a normal
+# build, e.g. the dispatch tracer:
+#   NNOPT_EXTRA_CMAKE='-DCMAKE_CXX_FLAGS=-DNNOPT_KERNEL_TRACE_DEFAULT_ON=1'
+#
+# It is expanded UNQUOTED so several cmake args can be passed, which means it
+# cannot carry a value containing spaces. Putting two -D defines inside one
+# -DCMAKE_CXX_FLAGS=... therefore silently splits: the second becomes a cmake
+# CACHE VARIABLE, never reaches the compiler, and the feature you were building
+# for is quietly absent. That cost a whole on-device session once.
+#
+# NNOPT_EXTRA_CXXFLAGS: use THIS for one-or-more compiler defines. It is quoted,
+# so spaces are safe:
+#   NNOPT_EXTRA_CXXFLAGS='-DNNOPT_PROFILE_DEFAULT_ON=1 -DNNOPT_SWEEP_DEFAULT_ON=1'
 NNOPT_DTYPE="${NNOPT_DTYPE:-fp16}"
 case "$NNOPT_DTYPE" in
     fp16) BUILD_DIR="build/fp16"; CMAKE_DTYPE_ARG="-DNNOPT_DTYPE=fp16" ;;
@@ -165,6 +179,8 @@ cmake "$PROJECT_ROOT" \
     $CMAKE_OPENCL_ARG \
     $CMAKE_DTYPE_ARG \
     -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+    ${NNOPT_EXTRA_CMAKE:-} \
+    ${NNOPT_EXTRA_CXXFLAGS:+"-DCMAKE_CXX_FLAGS=$NNOPT_EXTRA_CXXFLAGS"} \
     $NNOPT_DEBUG_FLAG
 
 # Build

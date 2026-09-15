@@ -880,7 +880,9 @@ void lfm2_flash_attn_decode(
     barrier(CLK_LOCAL_MEM_FENCE);
   }
 
-  vstore_half((half)(o / s), qh * head_dim + d, out_heads);
+  // No (half) cast: vstore_half is defined for float only, and casting the
+  // argument to half makes the call ambiguous on strict compilers.
+  vstore_half(o / s, qh * head_dim + d, out_heads);
 }
 #else
 __kernel __attribute__((reqd_work_group_size(64, 1, 1)))

@@ -24,5 +24,5 @@ __kernel void bias_add_2d(__global storage_t* x,
   const long idx = (long)r * (long)cols + (long)c;
   float v = (float)LOAD(x, idx);
   float b = (float)LOAD(bias, c);
-  STORE(x, idx, (storage_t)(v + b));
+  STORE(x, idx, (v + b));
 }

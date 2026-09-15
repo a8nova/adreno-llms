@@ -74,8 +74,12 @@ __kernel void rope_apply_qk(
   float out1 = x1 * c - x2 * s;
   float out2 = x2 * c + x1 * s;
 
-  // IMPORTANT: STORE expects a float value, but storage_t is half under fp16.
-  // Explicit cast prevents any compiler-specific ambiguity on some OpenCL drivers.
-  STORE(buf, base + hd, (storage_t)out1);
-  STORE(buf, base + hd + half_dim, (storage_t)out2);
+  // IMPORTANT: STORE takes a *float*. Under fp16 it expands to vstore_half(), which
+  // the OpenCL spec defines only for float (and double) — there is no half overload.
+  // Casting to storage_t (= half) here made overload resolution fail on strict
+  // compilers (PowerVR Rogue rejects it; Adreno silently promoted it back to float).
+  // out1/out2 are already float, so pass them through unmodified — matching every
+  // other STORE site in this port, e.g. block_fused.cl rope_apply.
+  STORE(buf, base + hd, out1);
+  STORE(buf, base + hd + half_dim, out2);
 }

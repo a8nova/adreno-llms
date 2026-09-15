@@ -710,3 +710,40 @@ static inline void nnopt_install_crash_handler() {
     sigaction(SIGABRT, &sa, nullptr);
     sigaction(SIGBUS,  &sa, nullptr);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Kernel dispatch trace — hunts "NDRANGE_KERNEL executed abnormally".
+//
+// The command queue is asynchronous, so a kernel that faults is not reported at
+// its own enqueue; the error surfaces at the next BLOCKING call (typically the
+// clEnqueueReadBuffer of logits), 15 dispatches later. That names the wrong
+// kernel. This wraps every clEnqueueNDRangeKernel so each dispatch is followed
+// by clFinish() and an error check, reporting file:line + the kernel's real
+// name from CL_KERNEL_FUNCTION_NAME.
+//
+// OFF by default: costs one cached bool test per dispatch. Compile the
+// diagnostic build with -DNNOPT_KERNEL_TRACE_DEFAULT_ON=1 so it works inside
+// the app, where no env-var plumbing to the engine process is known to exist.
+// Force off at runtime with NNOPT_KERNEL_TRACE=0.
+// ─────────────────────────────────────────────────────────────────────────────
+static inline bool nnopt_kernel_trace_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* env = getenv("NNOPT_KERNEL_TRACE");
+#ifdef NNOPT_KERNEL_TRACE_DEFAULT_ON
+        cached = (env && (env[0] == '0' || env[0] == '\0')) ? 0 : 1;
+#else
+        cached = (env && env[0] != '0' && env[0] != '\0') ? 1 : 0;
+#endif
+    }
+    return cached == 1;
+}
+
+cl_int nnopt_enqueue_ndrange_traced(
+    const char* file, int line,
+    cl_command_queue queue, cl_kernel kernel, cl_uint work_dim,
+    const size_t* global_offset, const size_t* global_size, const size_t* local_size,
+    cl_uint num_wait, const cl_event* wait_list, cl_event* event);
+
+#define clEnqueueNDRangeKernel(q, k, d, gwo, gws, lws, nw, wl, ev) \
+    nnopt_enqueue_ndrange_traced(__FILE__, __LINE__, (q), (k), (d), (gwo), (gws), (lws), (nw), (wl), (ev))

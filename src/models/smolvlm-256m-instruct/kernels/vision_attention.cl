@@ -300,7 +300,7 @@ __kernel void mha_scores(
 #endif
 
   const long idx = ((((long)b * (long)H + (long)h) * (long)T + (long)tq) * (long)T + (long)tk);
-  STORE(scores, idx, (storage_t)(acc * scale));
+  STORE(scores, idx, (acc * scale));
 }
 
 // Add attention mask in-place: scores += mask
@@ -324,7 +324,7 @@ __kernel void mha_add_mask(
 
   float v = (float)LOAD(scores, idx);
   float m = (float)LOAD(mask, midx);
-  STORE(scores, idx, (storage_t)(v + m));
+  STORE(scores, idx, (v + m));
 }
 
 // Parallel softmax: one WG per (b, h, tq) row, 64 threads cooperatively reduce
@@ -402,13 +402,13 @@ __kernel void mha_softmax(
     float v = (float)LOAD(scores, base + tk);
     float e = exp(v - maxv);
     sum += e;
-    STORE(scores, base + tk, (storage_t)e);
+    STORE(scores, base + tk, e);
   }
 
   const float inv = 1.0f / (sum + 1e-20f);
   for (int tk = 0; tk < T; ++tk) {
     float e = (float)LOAD(scores, base + tk);
-    STORE(scores, base + tk, (storage_t)(e * inv));
+    STORE(scores, base + tk, (e * inv));
   }
 }
 
@@ -500,10 +500,10 @@ __kernel void mha_out(
     acc += p * vv;
   }
   const long out_idx = (((long)b * (long)H + (long)h) * (long)T + (long)tq) * (long)D + (long)d4 * 4;
-  STORE(out, out_idx + 0, (storage_t)acc.s0);
-  STORE(out, out_idx + 1, (storage_t)acc.s1);
-  STORE(out, out_idx + 2, (storage_t)acc.s2);
-  STORE(out, out_idx + 3, (storage_t)acc.s3);
+  STORE(out, out_idx + 0, acc.s0);
+  STORE(out, out_idx + 1, acc.s1);
+  STORE(out, out_idx + 2, acc.s2);
+  STORE(out, out_idx + 3, acc.s3);
 #else
   float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
   for (int tk = 0; tk < T; ++tk) {
@@ -515,10 +515,10 @@ __kernel void mha_out(
     a3 += p * (float)LOAD(V, off + 3);
   }
   const long out_idx = (((long)b * (long)H + (long)h) * (long)T + (long)tq) * (long)D + (long)d4 * 4;
-  STORE(out, out_idx + 0, (storage_t)a0);
-  STORE(out, out_idx + 1, (storage_t)a1);
-  STORE(out, out_idx + 2, (storage_t)a2);
-  STORE(out, out_idx + 3, (storage_t)a3);
+  STORE(out, out_idx + 0, a0);
+  STORE(out, out_idx + 1, a1);
+  STORE(out, out_idx + 2, a2);
+  STORE(out, out_idx + 3, a3);
 #endif
 }
 

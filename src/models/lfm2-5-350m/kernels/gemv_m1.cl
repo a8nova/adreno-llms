@@ -583,6 +583,73 @@ void gemv_stream_img(
 
 #endif  // USE_FP16
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ACCESS-PATTERN PROBE (round 3) — is the q4 decode wall a coalescing tax?
+//
+// gemv_stream_buf above reads COALESCED. The kernel that actually carries 100%
+// of q4 decode traffic on PowerVR, gemv_m1_q4_row_t, does the opposite: lane n
+// owns output row n and walks it with 4-byte uchar4 loads, so neighbouring
+// lanes sit K/2 bytes apart (512 B at K=1024). If a 4-byte load pulls a 64-byte
+// line that only one lane uses, the useful-bytes figure the sweep reports
+// (0.43-0.52 GB/s) understates real DRAM traffic by up to 16x -- which would
+// explain the otherwise contradictory "4% of the bandwidth ceiling AND 4% of
+// the ALU ceiling".
+//
+// These kernels measure exactly that. ROW and COAL read the SAME total bytes
+// with the SAME thread count and the SAME number of loads per thread; only the
+// address mapping differs, so the ratio IS the coalescing tax.
+//
+// Both families are parameterised by load width because widening the per-lane
+// load is itself a candidate optimisation -- the live kernel issues 4-byte
+// loads today, and uchar16 would cut transaction count 4x on its own.
+//
+// Dead-code discipline (see kernels/alu_probe.cl): XOR-accumulate the WHOLE
+// vector so no component can be narrowed away, and guard the store with a
+// comparison that never fires. Accumulating a single component instead would
+// let the compiler shrink the load and report a fictional bandwidth.
+//
+// Host contract: threads * loads_per_row * LOAD_BYTES == TOTAL_BYTES.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Lane n owns one contiguous row of loads_per_row*VBYTES bytes and walks it
+// sequentially. Neighbouring lanes are one row apart. Mimics gemv_m1_q4_row_t.
+#define STREAM_ROW_KERNEL(NAME, VTYPE, VBYTES)                                  \
+__kernel __attribute__((reqd_work_group_size(64, 1, 1)))                        \
+void NAME(__global const uchar* src,                                            \
+          __global float* dce_sink,                                             \
+          const int loads_per_row) {                                            \
+  const size_t n = get_global_id(0);                                            \
+  __global const VTYPE* row =                                                   \
+      (__global const VTYPE*)(src + n * (size_t)loads_per_row * VBYTES);        \
+  VTYPE acc = (VTYPE)(0);                                                       \
+  for (int j = 0; j < loads_per_row; ++j) acc ^= row[j];                        \
+  if (all(acc == (VTYPE)(0xAB))) dce_sink[n] = 1.0f;                            \
+}
+
+// Same thread count, same loads per thread, same total bytes -- but at each
+// iteration the whole grid reads one contiguous span, so neighbouring lanes
+// read neighbouring elements. This is the baseline the ROW family is measured
+// against.
+#define STREAM_COAL_KERNEL(NAME, VTYPE, VBYTES)                                 \
+__kernel __attribute__((reqd_work_group_size(64, 1, 1)))                        \
+void NAME(__global const uchar* src,                                            \
+          __global float* dce_sink,                                             \
+          const int loads_per_row) {                                            \
+  const size_t gid = get_global_id(0);                                          \
+  const size_t gsz = get_global_size(0);                                        \
+  __global const VTYPE* base = (__global const VTYPE*)src;                      \
+  VTYPE acc = (VTYPE)(0);                                                       \
+  for (int j = 0; j < loads_per_row; ++j) acc ^= base[(size_t)j * gsz + gid];   \
+  if (all(acc == (VTYPE)(0xAB))) dce_sink[gid] = 1.0f;                          \
+}
+
+STREAM_ROW_KERNEL(stream_row_u4,   uchar4,   4)
+STREAM_ROW_KERNEL(stream_row_u8,   uchar8,   8)
+STREAM_ROW_KERNEL(stream_row_u16,  uchar16, 16)
+STREAM_COAL_KERNEL(stream_coal_u4,  uchar4,   4)
+STREAM_COAL_KERNEL(stream_coal_u8,  uchar8,   8)
+STREAM_COAL_KERNEL(stream_coal_u16, uchar16, 16)
+
 // Tiny kernel for the recordable-queues probe (cl_qcom_recordable_queues).
 // Does almost nothing per dispatch so per-launch CPU overhead dominates,
 // exposing any bookkeeping savings the recording API provides.

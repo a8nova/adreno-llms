@@ -54,20 +54,20 @@ void dump_summary() {
     uint64_t grand_total_ns = 0;
     for (const auto& kv : sorted) grand_total_ns += kv.second.total_ns;
 
-    fprintf(stderr, "\n=== KERNEL PROFILE (env NNOPT_KERNEL_PROFILE=1) ===\n");
-    fprintf(stderr, "%-32s %12s %8s %12s %8s\n", "label", "total_ms", "%total", "calls", "avg_us");
-    fprintf(stderr, "%-32s %12s %8s %12s %8s\n", "--------------------------------",
-            "------------", "--------", "------------", "--------");
+    fprintf(stderr, "\nNNOPT_PROF: === KERNEL PROFILE ===\n");
+    fprintf(stderr, "NNOPT_PROF: %-30s %10s %7s %8s %9s\n", "label", "total_ms", "%total", "calls", "avg_us");
     for (const auto& kv : sorted) {
         const std::string& name = kv.first;
         const Profile& p = kv.second;
         double total_ms = p.total_ns / 1.0e6;
         double pct      = grand_total_ns > 0 ? 100.0 * (double)p.total_ns / (double)grand_total_ns : 0.0;
         double avg_us   = p.count > 0 ? (p.total_ns / 1.0e3) / (double)p.count : 0.0;
-        fprintf(stderr, "%-32s %12.3f %7.2f%% %12d %8.2f\n",
+        // NNOPT_PROF prefix so ProcessEngine's logcat mirror forwards these — without
+        // it the table only exists in the in-app dialog and has to be OCR'd.
+        fprintf(stderr, "NNOPT_PROF: %-30s %10.3f %6.2f%% %8d %9.2f\n",
                 name.c_str(), total_ms, pct, p.count, avg_us);
     }
-    fprintf(stderr, "=== TOTAL GPU kernel time: %.3f ms ===\n\n", grand_total_ns / 1.0e6);
+    fprintf(stderr, "NNOPT_PROF: === TOTAL GPU kernel time: %.3f ms ===\n\n", grand_total_ns / 1.0e6);
 }
 
 void reset() {

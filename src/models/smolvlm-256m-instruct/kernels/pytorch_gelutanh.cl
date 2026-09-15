@@ -40,5 +40,5 @@ __kernel void gelu_tanh_forward(
     const float t = tanh(inner);
     const float yf = 0.5f * xf * (1.0f + t);
 
-    STORE(out, gid, (storage_t)yf);
+    STORE(out, gid, yf);
 }

@@ -20,5 +20,5 @@ __kernel void silu_forward(
   if (i >= n_elements) return;
   const float v = (float)LOAD(x, i);
   const float s = 1.0f / (1.0f + exp(-v));
-  STORE(y, i, (storage_t)(v * s));
+  STORE(y, i, (v * s));
 }
