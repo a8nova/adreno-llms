@@ -51,6 +51,7 @@ bool load_fixture(SongConditioning& out, std::string& why) {
     if (!read_f32_exact("weights/optest_source.bin", kSourceLen, out.source, why)) return false;
     out.name = "fixture";
     out.is_fixture = true;
+    out.temporal_from_fixture = true;
     return true;
 }
 
@@ -82,6 +83,7 @@ bool song_load_conditioning(const std::string& style, SongConditioning& out, std
             return true;
         }
         out.temporal_input.assign(all.begin(), all.begin() + kTemporalDim);
+        out.temporal_from_fixture = false;
         out.source.assign(all.begin() + kTemporalDim, all.end());
         out.name = style;
         out.is_fixture = false;

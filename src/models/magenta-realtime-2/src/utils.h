@@ -248,7 +248,8 @@ void nnopt_int8_summary(char* buf, size_t n);
 // Device-resident AR position; see utils.cpp. `constant=true` returns an immutable per-value buffer
 // (the depth body's RVQ level, which repeats identically every frame); false returns the shared
 // buffer whose contents are rewritten between replays. Writes always go to the live queue.
-cl_mem nnopt_pos_buffer(OpenCLContext& cl_ctx, cl_command_queue queue, int pos, bool constant = false);
+cl_mem nnopt_pos_buffer(OpenCLContext& cl_ctx, cl_command_queue queue, int pos, bool constant = false,
+                        int slot = 0);
 void   nnopt_set_live_queue(cl_command_queue q);
 
 
@@ -300,10 +301,56 @@ bool nnopt_copy_buffer(OpenCLContext& cl_ctx, cl_mem src, cl_mem dst,
                        const std::string& site, const char* suffix = nullptr);
 bool nnopt_record_safe();
 
+// ── software global barrier: probe + verdict ────────────────────────────────────────────────────
+// Runs kernels/barrier_probe.cl at a SWEEP of workgroup counts and reports the largest G at which
+// a global barrier actually completes. That number is the residency bound every megakernel launch
+// must respect; above it, workgroups queue behind one another and a barrier can never be satisfied.
+// Safe to call unconditionally: every spin inside the kernel is bounded, so a failure prints 0
+// instead of hanging the GPU.
+void nnopt_barrier_probe(OpenCLContext& cl_ctx);
+int  nnopt_barrier_max_groups();   // 0 = barrier unusable on this device
+
+// Depth-MLP megakernel: pre-norm + dense1 + GELU + dense2 in ONE dispatch instead of two.
+// Returns null when the shapes or weights are not eligible, so callers fall through to the split
+// path. Enabled by NNOPT_MEGAMLP=1 and only ever reached when the barrier probe passed.
+bool   nnopt_megamlp_enabled();
+cl_mem nnopt_depth_mlp_mega(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queue,
+                            cl_mem x, const std::string& wp, const std::string& rms_key);
+
 cl_mem nnopt_gemv_fused(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queue,
                         cl_mem x, const std::string& w_key,
                         int rows, int in_dim, int out_dim, cl_mem bias,
                         const std::string& rms_key, bool apply_gelu);
+
+// ── deferred post-norm + residual (RESADD) ──────────────────────────────────────────────────────
+// A block ends `out = resid + rms2(proj)` and the NEXT block's first GEMV immediately pre-norms
+// `out`. Those are two dispatches for one value, and rms_add is 84 dispatches/frame for 0.54 ms of
+// GPU work. Instead the block leaves the pair PENDING here and the next pre-norm GEMV forms `out`
+// in its own registers (kernel flag RESADD), materialising it once for the following residual.
+//
+// A slot rather than a parameter because the consuming GEMV sits three call levels down, inside
+// MLP_forward / CachedSelfAttention_forward / CrossAttention_forward, and all three reach the same
+// nnopt_gemv_fused. Threading it through would change three op signatures to say what one
+// choke point already knows. Same pattern as g_live_queue / g_sample_seed.
+//
+// CONTRACT, and it is what makes this safe: arming is a REQUEST, never an assumption. The slot is
+// consumed only by a pre-norm GEMV whose in_dim matches. If nothing consumes it — a shape that
+// falls off the fused path, a quantised weight, fuse level too low — the arming site materialises
+// it with the standalone kernel and the result is identical, just one dispatch dearer.
+struct NnoptResAdd {
+    cl_mem proj  = nullptr;   // un-normalised block output; becomes the GEMV's `x`
+    cl_mem resid = nullptr;   // pre-block input to add
+    cl_mem scale = nullptr;   // fp16 post-norm weight
+    cl_mem out   = nullptr;   // where the GEMV materialises resid + rms2(proj)
+    int    dim   = 0;
+    float  eps   = 1e-6f;
+    std::string wp;           // post-norm weight prefix, for the fallback path
+};
+bool nnopt_resadd_enabled();              // NNOPT_FUSERA=1; default OFF
+void nnopt_resadd_arm(const NnoptResAdd& ra);
+bool nnopt_resadd_consumed();             // did a GEMV take it?
+NnoptResAdd nnopt_resadd_pending();       // what is armed (empty if nothing)
+void nnopt_resadd_clear();
 
 cl_mem nnopt_gemv(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queue,
                   cl_mem x, const std::string& w_key,

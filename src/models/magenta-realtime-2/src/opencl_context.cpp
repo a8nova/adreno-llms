@@ -29,14 +29,30 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
     if (platform_idx >= (int)num_platforms) platform_idx = 0;
     platform_ = platforms[platform_idx];
 
-    cl_uint num_devices;
-    clGetDeviceIDs(platform_, CL_DEVICE_TYPE_ALL, 0, nullptr, &num_devices);
-    if (num_devices == 0) return false;
+    // Enumerate GPUs FIRST; fall back to ALL only if the platform reports none. Apple's OpenCL
+    // answers a CL_DEVICE_TYPE_ALL query here with TWO entries whose first is a junk sentinel —
+    // 0xFFFFFFFF, which is the numeric value of CL_DEVICE_TYPE_ALL itself — and the real GPU is
+    // second. Taking devices[0] then hands every later call a handle the driver does NOT reject:
+    // it answers with generic defaults, so the banner reads plausibly ("Apple M1", 8 CUs) while
+    // CL_DEVICE_MAX_WORK_GROUP_SIZE reports 1024 against a real 256 and CL_KERNEL_WORK_GROUP_SIZE
+    // reports 1 with zero local memory — which is every -54/-55 in EXP-010, and why an identical
+    // standalone build behaved differently: it was querying the real device.
+    // Android is unaffected — a GPU query there returns the Adreno, which is what devices[0]
+    // already was — and a GPU-typed query is what this code wanted on every platform anyway.
+    cl_uint num_devices = 0;
+    cl_device_type want = CL_DEVICE_TYPE_GPU;
+    if (clGetDeviceIDs(platform_, want, 0, nullptr, &num_devices) != CL_SUCCESS || num_devices == 0) {
+        want = CL_DEVICE_TYPE_ALL;
+        num_devices = 0;
+        if (clGetDeviceIDs(platform_, want, 0, nullptr, &num_devices) != CL_SUCCESS ||
+            num_devices == 0) return false;
+    }
 
-    std::vector<cl_device_id> devices(num_devices);
-    clGetDeviceIDs(platform_, CL_DEVICE_TYPE_ALL, num_devices, devices.data(), nullptr);
+    std::vector<cl_device_id> devices(num_devices, nullptr);
+    if (clGetDeviceIDs(platform_, want, num_devices, devices.data(), nullptr) != CL_SUCCESS)
+        return false;
 
-    if (device_idx >= (int)num_devices) device_idx = 0;
+    if (device_idx < 0 || device_idx >= (int)num_devices) device_idx = 0;
     device_ = devices[device_idx];
 
     cl_int err;
@@ -135,6 +151,20 @@ cl_program OpenCLContext::build_program(const std::string& source, const std::st
     }
 
     err = clBuildProgram(program, 1, &device_, effective_options.c_str(), nullptr, nullptr);
+    // NNOPT_CLLOG=1 — dump the build log even on SUCCESS. A build that "succeeds" can still produce
+    // a degenerate kernel (macOS host: CL_KERNEL_WORK_GROUP_SIZE=1, LOCAL_MEM_SIZE=0 on a kernel
+    // that declares 2 KB of __local), and the warning that explains it is only in this log.
+    if (err == CL_SUCCESS && std::getenv("NNOPT_CLLOG")) {
+        size_t n = 0;
+        clGetProgramBuildInfo(program, device_, CL_PROGRAM_BUILD_LOG, 0, nullptr, &n);
+        std::string log(n ? n - 1 : 0, '\0');
+        if (n) clGetProgramBuildInfo(program, device_, CL_PROGRAM_BUILD_LOG, n, &log[0], nullptr);
+        cl_build_status st = CL_BUILD_NONE;
+        clGetProgramBuildInfo(program, device_, CL_PROGRAM_BUILD_STATUS, sizeof(st), &st, nullptr);
+        std::fprintf(stderr, "CLLOG opts=\"%s\" status=%d log=%s\n",
+                     effective_options.c_str(), (int)st, log.empty() ? "(empty)" : log.c_str());
+        std::fflush(stderr);
+    }
     if (err != CL_SUCCESS) {
         NNOPT_ERROR_FMT("clBuildProgram FAILED (err=%d)", (int)err);
         size_t log_size = 0;

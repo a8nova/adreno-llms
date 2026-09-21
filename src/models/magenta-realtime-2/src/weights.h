@@ -16,6 +16,9 @@ public:
 
     // Check if a tensor key exists in the weight file
     bool has_tensor(const std::string& key) const;
+    // Every tensor name in the loaded bundle. Exists so a diagnostic can ask what a bundle
+    // actually contains rather than inferring it from the filename — see WEIGHTS_INFO in main.cpp.
+    std::vector<std::string> tensor_keys() const;
 
     // Get a weight tensor as an OpenCL buffer. Creates the buffer lazily on
     // first call (avoids double allocation if layers also call set_weights).

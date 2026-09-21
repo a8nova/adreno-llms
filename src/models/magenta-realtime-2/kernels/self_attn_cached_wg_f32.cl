@@ -19,14 +19,22 @@
 
 __kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
 void self_attn_cached_wg_f32(
-    __global const float* qkv, __global const float* kcache, __global const float* vcache,
+    // kcache/vcache are WRITABLE because append_kv folds kv_append_f32 into this kernel.
+    __global const float* qkv, __global float* kcache, __global float* vcache,
     __global const half* sink_k, __global const half* sink_v, __global const half* pds,
     __global float* out, const int H, const int D,
     // pos comes from a BUFFER so one recorded dispatch can serve every frame — see kv_append_f32.cl.
     // max_past_in < 0 means "unbounded" (the depth body), which resolves to pos+1 here rather than
     // on the host, since the host value would be baked into a recording.
     __global const int* posb, const int has_sink,
-    const float inv_sqrt_d, const int max_past_in){
+    const float inv_sqrt_d, const int max_past_in,
+    // append_kv=1 folds kv_append_f32 into this kernel, removing one dispatch per attention site
+    // (36/frame, 2.2 us of GPU work each against ~55 us of HOST cost to launch — a 25:1 overhead
+    // ratio). It is safe at WORKGROUP scope and needs no global barrier: the cache is laid out
+    // [pos][head][dim], workgroup h writes only head h's D-element slice at `pos`, and the
+    // attention below reads only head h's slice. No workgroup ever reads another's write, so the
+    // local barrier that already exists before the score loop is sufficient ordering.
+    const int append_kv){
   const int pos = posb[0];
   const int max_past = (max_past_in < 0) ? (pos + 1) : max_past_in;
   const int h   = get_group_id(0);
@@ -39,6 +47,18 @@ void self_attn_cached_wg_f32(
   int lo = pos - max_past; if (lo < 0) lo = 0;
   const int ns = has_sink ? 1 : 0;
   const int n  = ns + (pos - lo + 1);
+
+  // ── folded kv_append ────────────────────────────────────────────────────────────────────────
+  // Identical arithmetic to kv_append_f32.cl: k starts one HD block into qkv, v two blocks in.
+  // Strided over the workgroup because D (<=MAXD) may exceed WG.
+  if (append_kv) {
+    const size_t dstb = (size_t)pos * (size_t)HD + qb;
+    for (int d = lid; d < D; d += WG) {
+      kcache[dstb + d] = qkv[HD + qb + d];
+      vcache[dstb + d] = qkv[2 * HD + qb + d];
+    }
+    barrier(CLK_GLOBAL_MEM_FENCE);
+  }
 
   __local float sc_l[MAXD];        // r * inv_sqrt_d * softplus(pds[d]) — computed ONCE
   __local float scores[MAXPOS];

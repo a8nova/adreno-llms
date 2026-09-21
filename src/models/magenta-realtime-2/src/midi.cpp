@@ -111,6 +111,22 @@ bool midi_apply_to_conditioning(const MidiState& midi, std::vector<int32_t>& tok
 // right: the common render leaves all 128 note channels at -1 and then asked the model to follow
 // that empty conditioning at 3.0, which no upstream path does.
 static const int kCfg[3] = {20, 10, 2};
+// Quantisation step per channel, from magenta_rt/config.py: musiccoca and notes share
+// CFG_CONDITIONING_MUSICCOCA_NOTES (step 0.2), drums has CFG_CONDITIONING_DRUMS (step 1.0).
+static const float kCfgStep[3] = {0.2f, 0.2f, 1.0f};
+
+// The SAME three scales as floats, for the logit-space guidance. Derived from kCfg rather than
+// written out again: the conditioning channels tell the model how hard to follow each stream and
+// the guidance actually does it, so if those two ever disagreed the model would be told one thing
+// and given another, silently.
+void midi_cfg_scales(float* musiccoca, float* notes, float* drums) {
+    const float v0 = -1.0f + kCfgStep[0] * (float)kCfg[0];   // 3.0
+    const float v1 = -1.0f + kCfgStep[1] * (float)kCfg[1];   // 1.0
+    const float v2 = -1.0f + kCfgStep[2] * (float)kCfg[2];   // 1.0
+    if (musiccoca) *musiccoca = v0;
+    if (notes)     *notes     = v1;
+    if (drums)     *drums     = v2;
+}
 
 bool midi_build_conditioning(const std::vector<int32_t>& style_tokens, const MidiState* midi,
                              std::vector<int32_t>& out) {

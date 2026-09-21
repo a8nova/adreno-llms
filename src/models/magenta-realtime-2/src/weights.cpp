@@ -313,6 +313,13 @@ bool Weights::has_tensor(const std::string& key) const {
     return tensors_.find(key) != tensors_.end();
 }
 
+std::vector<std::string> Weights::tensor_keys() const {
+    std::vector<std::string> out;
+    out.reserve(tensors_.size());
+    for (const auto& kv : tensors_) out.push_back(kv.first);
+    return out;
+}
+
 // Weight-upload roundtrip verifier. Reads back a small sample of the GPU
 // buffer (first 64 bytes) and compares byte-for-byte against the host mmap
 // region. If they disagree the GPU upload is silently corrupting weights —

@@ -28,6 +28,17 @@
 // reset only with the session) — it was previously unused on this path. NNOPT_XATTNDEPTH overrides
 // the depth for A/B: 1 restores the pre-fix behaviour, no rebuild needed.
 //
+// ── two implementations, and when each is right ────────────────────────────────────────────────
+// ln(N) is exact only while the conditioning is CONSTANT, which is the single-prompt case. Drag a
+// blend and the ring's 42 vectors stop being identical: upstream then cross-fades the change over
+// 42 frames (1.68 s) because the ring still holds the old conditioning, whereas one source
+// switches instantly. That is the staircase heard on 2-3 prompt blends.
+//
+// So when the caller hands down a ring (k_cache_inout/v_cache_inout — previously unused here, like
+// start_pos), this keeps the real thing: PROJECTED k/v per slot, written round-robin at pos % S.
+// Projection stays one GEMV per layer per frame exactly as before — only the attention widens,
+// from 2 keys to n_valid+1. Callers with no ring (the op-test path) keep the ln(N) form.
+//
 //   q  = hidden @ q_proj.weight.T        [H*D]            (q_proj: in_dim -> H*D)
 //   kv = source @ kv_proj.weight.T       [2*H*D]          (kv_proj: src_dim -> 2*H*D)
 //   k = kv[:H*D], v = kv[H*D:]
@@ -54,7 +65,7 @@ cl_mem CrossAttention_forward(
     cl_mem* k_cache_inout, cl_mem* v_cache_inout, cl_mem encoder_hidden_states,
     const char* weight_prefix, const char* prenorm_prefix)
 {
-    (void)layer_idx;(void)k_cache_inout;(void)v_cache_inout;
+    (void)layer_idx;
     const std::string wp = weight_prefix ? std::string(weight_prefix) : std::string();
     if (wp.empty() || !input) { NNOPT_ERROR("CrossAttention: null wp/input"); return nullptr; }
     if (!encoder_hidden_states) { NNOPT_ERROR("CrossAttention: null source"); return nullptr; }
@@ -87,7 +98,22 @@ cl_mem CrossAttention_forward(
     // frame 0 — one source, ln(1) = 0, byte-identical to the old behaviour.
     const int n_src = (start_pos < 0) ? 1
                     : (start_pos + 1 < max_src ? start_pos + 1 : max_src);
-    const float log_n = std::log((float)n_src);
+    // log_n is no longer computed here: it is derived on device from the xpos buffer inside the
+    // sink kernels. N = min(xpos+1, max_src) grows every frame until it saturates, so a host
+    // float here was a per-frame value baked into a kernel argument, and a recording pins
+    // argument values at capture — every replayed frame reused the captured frame's ln(2).
+    // n_src stays: the RING path still passes it, and that path already vetoes recording.
+    // OFF BY DEFAULT (NNOPT_XATTNRING=1 to arm). The ring is the reference-exact form and its math
+    // is verified against the ln(N) path offline, but it has never run on an Adreno: it ships a new
+    // kernel, and the one build that went out with it on by default produced a degenerate render.
+    // Until that is reproduced and understood, the default path stays the one that has been heard.
+    static int ring_on = -1, ring_epoch = -1;
+    if (ring_epoch != nnopt_toggle_epoch()) {
+        const char* e = std::getenv("NNOPT_XATTNRING");
+        ring_on = (e && e[0] && e[0] != '0') ? 1 : 0;
+        ring_epoch = nnopt_toggle_epoch();
+    }
+    const bool use_ring = ring_on && k_cache_inout && v_cache_inout && max_src > 1 && start_pos >= 0;
 
     cl_int err = CL_SUCCESS;
     // One workgroup per head instead of one work ITEM per head — the same serial-launch bug as the
@@ -125,28 +151,86 @@ cl_mem CrossAttention_forward(
     cl_mem kv = nnopt_gemv(cl_ctx, weights, queue, encoder_hidden_states, wp + ".kv_proj.weight",
                            1, src_dim, kv_out, nullptr);                   // [2*H*D]
     if (!q || !kv) { NNOPT_ERROR("CrossAttention: proj failed"); if(q)pool_free(q); if(kv)pool_free(kv); return nullptr; }
-    // pack [q | k | v] into one [3*H*D] buffer for the sink kernel
-    cl_mem qkv = pool_alloc(cl_ctx.context(), CL_MEM_READ_WRITE, (size_t)3*hd*sizeof(float), nullptr, &err);
-    // Kernel copies, not clEnqueueCopyBuffer: a recording captures only NDRange dispatches, so a
-    // copy here would not replay and every replayed frame would pack a stale q/kv.
-    nnopt_copy_buffer(cl_ctx, q,  qkv, 0, 0,  hd,     wp, ".xattn.packq");
-    nnopt_copy_buffer(cl_ctx, kv, qkv, 0, hd, kv_out, wp, ".xattn.packkv");
-    pool_free(q); pool_free(kv);
 
+    if (use_ring) {
+        // Ring slots hold PROJECTED k/v, not raw sources: kv_proj is per-layer, so projecting on
+        // read would cost 42 GEMVs per layer per frame instead of one. This is the same trade the
+        // self-attention KV cache already makes.
+        if (!*k_cache_inout) {
+            *k_cache_inout = pool_alloc(cl_ctx.context(), CL_MEM_READ_WRITE,
+                                        (size_t)max_src*hd*sizeof(float), nullptr, &err);
+            *v_cache_inout = pool_alloc(cl_ctx.context(), CL_MEM_READ_WRITE,
+                                        (size_t)max_src*hd*sizeof(float), nullptr, &err);
+            if (!*k_cache_inout || !*v_cache_inout) {
+                NNOPT_ERROR("CrossAttention: ring alloc"); pool_free(q); pool_free(kv); return nullptr; }
+        }
+        // The slot index is a host value baked into a dispatch argument and it advances every
+        // frame, so a captured frame would replay writing slot N forever. Veto recording rather
+        // than silently freeze the ring.
+        nnopt_record_mark_unsafe("cross-attention ring slot advances per frame");
+        const int slot = start_pos % max_src;
+        nnopt_copy_buffer(cl_ctx, kv, *k_cache_inout, 0,  slot*hd, hd, wp, ".xattn.ringk");
+        nnopt_copy_buffer(cl_ctx, kv, *v_cache_inout, hd, slot*hd, hd, wp, ".xattn.ringv");
+        pool_free(kv);
+
+        static cl_kernel rk_slot = nullptr;
+        if (!rk_slot) {
+            cl_program p = cl_ctx.build_program_from_file("kernels/sink_attention_ring_f32.cl");
+            if (!p) { NNOPT_ERROR("CrossAttention: build ring"); pool_free(q); return nullptr; }
+            rk_slot = clCreateKernel(p, "sink_attention_ring_f32", &err);
+        }
+        cl_kernel rk = nnopt_kernel_instance(rk_slot, wp, ".xattnring");
+        if (!rk) { NNOPT_ERROR("CrossAttention: ring kernel"); pool_free(q); return nullptr; }
+        cl_mem rout = pool_alloc(cl_ctx.context(), CL_MEM_READ_WRITE, (size_t)hd*sizeof(float), nullptr, &err);
+        if (!rout) { NNOPT_ERROR("CrossAttention: ring out alloc"); pool_free(q); return nullptr; }
+        clSetKernelArg(rk,0,sizeof(cl_mem),&q);
+        clSetKernelArg(rk,1,sizeof(cl_mem),k_cache_inout);
+        clSetKernelArg(rk,2,sizeof(cl_mem),v_cache_inout);
+        clSetKernelArg(rk,3,sizeof(cl_mem),&sink_k);
+        clSetKernelArg(rk,4,sizeof(cl_mem),&sink_v);
+        clSetKernelArg(rk,5,sizeof(cl_mem),&pds);
+        clSetKernelArg(rk,6,sizeof(cl_mem),&rout);
+        clSetKernelArg(rk,7,sizeof(int),&H);
+        clSetKernelArg(rk,8,sizeof(int),&D);
+        clSetKernelArg(rk,9,sizeof(float),&inv_sqrt_d);
+        clSetKernelArg(rk,10,sizeof(int),&n_src);
+        clSetKernelArg(rk,11,sizeof(int),&max_src);
+        const size_t rg=(size_t)H*64, rl=64;
+        const cl_int rerr = cl_ctx.profEnqueue(rk,1,&rg,&rl,"xattn_ring");
+        pool_free(q);
+        if (rerr != CL_SUCCESS) { NNOPT_ERROR("CrossAttention: ring enqueue"); pool_free(rout); return nullptr; }
+        return rout;
+    }
+    // NO PACKING. The sink kernel now takes q and kv as the two buffers qkv_proj already produced.
+    // Packing them into one [3*H*D] block cost two copy dispatches per call (24/frame) to move
+    // 0.05 ms of data -- ~500:1 launch cost against work -- and the unpacked form is the same values
+    // at a different offset, so this removes the launches and adds nothing. (The copies existed as
+    // KERNELS rather than clEnqueueCopyBuffer because a recording captures only NDRange dispatches;
+    // removing them entirely keeps the frame recordable for the same reason, with one less thing
+    // that can go stale on replay.)
     cl_mem out = pool_alloc(cl_ctx.context(), CL_MEM_READ_WRITE, (size_t)hd*sizeof(float), nullptr, &err);
-    clSetKernelArg(sk,0,sizeof(cl_mem),&qkv); clSetKernelArg(sk,1,sizeof(cl_mem),&sink_k);
-    clSetKernelArg(sk,2,sizeof(cl_mem),&sink_v); clSetKernelArg(sk,3,sizeof(cl_mem),&pds);
-    clSetKernelArg(sk,4,sizeof(cl_mem),&out); clSetKernelArg(sk,5,sizeof(int),&H);
-    clSetKernelArg(sk,6,sizeof(int),&D); clSetKernelArg(sk,7,sizeof(float),&inv_sqrt_d);
-    clSetKernelArg(sk,8,sizeof(float),&log_n);
+    clSetKernelArg(sk,0,sizeof(cl_mem),&q);  clSetKernelArg(sk,1,sizeof(cl_mem),&kv);
+    clSetKernelArg(sk,2,sizeof(cl_mem),&sink_k);
+    clSetKernelArg(sk,3,sizeof(cl_mem),&sink_v); clSetKernelArg(sk,4,sizeof(cl_mem),&pds);
+    clSetKernelArg(sk,5,sizeof(cl_mem),&out); clSetKernelArg(sk,6,sizeof(int),&H);
+    clSetKernelArg(sk,7,sizeof(int),&D); clSetKernelArg(sk,8,sizeof(float),&inv_sqrt_d);
+    // Slot 1 is the cross-attention's own position (see nnopt_pos_buffer): xpos, not pos.
+    cl_mem xposb = nnopt_pos_buffer(cl_ctx, queue, start_pos, /*constant=*/false, /*slot=*/1);
+    if (!xposb) { NNOPT_ERROR("CrossAttention: xpos buffer"); pool_free(q); pool_free(kv);
+                  pool_free(out); return nullptr; }
+    clSetKernelArg(sk,9,sizeof(cl_mem),&xposb);
+    clSetKernelArg(sk,10,sizeof(int),&max_src);
     // Through profEnqueue so cross-attention finally appears in the profile at all.
     cl_int xerr;
     if (par) { const size_t sg=(size_t)H*64, sl=64; xerr = cl_ctx.profEnqueue(sk,1,&sg,&sl,"xattn"); }
     else     { const size_t sg=(size_t)H;           xerr = cl_ctx.profEnqueue(sk,1,&sg,nullptr,"xattn"); }
     if(xerr!=CL_SUCCESS){
-        NNOPT_ERROR("CrossAttention: sink enqueue"); pool_free(qkv); pool_free(out); return nullptr; }
-    
-    pool_free(qkv);
+        NNOPT_ERROR("CrossAttention: sink enqueue");
+        pool_free(q); pool_free(kv); pool_free(out); return nullptr; }
+
+    // q/kv are freed HERE, not before the enqueue: the kernel reads them directly now, so they must
+    // outlive the dispatch. (They used to be freed right after being copied into the packed buffer.)
+    pool_free(q); pool_free(kv);
     return out;
 }
 }

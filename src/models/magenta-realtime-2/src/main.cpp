@@ -48,6 +48,11 @@
 #include <utility>
 #include <vector>
 
+
+// Frame-0 pipeline norms, defined in backbone.cpp. Declared HERE at file scope, not inside the
+// anonymous namespace below: an extern inside an unnamed namespace names a different symbol.
+extern double g_trace_src, g_trace_ti, g_trace_to;
+
 namespace {
 
 constexpr double kFramesPerSecond = 25.0;   // 1920 samples @ 48 kHz = 40 ms/frame
@@ -58,11 +63,17 @@ struct Options {
     // MusicCoCa text tower); the engine then computes the conditioning on device instead of reading
     // a canned vector. Empty falls back to the shipped fixture.
     std::vector<int32_t> style_tokens;
+    // Conditioning ramp for THIS request only (see SongConditioning::style_ramp). Built by the
+    // serve loop when the prompt/blend changed, so a drag arrives as a short glide rather than one
+    // 2 s cliff. Never sticky: `Options req = opt;` starts every request with it empty.
+    std::vector<int32_t> style_ramp;
+    int                  ramp_stride = 0;
     // xgemmsweep=1 — after rendering normally, re-run the CODEC once per CLBlast Xgemm candidate on
     // the tokens just produced and report the times. The device is remote, so this is the only way
     // the tuning measurement ever gets taken (handoff §6: a CLI-only measurement is never taken).
     bool xgemm_sweep = false;
     int  codecchunk_T = 0, codecchunk_CK = 0;   // codecchunk=T,CHUNK; 0 = do not run
+    int  codecref_T = 0;                        // codecref=T; 0 = do not run
     std::string style;
     std::string out = "output.wav";
     bool        serve = false;
@@ -152,11 +163,18 @@ void print_device_banner(OpenCLContext& cl_ctx) {
         // Occupancy inputs — the guide's workgroup guidance is all relative to these two.
         size_t max_wg = 0; cl_uint cus = 0;
         clGetDeviceInfo(cl_ctx.device(), CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(max_wg), &max_wg, nullptr);
+        // This query was MISSING: `cus` was declared, printed, and never fetched, so every log this
+        // project has ever produced said compute_units=0. It is the residency bound a software
+        // global barrier stands on, so it is not a cosmetic fix.
         clGetDeviceInfo(cl_ctx.device(), CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(cus), &cus, nullptr);
         cl_ulong lmem = 0;
         clGetDeviceInfo(cl_ctx.device(), CL_DEVICE_LOCAL_MEM_SIZE, sizeof(lmem), &lmem, nullptr);
-        std::fprintf(stderr, "OPT_AVAIL  max_wg=%zu compute_units=%u local_mem_kb=%llu\n",
-                     max_wg, (unsigned)cus, (unsigned long long)(lmem >> 10));
+        cl_uint freq = 0, addr = 0;
+        clGetDeviceInfo(cl_ctx.device(), CL_DEVICE_MAX_CLOCK_FREQUENCY, sizeof(freq), &freq, nullptr);
+        clGetDeviceInfo(cl_ctx.device(), CL_DEVICE_ADDRESS_BITS, sizeof(addr), &addr, nullptr);
+        std::fprintf(stderr, "OPT_AVAIL  max_wg=%zu compute_units=%u local_mem_kb=%llu clock_mhz=%u addr_bits=%u\n",
+                     max_wg, (unsigned)cus, (unsigned long long)(lmem >> 10),
+                     (unsigned)freq, (unsigned)addr);
     }
     std::fflush(stderr);
 }
@@ -187,6 +205,14 @@ void print_bench_line(const std::string& device, const Options& o,
     char gpubuf[64] = {0};
     if (gpu_ms > 0.0)
         std::snprintf(gpubuf, sizeof(gpubuf), " gpu_ms=%.2f gpu_util=%.0f", gpu_ms, gpu_util);
+    // EMIT ONLY WHEN REAL, same contract as gpu_ms above. The codec span needs a profiled queue,
+    // which the fast path does not create, and the sequential branch reported 0 for it — so
+    // gpu_busy was the AR queue alone presented as whole-render utilisation. An absent row says
+    // "not measured"; a zero says "the codec did nothing", and only one of those is true.
+    char busybuf[96] = {0};
+    if (codec_gpu_ms > 0.0)
+        std::snprintf(busybuf, sizeof(busybuf), " codec_gpu=%.0f gpu_busy=%.0f",
+                      codec_gpu_ms, gpu_busy_pct);
     // fp32-vs-fp16 codec verdict. EMITTED ONLY WHEN AN A/B RAN — a row that always reads 1.000000
     // would be indistinguishable from a comparison that never happened, and this particular number
     // exists to be trusted when it says the audio did not change.
@@ -203,11 +229,11 @@ void print_bench_line(const std::string& device, const Options& o,
     std::fprintf(stderr,
                  "BENCH model=magenta-rt2 device=\"%s\" style=\"%s\" fixture=%d frames=%d chunk=%d "
                  "pipeline=%d ar_sec=%.3f codec_sec=%.3f total_sec=%.3f audio_sec=%.3f rtf=%.3f "
-                 "disp=%ld us_disp=%.1f codec_gpu=%.0f gpu_busy=%.0f tok_s=%.0f%s%s%s\n",
+                 "disp=%ld us_disp=%.1f%s tok_s=%.0f%s%s%s\n",
                  device.c_str(), cond.name.c_str(), cond.is_fixture ? 1 : 0,
                  o.cfg.n_frames, o.cfg.chunk, o.cfg.pipeline ? 1 : 0,
                  r.ar_s, r.codec_s, r.total_s, r.audio_s, r.rtf(),
-                 disp, us_disp, codec_gpu_ms, gpu_busy_pct,
+                 disp, us_disp, busybuf,
                  // Token throughput, the paper's chunk-size-independent form of the same claim:
                  // "we reduce the bandwidth to 4kbps by generating only the first 16 RVQ levels,
                  // yielding a live throughput target of 400 tokens per second" = frame rate x RVQ
@@ -216,6 +242,211 @@ void print_bench_line(const std::string& device, const Options& o,
                  // pipeline has to.
                  (r.total_s > 0.0) ? (double)(o.cfg.n_frames * 12) / r.total_s : 0.0,
                  gpubuf, abbuf, f16buf);
+    std::fflush(stderr);
+}
+
+// ── LOG_PARITY: the port's half of a reference comparison ────────────────────────────────────
+// Audio statistics have settled nothing here three times running: a different RNG stream means a
+// different piece, so a spectral difference is a difference between two PIECES rather than between
+// two configurations (MAGENTA_PARITY_INVESTIGATION §4.1, EXP-002). Tokens are the thing that can
+// actually be identical — see SongResult::tokens — so this prints what a reference run can be
+// diffed against directly, under one greppable prefix:
+//
+//   LOG_PARITY_FP     what was rendered — every knob that changes the numbers, on one line
+//   LOG_PARITY_COND   the 144 conditioning tokens ACTUALLY used, after prompt/blend/ramp resolution
+//   LOG_PARITY_GRID   digest + head of the RVQ code grid
+//   LOG_PARITY_AUDIO  level of the rendered PCM, so gross breakage shows without exporting a WAV
+//   LOG_PARITY_PCM    contiguous mid-chunk samples, post-gain (NNOPT_PARITY=2 only)
+//   LOG_PARITY_TOK    the full grid, chunked (NNOPT_PARITY=2 only)
+//
+// Per-codebook RVQ codes, not global token ids: the reference speaks codes (0..1023), so the port
+// strips the reserved ids and the codebook offset HERE rather than leaving the host to redo it and
+// get it subtly wrong. Same reason the fingerprint carries the effective seed rather than the
+// requested one — seed=0 means "vary per render", so the requested value does not identify a render.
+//
+// OFF by default and re-read every request (NNOPT_PARITY is a per-request key). Live mode issues a
+// request every ~2 s down a 64 KB stderr pipe the host drains line by line, and a process that
+// blocks in fprintf blocks mid-render holding the GPU — which is why the serve loop's own reports
+// are off by default too. Level 1 is three bounded lines; level 2 adds the full grid and is for a
+// captured A/B, not for live playback.
+static uint32_t parity_crc32(const int32_t* v, size_t n) {
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; ++i) {
+        const uint32_t x = (uint32_t)v[i];
+        for (int b = 0; b < 4; ++b) {
+            c ^= (x >> (8 * b)) & 0xFFu;
+            for (int k = 0; k < 8; ++k)
+                c = (c >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(c & 1u)));
+        }
+    }
+    return ~c;
+}
+
+static std::string parity_join(const int32_t* v, size_t n) {
+    std::string s;
+    s.reserve(n * 5);
+    char buf[16];
+    for (size_t i = 0; i < n; ++i) {
+        std::snprintf(buf, sizeof(buf), "%d", (int)v[i]);
+        if (i) s.push_back(',');
+        s += buf;
+    }
+    return s;
+}
+
+// A toggle's value as it will be READ this request, or "-" when unset. The arm is part of the
+// fingerprint: a parity line that does not say which toggles were live is a measurement whose
+// configuration has to be inferred, and inferring it is how EXP-002's control got mislabelled.
+static const char* parity_env(const char* k) {
+    const char* v = std::getenv(k);
+    return v ? v : "-";
+}
+
+void log_parity(int idx, const std::string& device, const Options& o,
+                const SongConditioning& cond, const SongResult& r) {
+    // DEFAULT ON (level 1). Not a preference — the device under test is reached through a browser
+    // whose text input silently drops uppercase and underscores ("A_B" arrives as "a-b"), so an
+    // NNOPT_* key CANNOT BE TYPED on BrowserStack at all. A parity switch that can only be set on
+    // the host is a switch that never gets set where the answer lives. Same reasoning EXP-011
+    // applied to CFG: correct behaviour ships on. NNOPT_PARITY=0 disables; =2 adds the full grid.
+    // Level 1 is four bounded lines per render, which live mode's stderr pipe absorbs comfortably.
+    const char* lvl_s = std::getenv("NNOPT_PARITY");
+    const int lvl = lvl_s ? std::atoi(lvl_s) : 1;
+    if (lvl <= 0) return;
+
+    const char* src = !o.blend.empty()        ? "blend"
+                    : !o.prompt.empty()       ? "prompt"
+                    : !o.style_tokens.empty() ? "tokens"
+                    : cond.is_fixture         ? "fixture"
+                                              : "style";
+    // The blend, VERBATIM. Collide's weights are a gaussian of puck distance, so they are not a
+    // schedule anyone can guess from the outside: without the exact string the host would replay
+    // some other blend through the reference and compare two different pieces of music — the same
+    // error as §4.1, arrived at from a new direction. With it, the Mac can reproduce this precise
+    // mixture and the comparison means something.
+    if (!o.blend.empty())
+        std::fprintf(stderr, "LOG_PARITY_BLEND idx=%d blend=\"%s\"\n", idx, o.blend.c_str());
+    else if (!o.prompt.empty())
+        std::fprintf(stderr, "LOG_PARITY_BLEND idx=%d prompt=\"%s\"\n", idx, o.prompt.c_str());
+
+    std::fprintf(stderr,
+                 "LOG_PARITY_FP idx=%d device=\"%s\" dtype=%s frames=%d chunk=%d pipeline=%d "
+                 "reset=%d steer=%d temp=%.4f topk=%d seed=%u cond=%s name=\"%s\" ramp_steps=%d "
+                 "int8=%s ring=%s rampsteps=%s xattndepth=%s quant=%s codecfp16=%s codecstream=%d "
+                 "seed0=%s\n",
+                 idx, device.c_str(),
+#ifdef NNOPT_USE_FP16
+                 "fp16",
+#else
+                 "fp32",
+#endif
+                 o.cfg.n_frames, o.cfg.chunk, o.cfg.pipeline ? 1 : 0,
+                 o.cfg.reset ? 1 : 0, o.steer ? 1 : 0,
+                 o.cfg.temperature, o.cfg.top_k, nnopt_get_sample_seed(),
+                 src, cond.name.c_str(),
+                 cond.ramp_stride > 0 ? (int)(cond.style_ramp.size() / 144) : 0,
+                 parity_env("NNOPT_INT8SCOPE"), parity_env("NNOPT_XATTNRING"),
+                 parity_env("NNOPT_RAMPSTEPS"), parity_env("NNOPT_XATTNDEPTH"),
+                 parity_env("NNOPT_QUANT"), parity_env("NNOPT_CODECFP16"),
+                 nnopt_codec_stream_on() ? 1 : 0,
+                 parity_env("NNOPT_SEED0"));
+
+    // The conditioning the ENGINE used, not the one the caller asked for. `tokens=` is echoed back
+    // by the request parser, but a prompt/blend is resolved on device and a ramp replaces the last
+    // step — so reading this off the request would document the intent and miss the substitution.
+    const std::vector<int32_t>& ct = cond.style_tokens;
+    if (!ct.empty())
+        std::fprintf(stderr, "LOG_PARITY_COND idx=%d n=%zu crc=0x%08x tok=%s\n",
+                     idx, ct.size(), parity_crc32(ct.data(), ct.size()),
+                     parity_join(ct.data(), ct.size()).c_str());
+    else
+        std::fprintf(stderr, "LOG_PARITY_COND idx=%d n=0 crc=0x00000000 note=no_style_tokens\n", idx);
+
+    // Global token id -> per-codebook RVQ code. Same arithmetic as the depth loop's own dump
+    // (backbone.cpp): 6 reserved ids, 12 codebooks of 1024, codebook index from the position.
+    const int RESERVED = 6, CBSIZE = 1024, NUM_CB = 12;
+    std::vector<int32_t> codes(r.tokens.size());
+    for (size_t i = 0; i < r.tokens.size(); ++i) {
+        const int q = (int)(i % (size_t)NUM_CB);
+        codes[i] = (int32_t)((((r.tokens[i] - RESERVED - q * CBSIZE) % CBSIZE) + CBSIZE) % CBSIZE);
+    }
+    const size_t head = codes.size() < 24 ? codes.size() : 24;
+    // ONE line per chunk carrying every pipeline stage, because the device farm's log panel is the
+    // only channel off the device and dense beats verbose there: conditioning digest, the three
+    // frame-0 activation norms, and the chunk's token-grid digest. Diff these five fields per chunk
+    // against the reference's ref_live_trace.py output and any stage that drifts is immediately
+    // visible without scrolling a megabyte of unrelated logcat.
+    {
+        const uint32_t gcrc = parity_crc32(codes.data(), codes.size());
+        const uint32_t ccrc = ct.empty() ? 0u : parity_crc32(ct.data(), ct.size());
+        std::fprintf(stderr,
+            "LOG_TRACE idx=%d cond=0x%08x src=%.5f ti=%.5f tout=%.5f grid=0x%08x n=%zu\n",
+            idx, ccrc, g_trace_src, g_trace_ti, g_trace_to, gcrc, codes.size());
+        std::fflush(stderr);
+    }
+    std::fprintf(stderr, "LOG_PARITY_GRID idx=%d n=%zu frames=%zu crc=0x%08x head=%s\n",
+                 idx, codes.size(), codes.size() / (size_t)NUM_CB,
+                 parity_crc32(codes.data(), codes.size()),
+                 parity_join(codes.data(), head).c_str());
+
+    // Level, not spectrum. A port that clips, collapses or renders silence says so here, which
+    // costs nothing and does not pretend to be the §6 detector suite — those need 30-60 s of
+    // continuous audio scored on the host against the same reference scorer.
+    // Measured AFTER the 0.5 output gain and the clip, i.e. on what the WAV will actually contain
+    // (song_io.cpp:105, matching magenta_rt's _float_samples_to_int16 gain=0.5). Reporting the raw
+    // r.pcm instead would be wrong twice: the levels would not be comparable to the reference's own
+    // WAV peak/rms, and a "clipped" flag would fire at |v|>1 when the real threshold is |v|>2.
+    // Mid-chunk, so the dump sits clear of both the codec warm-up transient at the chunk head and
+    // any overlap-add seam at the tail.
+    static const size_t kPcmDumpStart = 24000;   // stereo frames into the chunk (0.5 s at 48 kHz)
+    static const size_t kPcmDumpLen   = 128;     // contiguous samples, enough to align + diff
+
+    double sum2 = 0.0, peak = 0.0;
+    long   nclip = 0;
+    for (float v : r.pcm) {
+        double g = 0.5 * (double)v;
+        if (g > 1.0 || g < -1.0) { ++nclip; g = g > 1.0 ? 1.0 : -1.0; }
+        const double a = g < 0.0 ? -g : g;
+        if (a > peak) peak = a;
+        sum2 += g * g;
+    }
+    std::fprintf(stderr, "LOG_PARITY_AUDIO idx=%d n=%zu rms=%.6f peak=%.6f clipped=%ld\n",
+                 idx, r.pcm.size(),
+                 r.pcm.empty() ? 0.0 : std::sqrt(sum2 / (double)r.pcm.size()), peak, nclip);
+
+    // A contiguous run of real samples, post-gain, so the host can align (the reference codec runs
+    // one 40 ms frame of ISTFT latency ahead) and then diff waveforms sample-by-sample. rms/peak
+    // above only catch gross breakage; this is what actually settles "does our codec render these
+    // codes like the reference does". Left channel only -- interleaved stereo, so stride 2.
+    if (lvl >= 2 && r.pcm.size() >= 2 * (kPcmDumpStart + kPcmDumpLen)) {
+        std::vector<float> s16(kPcmDumpLen);
+        for (size_t i = 0; i < kPcmDumpLen; ++i)
+            s16[i] = 0.5f * r.pcm[2 * (kPcmDumpStart + i)];
+        const size_t per = 64;
+        for (size_t off = 0; off < kPcmDumpLen; off += per) {
+            const size_t m = (kPcmDumpLen - off) < per ? (kPcmDumpLen - off) : per;
+            std::string j;
+            for (size_t i = 0; i < m; ++i) {
+                char b[24];
+                std::snprintf(b, sizeof b, "%.6f", s16[off + i]);
+                if (i) j += ',';
+                j += b;
+            }
+            std::fprintf(stderr, "LOG_PARITY_PCM idx=%d start=%zu off=%zu n=%zu v=%s\n",
+                         idx, kPcmDumpStart, off, m, j.c_str());
+        }
+    }
+
+    if (lvl >= 2) {
+        // 120 codes per line keeps every line under ~600 bytes, well inside the pipe the host
+        // drains, and 10 frames per line makes an offset trivially convertible to a frame number.
+        const size_t per = 120;
+        for (size_t off = 0; off < codes.size(); off += per) {
+            const size_t m = (codes.size() - off) < per ? (codes.size() - off) : per;
+            std::fprintf(stderr, "LOG_PARITY_TOK idx=%d off=%zu n=%zu v=%s\n",
+                         idx, (size_t)off, m, parity_join(codes.data() + off, m).c_str());
+        }
+    }
     std::fflush(stderr);
 }
 
@@ -263,10 +494,27 @@ bool apply_kv(const std::string& key, const std::string& value, Options& o) {
     if (key == "codecab")       { o.cfg.codec_ab = (value != "0"); return true; }
     if (key == "temperature")   { o.cfg.temperature = (float)std::atof(value.c_str()); return true; }
     if (key == "topk")          { o.cfg.top_k = std::atoi(value.c_str()); return true; }
+    // parity=N — the LOG_PARITY verbosity, as a LOWERCASE key. NNOPT_PARITY exists and does the
+    // same job, but BrowserStack's soft keyboard silently drops uppercase and underscores ("A_B"
+    // arrives as "a-b"), so an NNOPT_* key cannot be typed on the only hardware that matters. This
+    // one can. 0 off, 1 fingerprint + digests, 2 adds the full token grid, 3 adds per-layer
+    // activation digests for frame 0.
+    if (key == "parity")        { setenv("NNOPT_PARITY", value.c_str(), 1);
+                                  g_request_env.push_back("NNOPT_PARITY"); return true; }
+    // seed0=zeros|fixture — what frame 0's temporal input is. `zeros` (the default) embeds the
+    // twelve zero RVQ codes upstream starts from; `fixture` restores weights/optest_input.bin for
+    // an A/B. Lowercase for the same reason `parity` is.
+    if (key == "seed0")         { setenv("NNOPT_SEED0", value.c_str(), 1);
+                                  g_request_env.push_back("NNOPT_SEED0"); return true; }
+    // cfg=<float> — the musiccoca LOGIT-combine scale. 0 disables the combine and leaves only the
+    // discretised cfg tokens in the conditioning vector (EXP-028's option B).
+    if (key == "cfg")           { setenv("NNOPT_CFGMC", value.c_str(), 1);
+                                  g_request_env.push_back("NNOPT_CFGMC"); return true; }
     if (key == "seed")          { o.cfg.seed = (unsigned)std::strtoul(value.c_str(), nullptr, 10); return true; }
     // codecchunk=T,CHUNK — run the chunked-vs-whole codec comparison for this request and print
     // CODECCHUNK, then carry on serving. The op-test form runs once at startup and returns from
     // main, which on a device with no shell means it can never be taken.
+    if (key == "codecref")      { o.codecref_T = std::atoi(value.c_str()); return true; }
     if (key == "codecchunk")    { const size_t c = value.find(',');
                                   o.codecchunk_T  = std::atoi(value.substr(0, c).c_str());
                                   o.codecchunk_CK = (c == std::string::npos) ? 0 : std::atoi(value.substr(c+1).c_str());
@@ -475,13 +723,56 @@ bool quantize_to_conditioning(OpenCLContext& cl_ctx, const std::vector<float>& e
 }
 
 bool resolve_prompt_tokens(OpenCLContext& cl_ctx, const std::string& prompt,
-                           std::vector<int32_t>& cond_out) {
+                           std::vector<int32_t>& cond_out, std::vector<float>* emb_out) {
     const std::vector<float>* emb = nullptr;
     int n_ids = -1;
     if (!embed_prompt_cached(cl_ctx, prompt, &emb, &n_ids)) return false;
     std::vector<int32_t> style;
     if (!quantize_to_conditioning(cl_ctx, *emb, cond_out, style)) return false;
+    if (emb_out) *emb_out = *emb;
     log_style_tokens("PROMPT", prompt, n_ids, style);
+    return true;
+}
+
+// Quantise a straight line between two MusicCoCa embeddings into a ramp of conditioning blocks.
+//
+// A drag reaches this process as two endpoints one request apart; upstream would have seen ~50
+// intermediate positions in between. Walking the segment and quantising each step recovers most of
+// that: the RVQ still snaps, but it snaps once per step instead of once per 2 s chunk, and the
+// cross-attention ring (42 frames = 1.68 s) smooths across the steps that remain.
+//
+// Steps cost 12 dispatches and 12 blocking readbacks EACH, which is why this runs here, once per
+// request, and not per frame. NNOPT_RAMPSTEPS tunes it; 1 disables the ramp entirely.
+static bool build_cond_ramp(OpenCLContext& cl_ctx,
+                            const std::vector<float>& from, const std::vector<float>& to,
+                            int n_frames, std::vector<int32_t>& ramp_out, int& stride_out) {
+    ramp_out.clear(); stride_out = 0;
+    if (from.size() != to.size() || from.empty() || n_frames <= 0) return false;
+    // 8 steps over a 50-frame request is a stride of 6 frames (240 ms), so ~7 consecutive steps
+    // are alive in the 42-frame cross-attention ring at any moment — the ring is doing most of the
+    // smoothing and the ramp only has to keep the RVQ from flipping all at once. More steps buy
+    // little and cost 12 blocking readbacks each, which is charged against a 1.00x RTF budget.
+    // OFF BY DEFAULT (steps=1). Same reason as the cross-attention ring: it shipped once, on by
+    // default, alongside the ring, and the resulting render was degenerate — with two untested
+    // changes live at once there was no way to tell which. NNOPT_RAMPSTEPS=8 arms it alone.
+    int steps = 1;
+    if (const char* e = std::getenv("NNOPT_RAMPSTEPS")) { const int v = std::atoi(e); if (v > 0) steps = v; }
+    if (steps > n_frames) steps = n_frames;
+    if (steps <= 1) return false;
+
+    std::vector<float> mid(from.size());
+    std::vector<int32_t> block, style;
+    for (int i = 1; i <= steps; ++i) {
+        const float t = (float)i / (float)steps;
+        for (size_t k = 0; k < from.size(); ++k) mid[k] = from[k] + (to[k] - from[k]) * t;
+        if (!quantize_to_conditioning(cl_ctx, mid, block, style)) { ramp_out.clear(); return false; }
+        if ((int)block.size() != kMidiConditioningTokens) { ramp_out.clear(); return false; }
+        ramp_out.insert(ramp_out.end(), block.begin(), block.end());
+    }
+    // Frames per step, at least 1. The last step is held for whatever remains, so a stride that
+    // does not divide n_frames evenly just means the target is reached slightly early.
+    stride_out = n_frames / steps;
+    if (stride_out < 1) stride_out = 1;
     return true;
 }
 
@@ -520,7 +811,7 @@ bool parse_blend(const std::string& s, std::vector<std::pair<float, std::string>
 // the plain weighted average the formula specifies.
 bool resolve_blend_tokens(OpenCLContext& cl_ctx,
                           const std::vector<std::pair<float, std::string>>& pairs,
-                          std::vector<int32_t>& cond_out) {
+                          std::vector<int32_t>& cond_out, std::vector<float>* emb_out) {
     if (pairs.empty()) return false;
     float wsum = 0.0f;
     for (const auto& p : pairs) wsum += p.first;
@@ -554,6 +845,7 @@ bool resolve_blend_tokens(OpenCLContext& cl_ctx,
 
     std::vector<int32_t> style;
     if (!quantize_to_conditioning(cl_ctx, blend, cond_out, style)) return false;
+    if (emb_out) *emb_out = blend;
 
     std::string label;
     for (const auto& p : pairs) {
@@ -583,12 +875,26 @@ bool generate_to_file(OpenCLContext& cl_ctx, Weights& weights, const Options& o,
     OpenCLContext::profRefresh();
     std::fprintf(stderr, "CONDITIONING %s\n", why.c_str());
     if (!o.style_tokens.empty()) cond.style_tokens = o.style_tokens;   // on-device conditioning
+    if (!o.style_ramp.empty() && o.ramp_stride > 0) {
+        cond.style_ramp  = o.style_ramp;
+        cond.ramp_stride = o.ramp_stride;
+    }
     // Live MIDI overwrites the 129 note/drum channels of whatever block we ended up with. It runs
     // LAST and in place, because the style block above may have come straight out of the per-prompt
     // cache: baking MIDI into that cache would make every note-on look like a prompt change and pay
     // for a MusicCoCa text-tower pass that nothing asked for.
     if (o.midi.active && cond.style_tokens.size() == (size_t)kConditioningTokens) {
         if (!midi_apply_to_conditioning(o.midi, cond.style_tokens)) return false;
+        // Every ramp step is a conditioning block in its own right, so held notes have to be
+        // patched into all of them — otherwise the ramp would play the chord out from under the
+        // performer for the length of the glide.
+        for (size_t off = 0; off + kConditioningTokens <= cond.style_ramp.size();
+             off += kConditioningTokens) {
+            std::vector<int32_t> blk(cond.style_ramp.begin() + off,
+                                     cond.style_ramp.begin() + off + kConditioningTokens);
+            if (!midi_apply_to_conditioning(o.midi, blk)) return false;
+            std::copy(blk.begin(), blk.end(), cond.style_ramp.begin() + off);
+        }
         log_midi_state("MIDI", o.midi, cond.style_tokens);
     } else if (o.midi.active) {
         // The fixture path has no 144-token block to patch, so MIDI would be silently dropped.
@@ -672,6 +978,15 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Global-barrier probe. A depth-loop megakernel needs all its workgroups resident at once;
+    // this answers whether that holds on THIS device before a line of it is written. Default ON:
+    // it is one dispatch, every spin inside is bounded, and the failure mode is a printed 0 rather
+    // than a hung GPU. NNOPT_BARPROBE=0 skips it.
+    {
+        const char* bp = std::getenv("NNOPT_BARPROBE");
+        if (!(bp && bp[0] == '0')) nnopt_barrier_probe(cl_ctx);
+    }
+
     // ── MusicCoCa gate ──────────────────────────────────────────────────────
     // Runs before the LLM weights load: the text tower is independent of them, and the whole point
     // of this path is to prove the tower on its own before anything downstream can mask a bug.
@@ -740,13 +1055,13 @@ int main(int argc, char** argv) {
     if (!opt.blend.empty()) {
         std::vector<std::pair<float, std::string>> pairs;
         if (!parse_blend(opt.blend, pairs) ||
-            !resolve_blend_tokens(cl_ctx, pairs, opt.style_tokens)) {
+            !resolve_blend_tokens(cl_ctx, pairs, opt.style_tokens, nullptr)) {
             NNOPT_ERROR_FMT("blend \"%s\" could not be resolved to conditioning", opt.blend.c_str());
             return 1;
         }
         if (!opt.serve) release_musiccoca();
     } else if (!opt.prompt.empty()) {
-        if (!resolve_prompt_tokens(cl_ctx, opt.prompt, opt.style_tokens)) {
+        if (!resolve_prompt_tokens(cl_ctx, opt.prompt, opt.style_tokens, nullptr)) {
             NNOPT_ERROR_FMT("prompt \"%s\" could not be resolved to conditioning", opt.prompt.c_str());
             return 1;
         }
@@ -774,9 +1089,44 @@ int main(int argc, char** argv) {
         }
     }
     std::fprintf(stderr, "WEIGHTS %s\n", weights_bin.c_str());
+    // What the bundle ACTUALLY contains, printed once. The q4 GEMV path is selected per tensor by
+    // `weights.has_tensor(key + ".scale")` (utils.cpp), so a bundle whose scales are named or typed
+    // differently silently falls through to the fp16 kernel, which then reads 4-bit packed bytes as
+    // halves — garbage weights, no error, degenerate output. That is indistinguishable from a
+    // working run in every log line we had, which is why this counts them instead.
     if (!weights.load(weights_bin.c_str(), weights_meta.c_str(), cl_ctx.context())) {
         NNOPT_ERROR_FMT("weights load failed: %s", weights_bin.c_str());
         return 1;
+    }
+    {
+        size_t n_scale = 0, n_q4 = 0, n_total = 0;
+        std::string sample_scale, sample_q4;
+        for (const auto& kv : weights.tensor_keys()) {
+            ++n_total;
+            if (kv.size() > 6 && kv.compare(kv.size() - 6, 6, ".scale") == 0) {
+                ++n_scale;
+                if (sample_scale.empty()) sample_scale = kv;
+            }
+            const std::string dt = weights.get_dtype(kv);
+            if (dt == "q4_packed" || dt == "uint8" || dt == "int8") {
+                ++n_q4;
+                if (sample_q4.empty()) sample_q4 = kv + ":" + dt;
+            }
+        }
+        std::fprintf(stderr,
+                     "WEIGHTS_INFO total=%zu scale_keys=%zu packed=%zu sample_scale=\"%s\" sample_packed=\"%s\"\n",
+                     n_total, n_scale, n_q4, sample_scale.c_str(), sample_q4.c_str());
+        std::fflush(stderr);
+    }
+
+    // codecref=T on the command line runs the codec-vs-reference fingerprint and NOTHING else —
+    // no AR, no warm-up, no render. That matters on a device where the full pipeline cannot run
+    // (an Adreno 620 crashes in CLBlast's HGEMM long before the codec is reached), because the
+    // codec is exactly the stage this check exists to isolate. In serve mode the same key runs
+    // after a render instead, which is the right place when the pipeline does work.
+    if (opt.codecref_T > 0 && !opt.serve) {
+        const bool ok = nnopt_codecref_check(cl_ctx, weights, cl_ctx.queue(), opt.codecref_T);
+        return ok ? 0 : 1;
     }
 
     Model model(cl_ctx, weights);
@@ -802,6 +1152,7 @@ int main(int argc, char** argv) {
         if (!generate_to_file(cl_ctx, weights, opt, /*sess=*/nullptr, r, cond)) return 1;
         bench.mark_end();
         print_bench_line(cl_ctx.device_name(), opt, cond, r);
+        log_parity(0, cl_ctx.device_name(), opt, cond, r);
         std::printf("WROTE %s  %.2fs audio in %.2fs (RTF %.2f)\n", opt.out.c_str(), r.audio_s, r.total_s, r.rtf());
         std::fflush(stdout);
         KernelProfiler::dump_summary();
@@ -848,6 +1199,11 @@ int main(int argc, char** argv) {
     std::vector<int32_t> last_prompt_tokens = opt.style_tokens;
     std::string last_blend = opt.blend;
     std::vector<int32_t> last_blend_tokens;
+    // The embedding the CURRENT conditioning was quantised from. A conditioning change ramps from
+    // here to the new one, which is the closest this per-request protocol can get to upstream's
+    // per-frame re-blend. Empty until the first prompt/blend resolves — the first one has nothing
+    // to ramp from and lands whole, exactly as before.
+    std::vector<float> last_emb;
     while (std::getline(std::cin, line)) {
         if (line.find_first_not_of(" \t\r\n") == std::string::npos) continue;
         if (line == "quit" || line == "exit") break;
@@ -865,13 +1221,18 @@ int main(int argc, char** argv) {
             // the cost is a weighted average plus one RVQ.
             if (req.blend != last_blend) {
                 std::vector<std::pair<float, std::string>> pairs;
+                std::vector<float> new_emb;
                 if (!parse_blend(req.blend, pairs) ||
-                    !resolve_blend_tokens(cl_ctx, pairs, req.style_tokens)) {
+                    !resolve_blend_tokens(cl_ctx, pairs, req.style_tokens, &new_emb)) {
                     std::fprintf(stderr, "SERVE_ERROR idx=%d bad_blend=1\n", idx);
                     std::fflush(stderr);
                     ++idx;
                     continue;
                 }
+                if (!last_emb.empty())
+                    build_cond_ramp(cl_ctx, last_emb, new_emb, req.cfg.n_frames,
+                                    req.style_ramp, req.ramp_stride);
+                last_emb = new_emb;
                 last_blend = req.blend;
                 last_blend_tokens = req.style_tokens;
                 cond_changed = true;
@@ -882,12 +1243,17 @@ int main(int argc, char** argv) {
         } else if (!req.prompt.empty() && req.prompt != last_prompt) {
             // A new prompt is steering: re-embed it (warm, ~150 ms) and treat it like a style change.
             // Re-resolving only when it actually changed is what keeps live steering cheap.
-            if (!resolve_prompt_tokens(cl_ctx, req.prompt, req.style_tokens)) {
+            std::vector<float> new_emb;
+            if (!resolve_prompt_tokens(cl_ctx, req.prompt, req.style_tokens, &new_emb)) {
                 std::fprintf(stderr, "SERVE_ERROR idx=%d bad_prompt=1\n", idx);
                 std::fflush(stderr);
                 ++idx;
                 continue;
             }
+            if (!last_emb.empty())
+                build_cond_ramp(cl_ctx, last_emb, new_emb, req.cfg.n_frames,
+                                req.style_ramp, req.ramp_stride);
+            last_emb = new_emb;
             last_prompt = req.prompt;
             last_prompt_tokens = req.style_tokens;
             last_blend.clear();
@@ -922,8 +1288,11 @@ int main(int argc, char** argv) {
             continue;
         }
         print_bench_line(cl_ctx.device_name(), req, cond, r);
+        log_parity(idx, cl_ctx.device_name(), req, cond, r);
         if (req.codecchunk_T > 0)
             nnopt_codecchunk_check(cl_ctx, weights, cl_ctx.queue(), req.codecchunk_T, req.codecchunk_CK);
+        if (req.codecref_T > 0)
+            nnopt_codecref_check(cl_ctx, weights, cl_ctx.queue(), req.codecref_T);
         // Same reports the one-shot path prints. On a device farm the app IS the only way in, so a
         // measurement that is only reachable from the CLI is a measurement we never get to take.
         //

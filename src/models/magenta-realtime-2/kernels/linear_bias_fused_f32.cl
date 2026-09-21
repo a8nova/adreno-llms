@@ -38,6 +38,15 @@
 #ifndef GELU
 #define GELU 0
 #endif
+// RESADD=1: fold the PREVIOUS block's post-norm + residual-add into this GEMV's input load, so
+// `out = resid + rms2(proj)` costs no dispatch of its own. The AR is host-issue-bound, and the
+// standalone rms_norm_add_wg_f32 is 84 dispatches/frame for 0.54 ms of actual GPU work — launch
+// cost wearing a hat. Here `x` IS proj (un-normalised); the true block output is materialised once
+// by workgroup 0 for the next block's residual, and every workgroup recomputes it into its own
+// registers because each one streams the whole input vector anyway.
+#ifndef RESADD
+#define RESADD 0
+#endif
 #ifndef BIAS
 #define BIAS 0
 #endif
@@ -158,6 +167,12 @@ __kernel void linear_fused_f32(XSPACE float* x XATTR,
                                __global const half*  rms_scale,
                                const float           rms_eps,
 #endif
+#if RESADD
+                               __global const float* resid,       // pre-block input to add
+                               __global const half*  rms2_scale,  // post-norm weight
+                               const float           rms2_eps,
+                               __global float*       out_resid,   // materialised block output
+#endif
                                __global float* out, const int in_dim, const int out_dim){
   // ls holds NOUT partial dot products, plus one more lane-set for sum(x^2) when pre-norming.
   __local float ls[WG*(NOUT+PRENORM)];
@@ -187,6 +202,43 @@ __kernel void linear_fused_f32(XSPACE float* x XATTR,
 #if PRENORM
   float ss=0.0f;
 #endif
+#if RESADD
+  // BIT-EXACTNESS. rms_norm_add_wg_f32 sums with WG=128 SCALAR lanes striding by 128, then a
+  // 128-wide tree. This kernel's workgroup is 64 wide and loads float4s, so the obvious
+  // `ss += dot(xv,xv)` would sum in a different order and shift `inv` by an ulp — which flips an
+  // argmax in an AR model (that kernel's own header says so). Each work item therefore carries TWO
+  // virtual lanes, keeps their partials apart, and runs the identical tree. Same order, same bits.
+  __local float rs2[128];
+  {
+    const size_t rb2=(size_t)row*in_dim;
+    for(int v=tid; v<128; v+=WG){
+      float s2=0.0f;
+      for(int d=v; d<in_dim; d+=128){ const float t=x[rb2+d]; s2+=t*t; }
+      rs2[v]=s2;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for(int r2=64;r2>0;r2>>=1){
+      if(tid<r2) rs2[tid]+=rs2[tid+r2];
+      barrier(CLK_LOCAL_MEM_FENCE);
+    }
+  }
+  const float inv2=rsqrt(rs2[0]/(float)in_dim + rms2_eps);
+  // The block output itself, written once. Expression order matches rms_norm_add_wg_f32's store.
+  if(wg==0){
+    const size_t rb2=(size_t)row*in_dim;
+    for(int d=tid; d<in_dim; d+=WG)
+      out_resid[rb2+d] = x[rb2+d]*inv2*vload_half(d,rms2_scale) + resid[rb2+d];
+  }
+#endif
+// The input load, once, for every specialisation below. With RESADD the value that enters the
+// GEMV is the block output the previous rms_add would have written, formed in registers.
+#if RESADD
+#define XL4(j) (vload4((j),x+xb)*inv2*vload_half4((j),rms2_scale) + vload4((j),resid+xb))
+#define XL8(j) (vload8((j),x+xb)*inv2*vload_half8((j),rms2_scale) + vload8((j),resid+xb))
+#else
+#define XL4(j) vload4((j),x+xb)
+#define XL8(j) vload8((j),x+xb)
+#endif
 
 #if DOT8 && INT8
   // ── pass 1: the activation scale ──────────────────────────────────────────────────────────────
@@ -195,7 +247,7 @@ __kernel void linear_fused_f32(XSPACE float* x XATTR,
   // forces is the real cost (§6.1.4).
   float amax = 0.0f;
   for(int j=tid;j<in4;j+=WG){
-    float4 xv = vload4(j, x+xb);
+    float4 xv = XL4(j);
 #if PRENORM
     ss += dot(xv,xv);
     xv *= vload_half4(j, rms_scale);
@@ -228,7 +280,7 @@ __kernel void linear_fused_f32(XSPACE float* x XATTR,
 #define DECL_IACC(u) int i##u = 0;
   REP(DECL_IACC)
   for(int j=tid;j<in4;j+=WG){
-    float4 xv = vload4(j, x+xb);
+    float4 xv = XL4(j);
 #if PRENORM
     xv *= vload_half4(j, rms_scale);
 #endif
@@ -298,8 +350,8 @@ __kernel void linear_fused_f32(XSPACE float* x XATTR,
 #if INT8
     // x as four NAMED float4s, not one float16 — see the accumulator note. Sixteen x values per
     // step, matching the sixteen weights the packed load below brings in.
-    float4 x0 = vload4(j*4+0, x+xb), x1 = vload4(j*4+1, x+xb);
-    float4 x2 = vload4(j*4+2, x+xb), x3 = vload4(j*4+3, x+xb);
+    float4 x0 = XL4(j*4+0), x1 = XL4(j*4+1);
+    float4 x2 = XL4(j*4+2), x3 = XL4(j*4+3);
 #if PRENORM
     ss += dot(x0,x0) + dot(x1,x1) + dot(x2,x2) + dot(x3,x3);
     x0 *= vload_half4(j*4+0, rms_scale); x1 *= vload_half4(j*4+1, rms_scale);
@@ -338,7 +390,7 @@ __kernel void linear_fused_f32(XSPACE float* x XATTR,
 #define DO_WIDE_I8(u) WIDE_I8(u, a##u)
     REP(DO_WIDE_I8)
 #else
-    float8 xv = vload8(j, x+xb);
+    float8 xv = XL8(j);
 #if PRENORM
     ss += dot(xv.lo,xv.lo) + dot(xv.hi,xv.hi);
     xv *= vload_half8(j, rms_scale);
@@ -357,7 +409,7 @@ __kernel void linear_fused_f32(XSPACE float* x XATTR,
 
   // ── tail: the original 4-wide step, for any in_dim the wide step does not divide ─────────────
   for(int j=tail0+tid;j<in4;j+=WG){
-    float4 xv=vload4(j,x+xb);
+    float4 xv=XL4(j);
 #if PRENORM
     // sum of squares uses the RAW x, exactly as rms_norm_wg_f32 does; the scale is applied to the
     // value that enters the dot product, never to the value that is squared.

@@ -60,6 +60,7 @@ extern "C" cl_mem Encoder_forward(
     if (!add){ cl_program p=cl_ctx.build_program_from_file("kernels/add_f32.cl");
         if(!p){NNOPT_ERROR("Encoder: build add");return nullptr;} add=clCreateKernel(p,"add_f32",&err); }
     if (!gr||!lk||!add) { NNOPT_ERROR("Encoder: kernel create"); return nullptr; }
+    (void)Wd;   // presence-checked above; the dense now goes through nnopt_gemv
 
     auto gather = [&](cl_mem table, int tok_start, cl_mem offs, int N, int dim, float scale)->cl_mem{
         cl_mem o = pool_alloc(cl_ctx.context(), CL_MEM_READ_WRITE, (size_t)dim*sizeof(float), nullptr, &err);
@@ -74,12 +75,23 @@ extern "C" cl_mem Encoder_forward(
     // branch0: sum over 12 → e0[768]; dense → b0[256]
     cl_mem e0 = gather(emb0, 0, off0b, 12, dim0, 1.0f);
     if (!e0) { NNOPT_ERROR("Encoder: branch0 gather"); return nullptr; }
-    cl_mem b0 = pool_alloc(cl_ctx.context(), CL_MEM_READ_WRITE, (size_t)out_dim*sizeof(float), nullptr, &err);
-    clSetKernelArg(lk,0,sizeof(cl_mem),&e0); clSetKernelArg(lk,1,sizeof(cl_mem),&Wd);
-    clSetKernelArg(lk,2,sizeof(cl_mem),&b0); clSetKernelArg(lk,3,sizeof(int),&dim0); clSetKernelArg(lk,4,sizeof(int),&out_dim);
-    const size_t nwg=((size_t)out_dim+7)/8; size_t lg[2]={1,nwg*64}, lws[2]={1,64};
-    clEnqueueNDRangeKernel(queue,lk,2,nullptr,lg,lws,0,nullptr,nullptr);
+    // Through nnopt_gemv, NOT a hand-rolled fp16 dispatch. This site used to bind `Wd` straight to
+    // linear_f32_w16, which is correct only while the bundle is fp16 — and the q4 bundle packs THIS
+    // tensor (`..._linear.weight -> q4_packed [256,384]` with a `.weight.scale` sibling). The fp16
+    // kernel then read 4-bit nibbles through vload_half AND ran off the end of every row, because
+    // the packed row is 384 bytes where 768 halves were assumed. The result was a conditioning
+    // vector of 256 NaNs, which propagated through cross-attention to NaN logits, and argmax over
+    // NaN returns index 0 — so every codebook of every frame sampled code 0 and the model emitted a
+    // fixed drone that ignored the prompt entirely. It reproduced identically on Adreno 840 and
+    // Apple M1, which is what proved it was never a GPU bug.
+    //
+    // nnopt_gemv picks the kernel from the tensor's own `.scale` presence, so it is right for both
+    // bundles and stays right for whatever the quantizer packs next.
+    cl_mem b0 = nnopt_gemv(cl_ctx, weights, queue, e0,
+                           E+"layers.0.layers.0.layers.1.layers.3.inner._linear.weight",
+                           1, dim0, out_dim, nullptr);
     pool_free(e0);
+    if (!b0) { NNOPT_ERROR("Encoder: branch0 dense"); return nullptr; }
     // branch1: mean over 132 → b1[256]
     cl_mem b1 = gather(emb1, 12, off1b, N1, dim1, 1.0f/(float)N1);
     if (!b1) { NNOPT_ERROR("Encoder: branch1 gather"); pool_free(b0); return nullptr; }

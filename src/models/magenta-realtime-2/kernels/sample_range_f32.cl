@@ -39,11 +39,16 @@ __kernel __attribute__((reqd_work_group_size(SAMPLE_WG, 1, 1)))
 void sample_range_f32(__global const float* logits, __global int* tokbuf,
                       const int base, const int count, const int q,
                       const float temperature, const int top_k,
-                      const float soft_cap, const uint seed, const uint frame){
+                      const float soft_cap, const uint seed,
+                      // Device buffer, not a host-set uint: a recording holds no copy of its args,
+                      // so a host-baked frame would freeze at the captured frame and every replay
+                      // would redraw the same noise. Same mechanism `pos` already uses.
+                      __global const int* frame_buf){
   __local float lv[SAMPLE_WG];
   __local int   li[SAMPLE_WG];
   __local float kth;
   const int t = get_local_id(0);
+  const uint frame = (uint)frame_buf[0];
 
   // ── 1. top-k threshold: the k-th largest logit, by k passes of "max below the last max" ──
   // Skipped when k covers the whole slice, which is the common case for k >= count.

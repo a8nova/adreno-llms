@@ -66,6 +66,15 @@ extern "C" cl_mem MLP_forward(
     const int fuse = nnopt_fuse_level();
     const std::string rms_key =
         (fuse >= 2 && prenorm_prefix) ? std::string(prenorm_prefix) + ".weight" : std::string();
+
+    // ── STEP 2: the whole block in one dispatch (kernels/depth_mlp_mega.cl) ────────────────────
+    // DEFAULT OFF (NNOPT_MEGAMLP=1). Gated on the barrier probe having passed on THIS device, so a
+    // driver where the global barrier does not hold can never reach it. Every precondition it needs
+    // was measured first: barrier completes to G=48, and data written before it is visible after it.
+    if (nnopt_megamlp_enabled() && nnopt_barrier_max_groups() >= 8 && seq_len == 1 && !rms_key.empty()) {
+        cl_mem r = nnopt_depth_mlp_mega(cl_ctx, weights, queue, input, wp, rms_key);
+        if (r) return r;            // null = not eligible (quantised weights, odd shape); fall through
+    }
     cl_mem d1 = dense_bias(cl_ctx, queue, weights, input, seq_len,
                            wp + ".layers.1.inner._linear", rms_key, fuse >= 1);
     if (!d1) return nullptr;

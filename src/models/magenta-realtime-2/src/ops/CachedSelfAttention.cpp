@@ -85,7 +85,20 @@ extern "C" cl_mem CachedSelfAttention_forward(
     // level (identical every frame, so it takes an immutable buffer the recording can pin).
     cl_mem posb = nnopt_pos_buffer(cl_ctx, queue, pos, /*constant=*/!has_sink);
     if (!posb) { NNOPT_ERROR("CachedSelfAttn: pos buffer"); pool_free(qkv); return nullptr; }
-    {
+    // NNOPT_FUSEKV=0 restores the standalone kv_append dispatch. Default ON: the append is folded
+    // into the workgroup attention kernel below, which removes 36 dispatches/frame that carried
+    // 2.2 us of GPU work each. Only the WORKGROUP kernel can absorb it (it runs one workgroup per
+    // head, so head h can write its own cache slice and barrier locally); the serial fallback and
+    // the non-parallel path still need the separate dispatch, hence `fuse_kv` is ANDed with wg_ok
+    // further down and this block runs whenever the fused path will not.
+    const bool fuse_kv = [] {
+        const char* e = std::getenv("NNOPT_FUSEKV");
+        return !(e && e[0] == '0');
+    }();
+    const int  span_pre = (has_sink ? 1 : 0) + (pos - std::max(0, pos - (has_sink ? 41 : (pos+1))) + 1);
+    const bool wg_path  = par && D <= kWgAttnMaxD && span_pre <= kWgAttnMaxPos;
+    const bool kv_fused = fuse_kv && wg_path;
+    if (!kv_fused) {
         static cl_kernel kv = nullptr;
         if (!kv) {
             cl_program p = cl_ctx.build_program_from_file("kernels/kv_append_f32.cl");
@@ -117,10 +130,14 @@ extern "C" cl_mem CachedSelfAttention_forward(
     clSetKernelArg(ak,6,sizeof(cl_mem),&out); clSetKernelArg(ak,7,sizeof(int),&H); clSetKernelArg(ak,8,sizeof(int),&D);
     clSetKernelArg(ak,9,sizeof(cl_mem),&posb); clSetKernelArg(ak,10,sizeof(int),&hs); clSetKernelArg(ak,11,sizeof(float),&inv_sqrt_d);
     clSetKernelArg(ak,12,sizeof(int),&max_past);
+    const int append_kv = kv_fused ? 1 : 0;
+    clSetKernelArg(ak,13,sizeof(int),&append_kv);
     // The parallel kernel sizes two local arrays from D and the attended span; outside those bounds
     // it would read past them, so fall back rather than produce quiet garbage.
     const int span = (has_sink ? 1 : 0) + (pos - std::max(0, pos - max_past_host) + 1);
-    const bool wg_ok = par && D <= kWgAttnMaxD && span <= kWgAttnMaxPos;
+    // Must match the decision made above, or the append is either done twice or not at all.
+    const bool wg_ok = wg_path;
+    (void)span;
     if (wg_ok) {
         const size_t ag=(size_t)H*64, al=(size_t)64;   // one 64-wide workgroup per head
         if(cl_ctx.profEnqueue(ak,1,&ag,&al,"attn")!=CL_SUCCESS){NNOPT_ERROR("CachedSelfAttn: attn");pool_free(qkv);pool_free(out);return nullptr;}

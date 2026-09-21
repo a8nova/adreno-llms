@@ -16,7 +16,12 @@
 
 __kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
 void sink_attention_wg_f32(
-    __global const float* qkv,          // [3*H*D]
+    // q and kv arrive as the SEPARATE buffers qkv_proj already produced, instead of being packed
+    // into one [3*H*D] block by two copy dispatches first. The packing was 2 dispatches per
+    // cross-attention call (24/frame) moving 0.05 ms of data — i.e. ~500:1 host-launch cost against
+    // actual work. Unpacked costs nothing: it is the same values at a different offset.
+    __global const float* q,            // [H*D]
+    __global const float* kv,           // [2*H*D] — k then v
     __global const half*  sink_k,       // [H*D]
     __global const half*  sink_v,       // [H*D]
     __global const half*  per_dim_scale,// [D]
@@ -24,14 +29,22 @@ void sink_attention_wg_f32(
     const int H,
     const int D,
     const float inv_sqrt_d,
-    const float log_n) {       // ln(number of identical source keys); 0 for a single key
+    // ln(N) is derived ON DEVICE from xpos rather than passed as a host float. N grows every
+    // frame until it saturates at max_src, so a host-set log_n is a per-frame value baked
+    // into a kernel argument — and a recording pins argument values at capture, which froze
+    // the conditioning attenuation at the captured frame's ln(2) for every replayed frame.
+    __global const int* xpos_buf,   // absolute cross-attention position; <0 means "no counter"
+    const int max_src) {            // ring depth (kMaxSrc); N = min(xpos+1, max_src)
   const int h   = get_group_id(0);
   const int lid = get_local_id(0);
   if (h >= H) return;
+  const int   xp_   = xpos_buf[0];
+  const int   nsrc_ = (xp_ < 0) ? 1 : ((xp_ + 1 < max_src) ? xp_ + 1 : max_src);
+  const float log_n = log((float)nsrc_);
   const int HD = H * D;
-  const size_t qb = (size_t)h * D;          // q[h,*]
-  const size_t kb = (size_t)HD + qb;        // k[h,*]
-  const size_t vb = (size_t)2 * HD + qb;    // v[h,*]
+  const size_t qb = (size_t)h * D;          // q[h,*] in q
+  const size_t kb = qb;                     // k[h,*] in kv
+  const size_t vb = (size_t)HD + qb;        // v[h,*] in kv
 
   // r_softplus_0 = 1/ln2 normalises so per_dim_scale=0 -> scale=query_scale (attention.py:38).
   const float r_softplus_0 = 1.442695041f;
@@ -40,10 +53,10 @@ void sink_attention_wg_f32(
 
   float s_sink = 0.0f, s_cur = 0.0f;
   for (int d = lid; d < D; d += WG) {
-    const float qd = qkv[qb + d];
+    const float qd = q[qb + d];
     const float sv = r_softplus_0 * inv_sqrt_d * log1p(exp(vload_half(d, per_dim_scale)));
     s_sink += qd * vload_half(qb + d, sink_k);
-    s_cur  += (qd * sv) * qkv[kb + d];
+    s_cur  += (qd * sv) * kv[kb + d];
   }
   rs[lid] = s_sink; rc[lid] = s_cur;
   barrier(CLK_LOCAL_MEM_FENCE);
@@ -62,5 +75,5 @@ void sink_attention_wg_f32(
   const float w0 = w0_l, w1 = w1_l;
 
   for (int d = lid; d < D; d += WG)
-    out[qb + d] = w0 * vload_half(qb + d, sink_v) + w1 * qkv[vb + d];
+    out[qb + d] = w0 * vload_half(qb + d, sink_v) + w1 * kv[vb + d];
 }

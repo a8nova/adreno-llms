@@ -23,18 +23,25 @@
 #include <cstdlib>
 #include <string>
 
-namespace KernelProfiler {
-
 // Re-read per generation, not once per process: in serve mode the first call happens during the
 // WARM-UP render, before a request has pushed NNOPT_PROFILE into the environment, so a latched flag
 // means a requested profile can never be produced. Keyed on the toggle epoch (see utils.h).
+//
+// DECLARED AT GLOBAL SCOPE ON PURPOSE. This forward-declares the free function that utils.cpp
+// defines. It used to sit inside `namespace KernelProfiler`, which made every call below resolve to
+// `KernelProfiler::nnopt_toggle_epoch()` — a symbol nothing defines. The Android link permits
+// unresolved symbols (it has to, for runtime OpenCL resolution), so that never failed the build; it
+// just left the profiling path referencing a symbol that is not there. The host link caught it.
 int nnopt_toggle_epoch();
+
+namespace KernelProfiler {
+
 inline bool enabled() {
     static int e = -1, e_epoch = -1;
-    if (e_epoch != nnopt_toggle_epoch()) {
+    if (e_epoch != ::nnopt_toggle_epoch()) {
         const char* env = std::getenv("NNOPT_PROFILE");
         e = (env && env[0] != '0') ? 1 : 0;
-        e_epoch = nnopt_toggle_epoch();
+        e_epoch = ::nnopt_toggle_epoch();
     }
     return e == 1;
 }

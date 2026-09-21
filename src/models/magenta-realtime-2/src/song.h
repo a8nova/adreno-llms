@@ -31,9 +31,24 @@ struct SongConditioning {
     // path — text → tokens → encoder → cross-attention. `source` below is only the fallback for
     // when nothing supplies tokens.
     std::vector<int32_t> style_tokens;   // [144] or empty
+    // Optional conditioning RAMP: `ramp_stride` frames per step, flattened [nsteps * 144], oldest
+    // first, and the LAST step must equal style_tokens. Empty = the conditioning is constant for
+    // the whole request, which is the single-prompt case.
+    //
+    // Upstream re-blends and re-encodes every frame, so dragging a blend moves the conditioning in
+    // 40 ms steps. This port only hears about a change once per request, which made a drag one 2 s
+    // cliff. Re-quantising per frame is not available to us — musiccoca_quantize is 12 dispatches
+    // each ending in a blocking readback — so the caller quantises a handful of intermediate
+    // blends off the frame path and hands them down here instead.
+    std::vector<int32_t> style_ramp;
+    int                  ramp_stride = 0;
     std::vector<float> source;           // [256]  cross-attention conditioning (fallback)
     std::string        name;             // label for logs / bench lines
     bool               is_fixture = false;  // true = the shipped debug fixture, not a real style
+    // Where temporal_input came from, which is NOT the same question as `is_fixture`: a prompt
+    // render clears is_fixture to label the run (main.cpp), while temporal_input is still the
+    // shipped optest blob. Frame 0's seed has to key off provenance, not off the label.
+    bool               temporal_from_fixture = false;
 };
 
 // Sweep CLBlast's Xgemm parameter space on THIS device against a real codec chunk, and return a
@@ -47,9 +62,19 @@ struct SongConditioning {
 // device with no shell.
 // Arm the depth loop's sampler for the next render. temperature <= 0 restores greedy argmax.
 void nnopt_set_sampling(float temperature, int top_k, unsigned seed);
+// The seed the LAST render actually used. seed=0 in a request means "vary per render", so the
+// requested value does not identify a render and a fingerprint carrying it would not reproduce.
+unsigned nnopt_get_sample_seed();
+
+// Is the codec's cross-chunk streaming state active? See nnopt_codec_stream_on in backbone.cpp.
+bool nnopt_codec_stream_on();
 
 bool nnopt_codecchunk_check(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queue,
                             int T, int CK);
+
+// Decode a fixed-seed synthetic grid and print a fingerprint (per-frame RMS/peak) for comparison
+// against the reference SpectroStream on a host. See the definition for the shared LCG.
+bool nnopt_codecref_check(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queue, int T);
 
 std::string nnopt_xgemm_sweep(OpenCLContext& cl_ctx, Weights& weights,
                               const std::vector<int>& grid, int n_frames, int chunk);

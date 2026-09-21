@@ -32,6 +32,11 @@ constexpr int kMidiConditioningTokens =
 // port already reproduces in src/ops/Encoder.cpp.
 constexpr int kMidiOffset = 7;
 
+// A channel that is MASKED OUT — magenta_rt writes -1 for "this input is not being supplied", then
+// shifts the whole block by kMidiOffset. Both the unconditioned default and the CFG negatives are
+// built from this, so it is named once rather than spelled `-1 + kMidiOffset` at each site.
+constexpr int kMaskedCondToken = -1 + kMidiOffset;   // 6
+
 // Index of each section within the 144.
 constexpr int kMidiNotesAt = kMidiStyleTokens;                 // 12
 constexpr int kMidiDrumAt  = kMidiNotesAt + kMidiNotes;        // 140
@@ -97,3 +102,11 @@ bool midi_build_conditioning(const std::vector<int32_t>& style_tokens, const Mid
 // pass nothing asked for. A state with active=false is a no-op.
 // Returns false if `tokens` is not 144 long.
 bool midi_apply_to_conditioning(const MidiState& midi, std::vector<int32_t>& tokens);
+
+// The three CFG scales as FLOATS — the same values the 3 CFG conditioning channels encode.
+//
+// Two mechanisms upstream share the name "CFG" and this port needs both: the discretized channels
+// above (the model's "how hard should I follow each stream" input) and real logit-space guidance,
+// `pos + scale*(pos - neg)`, in the sampler. Both read from here so they cannot drift apart.
+// Any output pointer may be null.
+void midi_cfg_scales(float* musiccoca, float* notes, float* drums);

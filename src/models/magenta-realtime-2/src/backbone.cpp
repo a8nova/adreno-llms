@@ -23,6 +23,7 @@
 #include "model_config.h"
 #include "utils.h"
 #include "song.h"
+#include "musiccoca.h"
 
 #include <CL/cl.h>
 #include <cstdint>
@@ -115,7 +116,8 @@ static cl_mem residual_add(OpenCLContext& cl_ctx, cl_command_queue queue, cl_mem
 // Replaces the per-block `post=RMSNorm(x); out=residual_add(resid,post)` (2 enqueues) — the AR is
 // host-issue-bound so this directly cuts wall. wp is the rms_norm weight prefix; seq_len assumed 1 (AR).
 static cl_mem rmsnorm_add(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queue,
-                          cl_mem x, cl_mem residual, int dim, const std::string& wp) {
+                          cl_mem x, cl_mem residual, int dim, const std::string& wp,
+                          cl_mem dest = nullptr) {
     (void)queue;
     // Serial (1 work item) vs workgroup-parallel. The serial kernel walks 768–1024 elements twice on
     // ONE lane of ONE compute unit — 384 us/call, 84 calls/frame — because Adreno cannot spread a
@@ -139,7 +141,9 @@ static cl_mem rmsnorm_add(OpenCLContext& cl_ctx, Weights& weights, cl_command_qu
     cl_kernel k = nnopt_kernel_instance(slot, wp, ".rms_add");
     cl_mem scale=weights.get_buffer(wp+".weight");
     if(!scale){ NNOPT_ERROR_FMT("rmsnorm_add: missing %s.weight", wp.c_str()); return nullptr; }
-    cl_mem out=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)dim*sizeof(float),nullptr,&err);
+    // `dest` is the RESADD fallback: the consumer already has a buffer it expected this value in.
+    cl_mem out = dest ? dest
+                      : pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)dim*sizeof(float),nullptr,&err);
     const float eps=1e-6f;
     clSetKernelArg(k,0,sizeof(cl_mem),&x); clSetKernelArg(k,1,sizeof(cl_mem),&scale); clSetKernelArg(k,2,sizeof(cl_mem),&residual);
     clSetKernelArg(k,3,sizeof(cl_mem),&out); clSetKernelArg(k,4,sizeof(int),&dim); clSetKernelArg(k,5,sizeof(float),&eps);
@@ -152,23 +156,83 @@ static cl_mem rmsnorm_add(OpenCLContext& cl_ctx, Weights& weights, cl_command_qu
     return out;
 }
 
+// ── RESADD: hand the post-norm + residual to the NEXT block's pre-norm GEMV ─────────────────────
+// `out = resid + rms2(proj)` is a whole dispatch for 6 us of GPU work, 84 times a frame. When the
+// consumer is a pre-norm GEMV it can form that value in its own registers instead (kernels/
+// linear_bias_fused_f32.cl, RESADD), so the pair costs one dispatch rather than two.
+//
+// OWNERSHIP. Deferring means proj and the residual must outlive the block that made them — the
+// consuming GEMV still has to read both. The slot therefore TAKES them, and frees them when the
+// value is finally formed, whether that happens in the GEMV or in the fallback below. A caller
+// that armed must not free either buffer.
+namespace {
+cl_mem g_ra_own_proj = nullptr, g_ra_own_resid = nullptr;
+
+// Form the value with the standalone kernel after all, into the same buffer the consumer expected.
+// Every path that cannot fuse ends here, which is why arming is always safe.
+void resadd_materialize(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queue) {
+    if (!g_ra_own_proj) return;
+    NnoptResAdd ra = nnopt_resadd_pending();
+    cl_mem got = rmsnorm_add(cl_ctx, weights, queue, ra.proj, ra.resid, ra.dim, ra.wp, ra.out);
+    (void)got;
+    pool_free(g_ra_own_proj);  g_ra_own_proj = nullptr;
+    pool_free(g_ra_own_resid); g_ra_own_resid = nullptr;
+    nnopt_resadd_clear();
+}
+// True while the slot is keeping this buffer alive for a consumer that has not run yet. The block
+// loops ask before freeing their input, because on a deferred block that input IS the residual.
+bool resadd_owns(cl_mem b) { return b && (b == g_ra_own_proj || b == g_ra_own_resid); }
+
+// Arm, taking ownership of proj and resid. Returns the buffer the value will land in — which is
+// UNINITIALISED until either the consuming GEMV or resadd_materialize() fills it, so nothing may
+// read it before the next block's first dispatch.
+cl_mem resadd_arm(OpenCLContext& cl_ctx, Weights& weights, cl_mem proj, cl_mem resid,
+                  int dim, const std::string& wp) {
+    cl_mem scale = weights.get_buffer(wp + ".weight");
+    cl_int e = CL_SUCCESS;
+    cl_mem out = pool_alloc(cl_ctx.context(), CL_MEM_READ_WRITE, (size_t)dim*sizeof(float), nullptr, &e);
+    if (!scale || !out) { if (out) pool_free(out); return nullptr; }
+    NnoptResAdd ra; ra.proj=proj; ra.resid=resid; ra.scale=scale; ra.out=out;
+    ra.dim=dim; ra.eps=1e-6f; ra.wp=wp;
+    nnopt_resadd_arm(ra);
+    g_ra_own_proj = proj; g_ra_own_resid = resid;
+    return out;
+}
+
+// The consumer took it: the value is in ra.out, so only the inputs need releasing.
+void resadd_release_inputs() {
+    if (g_ra_own_proj)  { pool_free(g_ra_own_proj);  g_ra_own_proj = nullptr; }
+    if (g_ra_own_resid) { pool_free(g_ra_own_resid); g_ra_own_resid = nullptr; }
+    nnopt_resadd_clear();
+}
+}  // namespace
+
 // ── one attention Residual block: x + rms2(out_proj(attn(rms1(x)))) ──
 // body.layers: 0=rms1, 1=attn(inner), 2=out_proj(EinsumDense), 4=rms2.
 // is_cross: use CrossAttention(source) instead of SinkAttention.
+//
+// `pos` is the absolute frame index, handed to the cross-attention so it can size its conditioning
+// ring (upstream keeps 41 past source frames + the current one — see CrossAttention.cpp). It is
+// ignored when is_cross is false. -1 means "no frame counter here", i.e. treat it as frame 0.
+//
+// xk/xv are this layer's cross-attention conditioning ring (one pair per layer, since kv_proj is
+// per-layer). Null = no ring, and the cross-attention falls back to its ln(N) single-source form.
 static cl_mem attn_block(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queue,
-                         cl_mem x, const std::string& body, int dim, bool is_cross, cl_mem source) {
+                         cl_mem x, const std::string& body, int dim, bool is_cross, cl_mem source,
+                         int pos = -1, cl_mem* xk = nullptr, cl_mem* xv = nullptr,
+                         bool defer_post = false) {
     const std::string rms_pfx = body + ".layers.0._rms_norm";
     cl_mem rms1 = nullptr, attn = nullptr;
     // Cross-attention folds its pre-norm into q_proj; the sink path keeps the separate norm (its
     // projection is shared with a code path that has no key to hand down).
     if (is_cross && nnopt_fuse_level() >= 3) {
-        attn = CrossAttention_forward(cl_ctx,weights,queue,x,1,0,0,nullptr,nullptr,source,
+        attn = CrossAttention_forward(cl_ctx,weights,queue,x,1,0,pos,xk,xv,source,
                                       (body+".layers.1.inner").c_str(), rms_pfx.c_str());
     } else {
         rms1 = RMSNorm_forward(cl_ctx,weights,queue,x,1,0,0,nullptr,nullptr,nullptr,rms_pfx.c_str());
         if (!rms1) return nullptr;
         attn = is_cross
-            ? CrossAttention_forward(cl_ctx,weights,queue,rms1,1,0,0,nullptr,nullptr,source,(body+".layers.1.inner").c_str())
+            ? CrossAttention_forward(cl_ctx,weights,queue,rms1,1,0,pos,xk,xv,source,(body+".layers.1.inner").c_str())
             : SinkAttention_forward (cl_ctx,weights,queue,rms1,1,0,0,nullptr,nullptr,nullptr,(body+".layers.1.inner").c_str());
         pool_free(rms1);
     }
@@ -176,8 +240,14 @@ static cl_mem attn_block(OpenCLContext& cl_ctx, Weights& weights, cl_command_que
     cl_mem proj = QuantizedLinear_forward(cl_ctx,weights,queue,attn,1,0,0,nullptr,nullptr,nullptr,(body+".layers.2").c_str());
     pool_free(attn);
     if (!proj) return nullptr;
-    // fused: out = x + rms2(proj)  (was RMSNorm + residual_add — 2 enqueues → 1)
-    cl_mem out = rmsnorm_add(cl_ctx,weights,queue,proj,x,dim,body+".layers.4._rms_norm");
+    // fused: out = x + rms2(proj)  (was RMSNorm + residual_add — 2 enqueues → 1). With defer_post
+    // the NEXT block's pre-norm GEMV forms it and this block spends no dispatch on it at all.
+    const std::string post = body + ".layers.4._rms_norm";
+    if (defer_post && nnopt_resadd_enabled()) {
+        cl_mem out = resadd_arm(cl_ctx, weights, proj, x, dim, post);
+        if (out) return out;   // proj and x now belong to the slot
+    }
+    cl_mem out = rmsnorm_add(cl_ctx,weights,queue,proj,x,dim,post);
     pool_free(proj);
     return out;
 }
@@ -192,6 +262,15 @@ static cl_mem mlp_block(OpenCLContext& cl_ctx, Weights& weights, cl_command_queu
     // match, so the A/B compares like with like.
     const int fuse_blk = nnopt_fuse_level();
     const std::string rms_pfx = body + ".layers.0._rms_norm";
+    // A pending post-norm+residual is consumed by dense1's pre-norm GEMV. Check HERE, before
+    // anything reads the pending buffer, that the GEMV will actually take it — the conditions are
+    // nnopt_gemv_fused's own. If any fails, form the value the ordinary way and carry on; the only
+    // cost is the dispatch we were trying to save.
+    if (nnopt_resadd_pending().proj) {
+        const std::string d1key = body + ".layers.1.inner._linear";
+        const bool viable = fuse_blk >= 2 && (dim & 3) == 0 && !weights.has_tensor(d1key + ".scale");
+        if (!viable) resadd_materialize(cl_ctx, weights, queue);
+    }
     cl_mem ff = nullptr;
     if (fuse_blk >= 2) {
         ff = MLP_forward(cl_ctx,weights,queue,x,1,0,0,nullptr,nullptr,nullptr,body.c_str(),rms_pfx.c_str());
@@ -200,6 +279,12 @@ static cl_mem mlp_block(OpenCLContext& cl_ctx, Weights& weights, cl_command_queu
         if (!rms1) return nullptr;
         ff = MLP_forward(cl_ctx,weights,queue,rms1,1,0,0,nullptr,nullptr,nullptr,body.c_str());
         pool_free(rms1);
+    }
+    // dense1 has run, so a pending value is now formed in its own buffer and the inputs it was
+    // holding open can go. If the GEMV declined it after all, fall back rather than leak.
+    if (nnopt_resadd_pending().proj) {
+        if (nnopt_resadd_consumed()) resadd_release_inputs();
+        else                         resadd_materialize(cl_ctx, weights, queue);
     }
     if (!ff) return nullptr;
     // fused: out = x + rms2(ff)  (RMSNorm + residual_add → 1 enqueue)
@@ -218,8 +303,12 @@ static cl_mem run_temporal_body(OpenCLContext& cl_ctx, Weights& weights, cl_comm
         const std::string L = base + std::to_string(k) + ".layers.";
         cl_mem a = attn_block(cl_ctx,weights,queue,x,L+"0.body",dim,false,nullptr); if(!a){pool_free(x);return nullptr;}
         pool_free(x); x=a;
-        cl_mem c = attn_block(cl_ctx,weights,queue,x,L+"1.body",dim,true,source);  if(!c){pool_free(x);return nullptr;}
-        pool_free(x); x=c;
+        // pos = -1: this path renders ONE position with no frame history (the op-test entry point),
+        // so the conditioning ring is depth 1 — which is exactly what frame 0 sees upstream.
+        cl_mem c = attn_block(cl_ctx,weights,queue,x,L+"1.body",dim,true,source,-1,nullptr,nullptr,
+                              /*defer_post=*/true);                               if(!c){pool_free(x);return nullptr;}
+        if (!resadd_owns(x)) pool_free(x);
+        x=c;
         cl_mem mm = mlp_block(cl_ctx,weights,queue,x,L+"2.body",dim);              if(!mm){pool_free(x);return nullptr;}
         pool_free(x); x=mm;
     }
@@ -235,8 +324,10 @@ static cl_mem run_depth_body(OpenCLContext& cl_ctx, Weights& weights, cl_command
     const int dim = weights.get_shape(D+"layers.0.inner._linear.weight")[0];  // 768
     for (int k = 0; k < 2; ++k) {
         const std::string L = D + "layers.1.layers." + std::to_string(k) + ".layers.";
-        cl_mem a = attn_block(cl_ctx,weights,queue,h,L+"0.body",dim,false,nullptr); if(!a){pool_free(h);return nullptr;}
-        pool_free(h); h=a;
+        cl_mem a = attn_block(cl_ctx,weights,queue,h,L+"0.body",dim,false,nullptr,-1,nullptr,nullptr,
+                              /*defer_post=*/true);                                if(!a){pool_free(h);return nullptr;}
+        if (!resadd_owns(h)) pool_free(h);
+        h=a;
         cl_mem mm = mlp_block(cl_ctx,weights,queue,h,L+"2.body",dim);              if(!mm){pool_free(h);return nullptr;}
         pool_free(h); h=mm;
     }
@@ -251,7 +342,7 @@ static cl_mem run_depth_body(OpenCLContext& cl_ctx, Weights& weights, cl_command
 // ── one attention Residual block with a CACHED self-attn (temporal across frames) ──
 static cl_mem attn_block_cached(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queue,
                                 cl_mem x, const std::string& body, int dim,
-                                cl_mem* kc, cl_mem* vc, int pos) {
+                                cl_mem* kc, cl_mem* vc, int pos, bool defer_post = false) {
     // Pre-norm folded into qkv_proj at fuse>=2, exactly as the MLP block folds it into dense1 —
     // same kernel, same PRENORM path. One fewer dispatch per attention block, 36 per frame.
     const std::string rms_pfx = body + ".layers.0._rms_norm";
@@ -269,15 +360,21 @@ static cl_mem attn_block_cached(OpenCLContext& cl_ctx, Weights& weights, cl_comm
     if (!attn) return nullptr;
     cl_mem proj = QuantizedLinear_forward(cl_ctx,weights,queue,attn,1,0,0,nullptr,nullptr,nullptr,(body+".layers.2").c_str());
     pool_free(attn);
-    // fused: out = x + rms2(proj)
-    cl_mem out = rmsnorm_add(cl_ctx,weights,queue,proj,x,dim,body+".layers.4._rms_norm");
+    // fused: out = x + rms2(proj). See attn_block for what defer_post hands to the next block.
+    const std::string post = body + ".layers.4._rms_norm";
+    if (defer_post && nnopt_resadd_enabled()) {
+        cl_mem out = resadd_arm(cl_ctx, weights, proj, x, dim, post);
+        if (out) return out;
+    }
+    cl_mem out = rmsnorm_add(cl_ctx,weights,queue,proj,x,dim,post);
     pool_free(proj);
     return out;
 }
 
 // ── one temporal STEP (frame): 12 layers × [cached self-attn(pos), cross-attn(source), MLP] ──
 static cl_mem run_temporal_step(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queue,
-                                cl_mem x_in, cl_mem source, cl_mem* kc, cl_mem* vc, int dim, int pos) {
+                                cl_mem x_in, cl_mem source, cl_mem* kc, cl_mem* vc,
+                                cl_mem* xk, cl_mem* xv, int dim, int pos, int xpos) {
     const std::string base = "depthformer.decoder.temporal_body.layers.0.layers.";
     cl_mem x = pool_alloc(cl_ctx.context(), CL_MEM_READ_WRITE, (size_t)dim*sizeof(float), nullptr, nullptr);
     { static const std::string kSite("temporal.x_in");
@@ -286,8 +383,15 @@ static cl_mem run_temporal_step(OpenCLContext& cl_ctx, Weights& weights, cl_comm
         const std::string L = base + std::to_string(k) + ".layers.";
         cl_mem a = attn_block_cached(cl_ctx,weights,queue,x,L+"0.body",dim,&kc[k],&vc[k],pos); if(!a){pool_free(x);return nullptr;}
         pool_free(x); x=a;
-        cl_mem c = attn_block(cl_ctx,weights,queue,x,L+"1.body",dim,true,source);              if(!c){pool_free(x);return nullptr;}
-        pool_free(x); x=c;
+        // xpos, not pos: attn_block's position argument feeds the CROSS-attention only (the
+        // cached self-attention above carries its own), and the conditioning ring must not be
+        // renumbered by the KV-cache compaction that rewrites pos.
+        cl_mem c = attn_block(cl_ctx,weights,queue,x,L+"1.body",dim,true,source,xpos,
+                              xk ? &xk[k] : nullptr, xv ? &xv[k] : nullptr, /*defer_post=*/true);
+                                                                                               if(!c){pool_free(x);return nullptr;}
+        // x may now be the slot's residual, still needed by the MLP's dense1.
+        if (!resadd_owns(x)) pool_free(x);
+        x=c;
         cl_mem mm = mlp_block(cl_ctx,weights,queue,x,L+"2.body",dim);                           if(!mm){pool_free(x);return nullptr;}
         pool_free(x); x=mm;
     }
@@ -373,6 +477,7 @@ unsigned g_sample_seed = 0;
 void nnopt_set_sampling(float temperature, int top_k, unsigned seed) {
     g_sample_temp = temperature; g_sample_topk = top_k; g_sample_seed = seed;
 }
+unsigned nnopt_get_sample_seed() { return g_sample_seed; }
 
 // ── depth AR loop: sample one token per codebook → 12 RVQ tokens ──
 // num_reserved=6, codebook_size=1024, 12 codebooks.
@@ -385,16 +490,31 @@ void nnopt_set_sampling(float temperature, int top_k, unsigned seed) {
 // embedder feedback (isolates depth-step+cache correctness from the feedback/CFG loop).
 // Returns the GPU tokbuf [12] int — NO host readback, so the AR stays a deep async queue (caller
 // frees). The host-vector wrapper run_depth_loop() below reads it for op-tests.
+// CFG: `neg_temporal` carries the temporal output of each NEGATIVE conditioning stream and
+// `neg_scales` their guidance scales, combined per codebook before the sample. n_neg = 0 is the
+// old single-stream behaviour, bit-identical.
+//
+// Only the FIRST depth step differs between streams — its input is that stream's temporal output.
+// From step 1 on the input is the embedding of the token just sampled, and that token is shared by
+// construction (upstream interleaves the sample back across the batch), so the embedding is
+// computed once and every stream reads the same buffer. What does diverge is the depth self-
+// attention KV cache, because step 0 diverged: hence kc/vc per stream.
+static const int kMaxCfgStreams = 3;   // positive + musiccoca-negative + notes-negative
 static cl_mem run_depth_loop_gpu(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queue,
                                        cl_mem temporal_out, const std::vector<float>* fixed_inputs = nullptr,
-                                       int frame_idx = 0) {
+                                       int frame_idx = 0,
+                                       const cl_mem* neg_temporal = nullptr, int n_neg = 0,
+                                       const float* neg_scales = nullptr) {
     const int NUM_CB = 12, RESERVED = 6, CBSIZE = 1024;
+    if (!neg_temporal || !neg_scales) n_neg = 0;
+    if (n_neg > kMaxCfgStreams - 1) n_neg = kMaxCfgStreams - 1;
+    const int NS = 1 + n_neg;          // total streams
     const int HD = weights.get_shape(
         "depthformer.decoder.depth_body.layers.1.layers.0.layers.0.body.layers.1.inner.qkv_proj.weight")[0] / 3; // 768
-    cl_mem kc[2], vc[2];
-    for (int L=0; L<2; ++L) {
-        kc[L]=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)NUM_CB*HD*sizeof(float),nullptr,nullptr);
-        vc[L]=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)NUM_CB*HD*sizeof(float),nullptr,nullptr);
+    cl_mem kc_s[kMaxCfgStreams][2] = {{nullptr}}, vc_s[kMaxCfgStreams][2] = {{nullptr}};
+    for (int s=0; s<NS; ++s) for (int L=0; L<2; ++L) {
+        kc_s[s][L]=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)NUM_CB*HD*sizeof(float),nullptr,nullptr);
+        vc_s[s][L]=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)NUM_CB*HD*sizeof(float),nullptr,nullptr);
     }
     cl_int e2;
     auto fixed_buf = [&](int q)->cl_mem{
@@ -407,33 +527,83 @@ static cl_mem run_depth_loop_gpu(OpenCLContext& cl_ctx, Weights& weights, cl_com
     if(!amk){ cl_program p=cl_ctx.build_program_from_file("kernels/argmax_range_f32.cl"); amk=clCreateKernel(p,"argmax_range_f32",&e3); }
     static cl_kernel smk=nullptr;
     if(!smk){ cl_program p=cl_ctx.build_program_from_file("kernels/sample_range_f32.cl"); if(p) smk=clCreateKernel(p,"sample_range_f32",&e3); }
+    static cl_kernel cfk=nullptr;
+    if(!cfk){ cl_program p=cl_ctx.build_program_from_file("kernels/sample_range_cfg_f32.cl"); if(p) cfk=clCreateKernel(p,"sample_range_cfg_f32",&e3); }
     if(!eok){ cl_program p=cl_ctx.build_program_from_file("kernels/embed_one_f16.cl"); eok=clCreateKernel(p,"embed_one_f16",&e3); }
     cl_mem etab=weights.get_buffer("depthformer.decoder.embedder.layers.0._embedding.weight");
     const std::vector<int> esh=weights.get_shape("depthformer.decoder.embedder.layers.0._embedding.weight");
     const int evoc=esh[0], edim=esh[1];
     cl_mem tokbuf=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)NUM_CB*sizeof(int),nullptr,&e3);
-    cl_mem depth_input;
-    if (fixed_inputs) depth_input = fixed_buf(0);
-    else { depth_input = pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)1024*sizeof(float),nullptr,nullptr);
+    // Per-stream depth input. Stream 0 is the positive conditioning; the rest are the negatives.
+    // Only step 0 uses these separately — see the note above the function.
+    cl_mem depth_in[kMaxCfgStreams] = {nullptr};
+    if (fixed_inputs) depth_in[0] = fixed_buf(0);
+    else { depth_in[0] = pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)1024*sizeof(float),nullptr,nullptr);
            static const std::string kSite("depth.input");
-           nnopt_copy_buffer(cl_ctx, temporal_out, depth_input, 0, 0, 1024, kSite, nullptr); }
+           nnopt_copy_buffer(cl_ctx, temporal_out, depth_in[0], 0, 0, 1024, kSite, nullptr); }
+    for (int s=1; s<NS; ++s) {
+        depth_in[s] = pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)1024*sizeof(float),nullptr,nullptr);
+        static const std::string kSiteNeg("depth.input.neg");
+        nnopt_copy_buffer(cl_ctx, neg_temporal[s-1], depth_in[s], 0, 0, 1024, kSiteNeg, nullptr);
+    }
+    cl_mem& depth_input = depth_in[0];
     for (int q=0; q<NUM_CB; ++q) {
         const int lo=RESERVED+q*CBSIZE;
-        cl_mem logits = run_depth_step(cl_ctx,weights,queue,depth_input,kc,vc,q,lo,CBSIZE);
-        if (!logits) { NNOPT_ERROR_FMT("depth loop: step %d failed", q); break; }
+        cl_mem lg[kMaxCfgStreams] = {nullptr};
+        bool step_ok = true;
+        for (int s=0; s<NS; ++s) {
+            lg[s] = run_depth_step(cl_ctx,weights,queue,depth_in[s],kc_s[s],vc_s[s],q,lo,CBSIZE);
+            if (!lg[s]) { NNOPT_ERROR_FMT("depth loop: step %d stream %d failed", q, s); step_ok = false; break; }
+        }
+        if (!step_ok) { for (int s=0;s<NS;++s) if (lg[s]) pool_free(lg[s]); break; }
+        cl_mem logits = lg[0];
         // logits is the [0,CBSIZE) slice now → argmax over the whole slice, token = lo + argmax.
         int base=lo, cnt=CBSIZE;
         const size_t ag=64, al=64;   // one 64-wide workgroup, not one work item
-        if (g_sample_temp > 0.0f && smk) {
+        // The frame index the sampler's RNG mixes in, read from the SAME device buffer the
+        // temporal attention uses (nnopt_pos_buffer's mutable singleton, already holding pos0+f for
+        // this frame; the depth body takes immutable per-level buffers, so nothing clobbers it in
+        // between). It used to be a host-set kernel argument — and a recording pins argument VALUES
+        // at capture, so every replayed frame redrew the Gumbel noise of the captured frame. That
+        // is what failed RECORDQ verification on every single run (live 770 vs replay 942 at
+        // codebook 0) and kept record/replay switched off. Identical value, so sampling is
+        // unchanged; the only difference is that a capture is now valid for every later frame.
+        cl_mem frame_buf = nullptr;
+        if (g_sample_temp > 0.0f) {
+            frame_buf = nnopt_pos_buffer(cl_ctx, queue, frame_idx);
+            if (!frame_buf) { NNOPT_ERROR("depth loop: sampler frame buffer");
+                              for (int s=0;s<NS;++s) if (lg[s]) pool_free(lg[s]); break; }
+        }
+        if (NS > 1 && g_sample_temp > 0.0f && cfk) {
+            // CFG combine + sample. Unused negative slots alias the positive and carry scale 0, so
+            // the kernel needs no branch and the term is exactly zero.
+            static const std::string kSampleCfg("depth.sample.cfg");
+            cl_kernel cfki = nnopt_kernel_instance(cfk, kSampleCfg);
+            const float cap = 30.0f;              // soft_cap_logits, magenta_rt/jax/model.py
+            const unsigned sd = g_sample_seed;
+            cl_mem l1 = (NS > 1) ? lg[1] : lg[0];
+            cl_mem l2 = (NS > 2) ? lg[2] : lg[0];
+            const float s1 = (NS > 1) ? neg_scales[0] : 0.0f;
+            const float s2 = (NS > 2) ? neg_scales[1] : 0.0f;
+            clSetKernelArg(cfki,0,sizeof(cl_mem),&logits); clSetKernelArg(cfki,1,sizeof(cl_mem),&l1);
+            clSetKernelArg(cfki,2,sizeof(cl_mem),&l2);     clSetKernelArg(cfki,3,sizeof(cl_mem),&tokbuf);
+            clSetKernelArg(cfki,4,sizeof(int),&base);      clSetKernelArg(cfki,5,sizeof(int),&cnt);
+            clSetKernelArg(cfki,6,sizeof(int),&q);
+            clSetKernelArg(cfki,7,sizeof(float),&s1);      clSetKernelArg(cfki,8,sizeof(float),&s2);
+            clSetKernelArg(cfki,9,sizeof(float),&g_sample_temp);
+            clSetKernelArg(cfki,10,sizeof(int),&g_sample_topk); clSetKernelArg(cfki,11,sizeof(float),&cap);
+            clSetKernelArg(cfki,12,sizeof(unsigned),&sd);  clSetKernelArg(cfki,13,sizeof(cl_mem),&frame_buf);
+            cl_ctx.profEnqueue(cfki,1,&ag,&al,"sample_cfg");
+        } else if (g_sample_temp > 0.0f && smk) {
             static const std::string kSample("depth.sample");
             cl_kernel smki = nnopt_kernel_instance(smk, kSample);
             const float cap = 30.0f;              // soft_cap_logits, magenta_rt/jax/model.py
-            const unsigned sd = g_sample_seed, fr = (unsigned)frame_idx;
+            const unsigned sd = g_sample_seed;
             clSetKernelArg(smki,0,sizeof(cl_mem),&logits); clSetKernelArg(smki,1,sizeof(cl_mem),&tokbuf);
             clSetKernelArg(smki,2,sizeof(int),&base);      clSetKernelArg(smki,3,sizeof(int),&cnt);
             clSetKernelArg(smki,4,sizeof(int),&q);         clSetKernelArg(smki,5,sizeof(float),&g_sample_temp);
             clSetKernelArg(smki,6,sizeof(int),&g_sample_topk); clSetKernelArg(smki,7,sizeof(float),&cap);
-            clSetKernelArg(smki,8,sizeof(unsigned),&sd);   clSetKernelArg(smki,9,sizeof(unsigned),&fr);
+            clSetKernelArg(smki,8,sizeof(unsigned),&sd);   clSetKernelArg(smki,9,sizeof(cl_mem),&frame_buf);
             cl_ctx.profEnqueue(smki,1,&ag,&al,"sample");
         } else {
             static const std::string kArgmax("depth.argmax");
@@ -442,8 +612,12 @@ static cl_mem run_depth_loop_gpu(OpenCLContext& cl_ctx, Weights& weights, cl_com
             clSetKernelArg(amki,2,sizeof(int),&base); clSetKernelArg(amki,3,sizeof(int),&cnt); clSetKernelArg(amki,4,sizeof(int),&q);
             cl_ctx.profEnqueue(amki,1,&ag,&al,"argmax");
         }
-        pool_free(logits);
+        for (int s=0; s<NS; ++s) pool_free(lg[s]);
         if (q < NUM_CB-1) {
+            // The next step's input is the embedding of the token just sampled, and that token is
+            // the same for every stream, so this is embedded ONCE and shared. Streams 1..NS-1 hand
+            // back their step-0 buffers here and then alias stream 0 for the rest of the frame.
+            for (int s=1; s<NS; ++s) { if (depth_in[s] && depth_in[s] != depth_in[0]) pool_free(depth_in[s]); }
             pool_free(depth_input);
             if (fixed_inputs) depth_input = fixed_buf(q+1);
             else { // embed tokbuf[q] (stays on GPU)
@@ -454,10 +628,12 @@ static cl_mem run_depth_loop_gpu(OpenCLContext& cl_ctx, Weights& weights, cl_com
                 clSetKernelArg(eoki,3,sizeof(cl_mem),&depth_input); clSetKernelArg(eoki,4,sizeof(int),&edim); clSetKernelArg(eoki,5,sizeof(int),&evoc);
                 size_t ed=(size_t)edim; cl_ctx.profEnqueue(eoki,1,&ed,nullptr,"embed1");
             }
+            for (int s=1; s<NS; ++s) depth_in[s] = depth_in[0];
         }
     }
-    pool_free(depth_input);
-    for (int L=0; L<2; ++L) { pool_free(kc[L]); pool_free(vc[L]); }
+    for (int s=NS-1; s>=1; --s) if (depth_in[s] && depth_in[s] != depth_in[0]) pool_free(depth_in[s]);
+    pool_free(depth_in[0]);
+    for (int s=0; s<NS; ++s) for (int L=0; L<2; ++L) { pool_free(kc_s[s][L]); pool_free(vc_s[s][L]); }
     return tokbuf;  // GPU [12] int — caller frees; no readback here
 }
 
@@ -486,6 +662,12 @@ static cl_mem frame_embed_mean(OpenCLContext& cl_ctx, Weights& weights, cl_comma
     std::vector<float> host((size_t)Q*dim);
     clEnqueueReadBuffer(queue,g,CL_TRUE,0,host.size()*sizeof(float),host.data(),0,nullptr,nullptr);
     pool_free(g);
+    // Plain mean over codebooks (_mean_in_f32 axis=-2, mlx/depthformer.py). The embedder's
+    // sqrt(embedding_dim) scale is ALREADY applied inside the gather — embedding_gather_f16.cl
+    // multiplies by sqrt(dim) on read — so do NOT apply it again here. (Measured 2026-09-10: adding
+    // it a second time put the frame-0 seed at norm 2636 instead of 82.37, i.e. 32x too large.
+    // frame_embed_from_tokbuf looks like it contradicts this but does not: it uses
+    // gather_reduce_f16.cl, which does NOT scale on read, so it passes sqrt(dim)/N itself.)
     std::vector<float> mean(dim,0.0f);
     for (int q=0;q<Q;q++) for (int d=0;d<dim;d++) mean[d]+=host[(size_t)q*dim+d];
     for (int d=0;d<dim;d++) mean[d]/=(float)Q;
@@ -514,7 +696,7 @@ static cl_mem frame_embed_mean_gpu(OpenCLContext& cl_ctx, Weights& weights, cl_c
                if (p) mk = clCreateKernel(p, "mean_rows_f32", &e); }
     if (!mk) { pool_free(g); return frame_embed_mean(cl_ctx, weights, queue, toks); }
     cl_mem out = pool_alloc(cl_ctx.context(), CL_MEM_READ_WRITE, (size_t)dim*sizeof(float), nullptr, &e);
-    const float scale = 1.0f/(float)Q;
+    const float scale = 1.0f/(float)Q;   // mean only — embedding_gather_f16.cl already scaled by sqrt(dim)
     clSetKernelArg(mk,0,sizeof(cl_mem),&g); clSetKernelArg(mk,1,sizeof(cl_mem),&out);
     clSetKernelArg(mk,2,sizeof(int),&Q); clSetKernelArg(mk,3,sizeof(int),&dim); clSetKernelArg(mk,4,sizeof(float),&scale);
     size_t gd=(size_t)dim; cl_ctx.profEnqueue(mk,1,&gd,nullptr,"frame_mean");
@@ -589,6 +771,12 @@ static size_t g_codec_peak_alloc = 0;
 #include <tuple>
 #include <fstream>
 #include <sstream>
+
+// Frame-0 pipeline norms for the one-line LOG_TRACE summary (see log_parity in main.cpp).
+// File scope with external linkage on purpose: main.cpp declares them extern so the whole
+// pipeline fits on ONE log line per chunk, which is the only channel off a device farm.
+double g_trace_src = 0.0, g_trace_ti = 0.0, g_trace_to = 0.0;
+
 struct CodecF32Store {
     std::vector<float> blob;
     std::map<std::string, std::pair<size_t,size_t>> idx; // name -> (offset_floats, num)
@@ -777,6 +965,39 @@ static cl_mem conv_clblast(OpenCLContext& cl_ctx, cl_command_queue queue, cl_mem
         // artifact the change was aimed at was still audible. It bought nothing that could be heard
         // and cost the headroom that makes live mode work, so the shipping config goes back to what
         // is fast. Both axes stay reachable from the Precision and Codec chips for A/B.
+        // OFF AGAIN as of 2026-09-11, and this time the artifact is MEASURED rather than argued.
+        // The `codecref` fixed-code fingerprint (deterministic RVQ codes, no AR, no sampler) against
+        // the MLX reference, on an Adreno 840:
+        //
+        //   device fp32 vs reference : 0.0071% median deviation  -- the codec itself is EXACT
+        //   device fp16 vs device fp32, same codes:
+        //       RMS   median 0.268% (-51.5 dB)   worst 2.825% (-31.0 dB)
+        //       PEAK  median 0.789% (-42.1 dB)   worst 9.158% (-20.8 dB)
+        //
+        // Peak error is 3x the RMS error at both the median and the worst case. That is the
+        // signature of TRANSIENT damage: steady content survives fp16 at -51 dB (inaudible), while
+        // attacks take up to -20.8 dB (audible), on a few frames rather than all of them. It is
+        // exactly the reported symptom -- "sounds right but off at times", worst on percussive
+        // material -- and it is why the previous attempt to judge this by whole-clip cosine failed:
+        // cosine over a whole clip reads ~0.999 here and averages the bad frames away.
+        //
+        // The 2026-08-28 note below reverted this because fp32 measured 0.85x. Two things changed:
+        // h_sa (the tuned fp16 HGEMM tile, ~22-35% off the codec) and the live-mode measurement that
+        // codec_sec is 0.000 s -- under pipeline=1 the codec is already fully hidden behind the AR,
+        // so max(AR, codec) is set by the AR at ar_sec 1.36-1.56 s. Codec cost only becomes visible
+        // again if it exceeds the AR. That is the headroom this spends, and it buys an artifact the
+        // user can hear. NNOPT_CODECFP16=1 still forces fp16 back on for A/B.
+        // REVERTED 2026-09-11, same day: fp32 is correct but too slow to ship as the default here.
+        // Measured on the 840 with 3 prompts: fp16+h_sa codec ~1.32 s/chunk vs fp32 ~2.03 s. The AR
+        // was 1.76 s, so max(AR, codec) flipped from AR-bound to CODEC-bound and FRAME went to 159%
+        // -- i.e. 1.59x real time, buffer draining to silence. (FRAME is 100/rtf and rtf is
+        // audio_s/total_s, so ABOVE 100% is slower than real time, not faster.)
+        //
+        // The measurement above still stands and the fix is not "fp16 is fine": it is that the
+        // damage comes from CLBlast's HGEMM ACCUMULATING in fp16 with K up to 4608, not from fp16
+        // storage. The plan is a per-conv split -- fp16 where K is small and the accumulation error
+        // is bounded, fp32 on the deep-K convs -- verified with codecref per-frame peak rather than
+        // by ear. Until that exists, shipping the artifact beats shipping silence.
         if (e2 && *e2) fp16_on = (e2[0] != '0') ? 1 : 0;
         else           fp16_on = (nnopt_adreno_model(cl_ctx) >= 800) ? 1 : 0;
         fp16_epoch = nnopt_toggle_epoch();
@@ -1282,7 +1503,36 @@ static void maybe_override_xgemm_half(OpenCLContext& cl_ctx) {
     if (applied_epoch == nnopt_toggle_epoch()) return;
     applied_epoch = nnopt_toggle_epoch();
     const char* sel = std::getenv("NNOPT_XGEMMH");
-    if (!sel || !*sel) return;                       // untouched: CLBlast's own kHalf choice
+    // MEASURED DEFAULT (Adreno 840, 2026-09-11): h_sa, gated to 8xx the same way the fp32 table is.
+    // Full 12-candidate sweep with the codec A/B on: h_sa 1.324 s against CLBlast's own kHalf choice
+    // at 1.708 s — 22.5% off the codec, which is the single largest cost in the render.
+    //
+    // It is quality-NEUTRAL, and that is measured, not assumed. Every candidate in that sweep —
+    // workgroup 64/128/256, KWG 16/32/64, staging both/A-only/neither, a 2x spread in wall time —
+    // returned a BIT-IDENTICAL cosine (0.924620) and peak error (1.261) against an fp32 decode of
+    // the same tokens. Tile blocking does not survive the final fp16 rounding, so among these the
+    // fastest simply wins. (The 0.92462 itself is the fp16 codec's own error floor against fp32 and
+    // has nothing to do with tiling — no entry in this table moves it.)
+    //
+    // Corroboration: fp32's winner on 8xx is ldsA, which is ALSO stage-A-only (sa1 sb0), differing
+    // from h_sa only in MDIMC/NDIMC. Staging just the weights winning in both precisions on the same
+    // part is a consistent story, not a one-off fluke of a single sweep.
+    //
+    // 6xx/7xx keep CLBlast's own kHalf choice: h_sa was never measured there and this table is only
+    // allowed to carry numbers someone actually took on the part in question.
+    if (!sel || !*sel) {
+        if (nnopt_adreno_model(cl_ctx) < 800) {
+            std::fprintf(stderr, "XGEMMH_SET none (model<800) — keeping CLBlast's own kHalf choice\n");
+            std::fflush(stderr);
+            return;
+        }
+        sel = "h_sa";
+    }
+    if (std::strcmp(sel, "clblast") == 0) {          // explicit opt-out, for A/B against the default
+        std::fprintf(stderr, "XGEMMH_SET clblast — keeping CLBlast's own kHalf choice\n");
+        std::fflush(stderr);
+        return;
+    }
     const size_t n = sizeof(kXgemmHalfCands) / sizeof(kXgemmHalfCands[0]);
     for (size_t i = 0; i < n; ++i) {
         if (std::strcmp(sel, kXgemmHalfCands[i].name) != 0) continue;
@@ -1667,6 +1917,12 @@ bool codec_stream_enabled() {
 }
 }  // namespace
 
+// Whether the codec's streaming state is live for THIS process. Exposed because it is the single
+// most consequential thing about how live audio sounds — off means every codec chunk fades in from
+// zero through its own Hann window with nothing to add to, i.e. the 400 ms seam — and until now the
+// only way to know was to catch one CODECSTREAM line at process start. Now it is on every render.
+bool nnopt_codec_stream_on() { return codec_stream_enabled(); }
+
 // The iSTFT overlap tail is part of the same streaming state as the conv context: both describe
 // what the previous chunk left behind, and both are meaningful only within one continuous piece.
 // One flag, one reset, so they can never disagree about whether a stream is starting.
@@ -1915,6 +2171,70 @@ static cl_mem upsample2d_op(OpenCLContext& cl_ctx, cl_command_queue queue, cl_me
 
 // Diagnostic (NNOPT_CODECMAG=1): read a codec activation buffer and print its max |value| — used to
 // find the fp16-safe boundary (fp16 max = 65504) for partial-fp16 (HGEMM) codec acceleration.
+// ── LOG_ACT: per-chunk activation digests, for reference-vs-Adreno comparison ───────────────────
+// One row per tensor at frame 0 of every render, so a streamed session yields one row per chunk.
+//
+// What is and is not comparable, because getting this wrong makes the exercise meaningless:
+// CHUNK 0 is directly comparable to the reference — same initial state, same conditioning, no token
+// sampled yet, so values should agree to within precision. From the first sampled token on, the two
+// implementations draw from independent RNG streams and follow different trajectories, so later
+// chunks legitimately differ in VALUE. What stays comparable there is the DISTRIBUTION
+// (norm/mean/std/range), which is what catches drift, blow-up or collapse across a stream — and
+// `nonfinite` catches the NaN failure mode that cost us most of 2026-09-09.
+//
+// A digest, not the tensor: 1024 floats per layer per frame cannot leave a BrowserStack device, but
+// a norm plus eight leading values pins a mismatch to a named tensor, which is the localisation
+// this needs. Gated at parity level 3 (`parity=3` on the request line — lowercase, so it is typeable
+// on the device; see the note on NNOPT_* in apply_kv).
+static void nnopt_log_act(OpenCLContext& cl_ctx, cl_command_queue queue, cl_mem buf, size_t n,
+                          const char* name, int chunk, int frame) {
+    (void)cl_ctx;
+    static int lvl = -1, lvl_epoch = -1;
+    if (lvl_epoch != nnopt_toggle_epoch()) {
+        const char* e = std::getenv("NNOPT_PARITY");
+        lvl = e ? std::atoi(e) : 1;
+        lvl_epoch = nnopt_toggle_epoch();
+    }
+    if (lvl < 3 || !buf || !n) return;
+    std::vector<float> h(n);
+    if (clEnqueueReadBuffer(queue, buf, CL_TRUE, 0, n * sizeof(float), h.data(),
+                            0, nullptr, nullptr) != CL_SUCCESS) return;
+    double s2 = 0.0, s1 = 0.0, mn = 1e30, mx = -1e30;
+    size_t bad = 0;
+    for (float v : h) {
+        if (std::isnan(v) || std::isinf(v)) { ++bad; continue; }
+        s1 += v; s2 += (double)v * (double)v;
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+    }
+    const double mean = s1 / (double)n;
+    const double var  = s2 / (double)n - mean * mean;
+    std::string head; char b[40];
+    for (size_t i = 0; i < (n < 8 ? n : 8); ++i) {
+        std::snprintf(b, sizeof b, "%s%.5f", i ? "," : "", h[i]);
+        head += b;
+    }
+    // Stash frame-0 norms so log_parity can emit ONE line per chunk carrying the whole pipeline.
+    // The device farm's log panel is the only channel out (no file access), and a single dense line
+    // survives it where a dozen verbose ones get lost in other processes' noise.
+    if (frame == 0) {
+        const double nrm = std::sqrt(s2);
+        if (std::strcmp(name, "cond_source_s0")  == 0) g_trace_src  = nrm;
+        else if (std::strcmp(name, "temporal_in") == 0) g_trace_ti   = nrm;
+        else if (std::strcmp(name, "temporal_out_s0") == 0) g_trace_to = nrm;
+    }
+    std::fprintf(stderr,
+        "LOG_ACT chunk=%d f=%d name=%s n=%zu norm=%.5f mean=%.6f std=%.6f min=%.5f max=%.5f "
+        "nonfinite=%zu head=%s\n",
+        chunk, frame, name, n, std::sqrt(s2), mean, std::sqrt(var > 0 ? var : 0.0),
+        (bad == n ? 0.0 : mn), (bad == n ? 0.0 : mx), bad, head.c_str());
+    std::fflush(stderr);
+}
+
+// One render == one streamed chunk. Shared by both AR paths so the index means the same thing
+// whether the run is pipelined or sequential.
+static int g_act_chunk = -1;
+
 static void dbg_maxabs(OpenCLContext& cl_ctx, cl_command_queue queue, cl_mem buf, size_t n, const char* name) {
     static int on=-1, on_epoch=-1;
     if (on_epoch != nnopt_toggle_epoch()) { on = std::getenv("NNOPT_CODECMAG")?1:0; on_epoch = nnopt_toggle_epoch(); }
@@ -2294,13 +2614,23 @@ static cl_mem run_codec_decode(OpenCLContext& cl_ctx, Weights& weights, cl_comma
     if (own_cb) pool_free(cb);
     cl_ctx.compTic();
     NNOPT_CHECKPOINT("codec: rvq embed done, entering l1");
+    // EVERY stage is null-checked. conv_clblast refuses allocations past the driver's single-alloc
+    // ceiling and returns nullptr, and both conv2d sites propagate that correctly -- but this chain
+    // used to hand the null straight to the next stage and keep going. What came out the far end was
+    // a zero-filled buffer, i.e. SILENCE that is indistinguishable from a successful decode: the
+    // codecref self-test reported "peak=0.000000 rms=0.000000" as a result rather than as a failure,
+    // and a live render that tripped the same ceiling emitted silent audio with no error. A codec
+    // that cannot allocate must say so, loudly, once -- not quietly produce zeros.
     cl_mem l1=run_codec_l1(cl_ctx,weights,queue,emb,T,1,256); pool_free(emb);     // [T,1,2560]
+    if (!l1) { NNOPT_ERROR("codec decode: l1 failed (see the allocation error above)"); return nullptr; }
     cl_ctx.compAccum("codec_l1(1x1)"); dbg_maxabs(cl_ctx,queue,l1,(size_t)T*1*2560,"l1");
     NNOPT_CHECKPOINT("codec: l1 done, entering l3");
     cl_mem l3=run_codec_l3(cl_ctx,weights,queue,l1,T,5,512); pool_free(l1);        // reshape→[T,5,512]→[T,5,512]
+    if (!l3) { NNOPT_ERROR("codec decode: l3 failed (see the allocation error above)"); return nullptr; }
     cl_ctx.compAccum("codec_l3(3x3)"); dbg_maxabs(cl_ctx,queue,l3,(size_t)T*5*512,"l3");
     NNOPT_CHECKPOINT("codec: l3 done, entering l4");
     cl_mem l4=run_codec_l4(cl_ctx,weights,queue,l3,T,5,512); pool_free(l3);        // [2T,5,1024]
+    if (!l4) { NNOPT_ERROR("codec decode: l4 failed (see the allocation error above)"); return nullptr; }
     cl_ctx.compAccum("codec_l4(convT)"); dbg_maxabs(cl_ctx,queue,l4,(size_t)2*T*5*1024,"l4");
     NNOPT_CHECKPOINT("codec: l4 done, entering l5 cascade");
     // NNOPT_L5HALF=1 — probe: the cascade produces 4T time frames and l6 keeps only the LAST 2T,
@@ -2341,6 +2671,7 @@ static cl_mem run_codec_decode(OpenCLContext& cl_ctx, Weights& weights, cl_comma
     }
     if (!l5) l5=run_codec_l5(cl_ctx,weights,queue,l4,2*T,&T5);
     pool_free(l4);   // [T5,480,4], T5=4T (or 2T when halved)
+    if (!l5) { NNOPT_ERROR("codec decode: l5 cascade failed (see the allocation error above)"); return nullptr; }
     cl_ctx.compAccum("codec_l5(cascade)");
     if (std::getenv("NNOPT_DUMP_CHAIN")) {
         std::vector<float> d5((size_t)T5*480*4);
@@ -2377,9 +2708,25 @@ static cl_mem run_codec_decode(OpenCLContext& cl_ctx, Weights& weights, cl_comma
 // resets (loudly) rather than indexing off the end — see kv-cache clamp rule.
 static const int kARMaxFrames = 512;   // 512 frames = 20.48 s of attention history (40 ms/frame)
 struct SongSession {
-    cl_mem kc[12] = {nullptr}, vc[12] = {nullptr};
+    // ONE SET PER CFG STREAM. Upstream runs the depthformer at batch (1 + #negatives) and the
+    // streams diverge from the first cross-attention onward, so each needs its own temporal
+    // self-attention cache and its own conditioning ring. They do NOT need their own `ti`: the
+    // sampled token is shared across streams by construction, so the next frame's embedding is too.
+    // Stream 0 is the positive conditioning; `n_streams == 1` is the pre-CFG layout unchanged.
+    cl_mem kc[kMaxCfgStreams][12] = {{nullptr}}, vc[kMaxCfgStreams][12] = {{nullptr}};
+    // Cross-attention conditioning ring, one k/v pair per layer. Allocated lazily inside
+    // CrossAttention_forward (only it knows H*D) and freed here. It belongs to the session for the
+    // same reason kc/vc do: upstream threads the ring across generate() calls, so a chunk boundary
+    // must not empty it — that would re-introduce the very cliff the ring exists to remove.
+    cl_mem xk[kMaxCfgStreams][12] = {{nullptr}}, xv[kMaxCfgStreams][12] = {{nullptr}};
+    int    n_streams = 1;
     cl_mem ti     = nullptr;   // temporal input for the NEXT frame [1024]
     int    pos    = 0;         // absolute frame index (attention position)
+    // Ring write counter. Deliberately NOT `pos`: the self-attention cache is compacted
+    // periodically (see AR_CACHE_COMPACT) which rewinds pos, and reusing it would make the
+    // conditioning ring overwrite an arbitrary live slot instead of the oldest one. This only ever
+    // counts up, so slot = xpos % depth stays in true age order for the life of the piece.
+    int    xpos   = 0;
     bool   alive  = false;
 };
 
@@ -2387,25 +2734,57 @@ SongSession* song_session_create() { return new SongSession(); }
 
 static void song_session_release(SongSession* s) {
     if (!s) return;
-    for (int k = 0; k < 12; ++k) {
-        if (s->kc[k]) { pool_free(s->kc[k]); s->kc[k] = nullptr; }
-        if (s->vc[k]) { pool_free(s->vc[k]); s->vc[k] = nullptr; }
+    // Every stream, not just the live ones: n_streams can change between requests (live MIDI adds
+    // the notes-negative), and a stream that was allocated under the old count still owns buffers.
+    for (int st = 0; st < kMaxCfgStreams; ++st) for (int k = 0; k < 12; ++k) {
+        if (s->kc[st][k]) { pool_free(s->kc[st][k]); s->kc[st][k] = nullptr; }
+        if (s->vc[st][k]) { pool_free(s->vc[st][k]); s->vc[st][k] = nullptr; }
+        if (s->xk[st][k]) { pool_free(s->xk[st][k]); s->xk[st][k] = nullptr; }
+        if (s->xv[st][k]) { pool_free(s->xv[st][k]); s->xv[st][k] = nullptr; }
     }
     if (s->ti) { pool_free(s->ti); s->ti = nullptr; }
     s->pos = 0;
+    s->xpos = 0;
+    s->n_streams = 1;
     s->alive = false;
 }
 
 void song_session_destroy(SongSession* s) { song_session_release(s); delete s; }
+
+// ── conditioning ACROSS TIME ───────────────────────────────────────────────────────────────────
+// Upstream re-runs the conditioning encoder every frame (mlx/depthformer.py:1085-1088), so a puck
+// drag moves the conditioning in 40 ms steps. This port learns of a blend change once per request,
+// which turned a drag into one 2 s cliff — audible as the "cutup" on 2-3 prompt blends.
+//
+// The blend cannot be re-quantised per frame: musiccoca_quantize does 12 sequential dispatches
+// each ending in a BLOCKING readback, so 25 of those a second would stall the AR queue outright.
+// Instead the caller quantises a short ramp of intermediate blends ONCE per request, off the frame
+// path, and each step is encoded here up front. The loop then just indexes it. `stride` frames per
+// step, last step held for the remainder.
+struct CondStream {
+    std::vector<cl_mem> src;      // encoded [256] conditioning, oldest → newest
+    int stride = 1;               // frames per step
+    cl_mem at(int f) const {
+        if (src.empty()) return nullptr;
+        const int n = (int)src.size();
+        const int i = (stride > 0) ? f / stride : 0;
+        return src[i < n ? i : n - 1];
+    }
+};
 
 // ── full autoregressive generation: temporal_input_0 + source → token grid [n_frames][12] ──
 // Greedy (argmax-per-codebook). Temporal self-attn caches across frames (pos=frame). Returns flattened
 // [n_frames*12] int tokens. `sess` (optional) carries the cache across calls; when null the state is
 // allocated, used and freed here — the original one-shot behaviour, bit-identical.
 static std::vector<int> run_generate(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queue,
-                                     cl_mem temporal_input_0, cl_mem source, int n_frames,
-                                     SongSession* sess = nullptr) {
+                                     cl_mem temporal_input_0, const CondStream& cond, int n_frames,
+                                     SongSession* sess = nullptr,
+                                     const CondStream* neg = nullptr, int n_neg = 0,
+                                     const float* neg_scales = nullptr) {
     const int dim = 1024, MAXF = kARMaxFrames, NCB = 12;
+    if (!neg || !neg_scales) n_neg = 0;
+    if (n_neg > kMaxCfgStreams - 1) n_neg = kMaxCfgStreams - 1;
+    const int NS = 1 + n_neg;
     // OVERLAP/deep-queue: the AR is sequential, but the GPU was idle ~½ the AR wall because every
     // frame ended in a blocking tokbuf readback (drain → host turnaround → GPU stalls). Keep tokens
     // ON GPU (write each frame's 12 into grid_gpu, feed the next frame via frame_embed_from_tokbuf),
@@ -2436,9 +2815,10 @@ static std::vector<int> run_generate(OpenCLContext& cl_ctx, Weights& weights, cl
         if (st->pos > 2 * kKeepFrames && n_frames + kKeepFrames <= MAXF) {
             const size_t row = (size_t)dim * sizeof(float);
             const int    src = st->pos - kKeepFrames;
-            for (int k = 0; k < 12; ++k) {
-                clEnqueueCopyBuffer(queue, st->kc[k], st->kc[k], (size_t)src*row, 0, (size_t)kKeepFrames*row, 0, nullptr, nullptr);
-                clEnqueueCopyBuffer(queue, st->vc[k], st->vc[k], (size_t)src*row, 0, (size_t)kKeepFrames*row, 0, nullptr, nullptr);
+            for (int s = 0; s < st->n_streams; ++s) for (int k = 0; k < 12; ++k) {
+                if (!st->kc[s][k]) continue;
+                clEnqueueCopyBuffer(queue, st->kc[s][k], st->kc[s][k], (size_t)src*row, 0, (size_t)kKeepFrames*row, 0, nullptr, nullptr);
+                clEnqueueCopyBuffer(queue, st->vc[s][k], st->vc[s][k], (size_t)src*row, 0, (size_t)kKeepFrames*row, 0, nullptr, nullptr);
             }
             st->pos = kKeepFrames;
             std::fprintf(stderr, "AR_CACHE_COMPACT kept=%d frames, pos=%d (piece continues)\n",
@@ -2452,25 +2832,57 @@ static std::vector<int> run_generate(OpenCLContext& cl_ctx, Weights& weights, cl
             song_session_release(st);
         }
     }
+    // A change in stream count is a change in what the caches MEAN (stream 1 stops being the
+    // musiccoca-negative and becomes something else), so it restarts the session rather than
+    // reusing them. Only live MIDI going on or off can trigger it.
+    if (st->alive && st->n_streams != NS) {
+        std::fprintf(stderr, "AR_CFG streams %d -> %d — restarting session\n", st->n_streams, NS);
+        song_session_release(st);
+    }
     if (!st->alive) {
-        for (int k=0;k<12;k++){ st->kc[k]=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)MAXF*dim*sizeof(float),nullptr,nullptr);
-                                st->vc[k]=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)MAXF*dim*sizeof(float),nullptr,nullptr); }
+        for (int s=0;s<NS;s++) for (int k=0;k<12;k++){
+            st->kc[s][k]=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)MAXF*dim*sizeof(float),nullptr,nullptr);
+            st->vc[s][k]=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)MAXF*dim*sizeof(float),nullptr,nullptr); }
         st->ti = pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)dim*sizeof(float),nullptr,nullptr);
         clEnqueueCopyBuffer(queue,temporal_input_0,st->ti,0,0,(size_t)dim*sizeof(float),0,nullptr,nullptr);
         st->pos = 0;
+        st->n_streams = NS;
         st->alive = true;
     }
-    cl_mem* kc = st->kc; cl_mem* vc = st->vc;
+    cl_mem* kc = st->kc[0]; cl_mem* vc = st->vc[0];
     cl_mem grid_gpu = pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)n_frames*NCB*sizeof(int),nullptr,&e);
     const int pos0 = st->pos;
+    const int xpos0 = st->xpos;
     for (int f=0; f<n_frames; ++f) {
         cl_ctx.compTic();
-        cl_mem tout = run_temporal_step(cl_ctx,weights,queue,st->ti,source,kc,vc,dim,pos0+f);
+        // Every stream sees the SAME frame embedding (st->ti) and differs only in its conditioning
+        // and its own caches — that is exactly what makes the pair a valid CFG comparison.
+        cl_mem tout_s[kMaxCfgStreams] = {nullptr};
+        bool frame_ok = true;
+        for (int s=0; s<NS; ++s) {
+            cl_mem csrc = (s == 0) ? cond.at(f) : neg[s-1].at(f);
+            if (f == 0 && s == 0) {
+                ++g_act_chunk;
+                { char an[32]; std::snprintf(an, sizeof an, "cond_source_s%d", s);
+                  nnopt_log_act(cl_ctx, queue, csrc, 256, an, g_act_chunk, f); }
+                nnopt_log_act(cl_ctx, queue, st->ti,   (size_t)dim, "temporal_in",  g_act_chunk, f);
+            }
+            tout_s[s] = run_temporal_step(cl_ctx,weights,queue,st->ti,csrc,st->kc[s],st->vc[s],
+                                          st->xk[s],st->xv[s],dim,pos0+f,xpos0+f);
+            if (!tout_s[s]) { NNOPT_ERROR_FMT("generate: temporal frame %d stream %d failed", f, s);
+                              frame_ok = false; break; }
+        }
         cl_ctx.compAccum("temporal_body");
-        if (!tout) { NNOPT_ERROR_FMT("generate: temporal frame %d failed", f); break; }
-        cl_mem tokbuf = run_depth_loop_gpu(cl_ctx,weights,queue,tout,nullptr,pos0+f);
+        if (!frame_ok) { for (int s=0;s<NS;++s) if (tout_s[s]) pool_free(tout_s[s]); break; }
+        cl_mem tout = tout_s[0];
+        if (f == 0) for (int s2 = 0; s2 < NS; ++s2) {
+            char an[32]; std::snprintf(an, sizeof an, "temporal_out_s%d", s2);
+            nnopt_log_act(cl_ctx, queue, tout_s[s2], (size_t)dim, an, g_act_chunk, f);
+        }
+        cl_mem tokbuf = run_depth_loop_gpu(cl_ctx,weights,queue,tout,nullptr,pos0+f,
+                                           n_neg ? &tout_s[1] : nullptr, n_neg, neg_scales);
         cl_ctx.compAccum("depth_body");
-        pool_free(tout);
+        for (int s=0; s<NS; ++s) pool_free(tout_s[s]);
         if (!tokbuf) { NNOPT_ERROR_FMT("generate: depth frame %d failed", f); break; }
         // stash this frame's 12 tokens into the GPU grid (async copy — no readback)
         clEnqueueCopyBuffer(queue,tokbuf,grid_gpu,0,(size_t)f*NCB*sizeof(int),(size_t)NCB*sizeof(int),0,nullptr,nullptr);
@@ -2479,6 +2891,7 @@ static std::vector<int> run_generate(OpenCLContext& cl_ctx, Weights& weights, cl
                                       pool_free(st->ti); st->ti = nt; cl_ctx.compAccum("frame_embed"); }
         pool_free(tokbuf);
         st->pos = pos0 + f + 1;
+        st->xpos = xpos0 + f + 1;
         if (flush_every > 0 && ((f+1) % flush_every == 0)) clFinish(queue);  // bound lookahead memory
         // Heartbeat. A render is otherwise silent for its whole wall, which reads as a hang to the
         // app's watchdog (and to a human staring at a device-farm screen).
@@ -2522,12 +2935,17 @@ static bool arprof_enabled() {
 // queue2 (gated by a cross-queue event), while the AR keeps generating on queue1. Returns interleaved
 // stereo PCM (float). Bit-identical token path to run_generate (validated by cosine vs the sequential wav).
 static std::vector<float> run_song_pipelined(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue q1,
-                                             cl_mem temporal_input_0, cl_mem source, int n_frames,
+                                             cl_mem temporal_input_0, const CondStream& cond, int n_frames,
                                              int CHUNK, int* nwav_o,
                                              double* ar_ms_o=nullptr, double* codec_ms_o=nullptr,
                                              std::vector<int>* tokens_o=nullptr,
-                                             SongSession* sess=nullptr) {
+                                             SongSession* sess=nullptr,
+                                             const CondStream* neg=nullptr, int n_neg=0,
+                                             const float* neg_scales=nullptr) {
     const int dim=1024, MAXF=512, NCB=12;
+    if (!neg || !neg_scales) n_neg = 0;
+    if (n_neg > kMaxCfgStreams - 1) n_neg = kMaxCfgStreams - 1;
+    const int NS = 1 + n_neg;
     cl_int e=CL_SUCCESS;
     // PROFILING ON for the codec queue. The codec's GPU time has never been measured — q2 was
     // created with no profiling, which is why CODEC_CHUNK_GPU reported "0 dispatches", and the
@@ -2553,29 +2971,39 @@ static std::vector<float> run_song_pipelined(OpenCLContext& cl_ctx, Weights& wei
     //
     // The session already holds precisely these three things for the sequential path. Borrow them
     // when one is supplied, allocate locally when it is not (one-shot), and free only what we own.
-    cl_mem kc_local[12], vc_local[12];
-    cl_mem* kc; cl_mem* vc; cl_mem ti;
+    // One set per CFG stream, same layout as SongSession — see the note there.
+    cl_mem kc_local[kMaxCfgStreams][12] = {{nullptr}}, vc_local[kMaxCfgStreams][12] = {{nullptr}};
+    // The conditioning ring is allocated lazily by CrossAttention_forward, so the one-shot copies
+    // start null and only the ones it actually filled get freed.
+    cl_mem xk_local[kMaxCfgStreams][12] = {{nullptr}}, xv_local[kMaxCfgStreams][12] = {{nullptr}};
+    cl_mem (*kc)[12]; cl_mem (*vc)[12]; cl_mem (*xk)[12]; cl_mem (*xv)[12]; cl_mem ti;
     const bool owns_state = (sess == nullptr);
     if (!owns_state) {
+        if (sess->alive && sess->n_streams != NS) {
+            std::fprintf(stderr, "AR_CFG streams %d -> %d — restarting session\n", sess->n_streams, NS);
+            song_session_release(sess);
+        }
         if (!sess->alive) {
-            for (int k=0;k<12;k++){
-                sess->kc[k]=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)MAXF*dim*sizeof(float),nullptr,nullptr);
-                sess->vc[k]=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)MAXF*dim*sizeof(float),nullptr,nullptr); }
+            for (int s=0;s<NS;s++) for (int k=0;k<12;k++){
+                sess->kc[s][k]=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)MAXF*dim*sizeof(float),nullptr,nullptr);
+                sess->vc[s][k]=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)MAXF*dim*sizeof(float),nullptr,nullptr); }
             sess->ti = pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)dim*sizeof(float),nullptr,nullptr);
             clEnqueueCopyBuffer(q1,temporal_input_0,sess->ti,0,0,(size_t)dim*sizeof(float),0,nullptr,nullptr);
-            sess->pos = 0; sess->alive = true;
+            sess->pos = 0; sess->xpos = 0; sess->n_streams = NS; sess->alive = true;
         }
-        kc = sess->kc; vc = sess->vc; ti = sess->ti;
+        kc = sess->kc; vc = sess->vc; xk = sess->xk; xv = sess->xv; ti = sess->ti;
     } else {
-        for (int k=0;k<12;k++){ kc_local[k]=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)MAXF*dim*sizeof(float),nullptr,nullptr);
-                                vc_local[k]=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)MAXF*dim*sizeof(float),nullptr,nullptr); }
-        kc = kc_local; vc = vc_local;
+        for (int s=0;s<NS;s++) for (int k=0;k<12;k++){
+            kc_local[s][k]=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)MAXF*dim*sizeof(float),nullptr,nullptr);
+            vc_local[s][k]=pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)MAXF*dim*sizeof(float),nullptr,nullptr); }
+        kc = kc_local; vc = vc_local; xk = xk_local; xv = xv_local;
         ti = pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)dim*sizeof(float),nullptr,nullptr);
         clEnqueueCopyBuffer(q1,temporal_input_0,ti,0,0,(size_t)dim*sizeof(float),0,nullptr,nullptr);
     }
     // Absolute frame index of this request's first frame. The temporal KV cache is indexed by it,
     // so a continued request must carry on from where the last one stopped, not restart at 0.
     const int pos0 = owns_state ? 0 : sess->pos;
+    const int xpos0 = owns_state ? 0 : sess->xpos;
     cl_mem grid_gpu = pool_alloc(cl_ctx.context(),CL_MEM_READ_WRITE,(size_t)n_frames*NCB*sizeof(int),nullptr,&e);
     // ── the codec runs on its own HOST thread ───────────────────────────────────────────────────
     // Two queues were never the problem: PIPE_SYNC has reported "marker+barrier (overlapping)" all
@@ -2705,7 +3133,18 @@ static std::vector<float> run_song_pipelined(OpenCLContext& cl_ctx, Weights& wei
     // Frame 0 runs live (it carries every one-time build, tuner and cache fill), frame 1 is
     // captured, frame 2 verifies the replay against a live recomputation, frames 3+ replay. Below
     // that there is nothing left to amortise, so do not record at all.
-    const bool want_record = rec_on && cl_ctx.has_recordable_queues() && n_frames >= 4;
+    // A conditioning RAMP vetoes recording. CondStream::at(f) returns src[f/stride], so with more
+    // than one encoded block the cross-attention's source BUFFER HANDLE varies per frame — and a
+    // recording pins handles, not just scalars, so every replayed frame would keep re-reading the
+    // captured frame's ramp step and the blend would silently freeze. This is a per-RENDER property
+    // (this render either ramps or it does not), so it is checked here rather than through
+    // nnopt_record_mark_unsafe(), whose latch is permanent and would disable recording for every
+    // later render in the process. Single-block streams — the common case, ramp_steps=0 — record.
+    bool cond_ramp = cond.src.size() > 1;
+    for (int s = 0; s < n_neg && !cond_ramp; ++s) if (neg[s].src.size() > 1) cond_ramp = true;
+    if (cond_ramp) std::fprintf(stderr, "RECORDQ conditioning ramp active (%zu blocks) — live dispatch\n",
+                                cond.src.size());
+    const bool want_record = rec_on && cl_ctx.has_recordable_queues() && n_frames >= 4 && !cond_ramp;
     if (want_record) {
         rq = cl_ctx.create_recordable_queue();
         if (!rq) std::fprintf(stderr, "RECORDQ no recordable queue — live dispatch\n");
@@ -2745,6 +3184,14 @@ static std::vector<float> run_song_pipelined(OpenCLContext& cl_ctx, Weights& wei
         const auto t_ar0 = pclk::now();
         // The position every recorded kernel reads. Written before the replay, on the live queue.
         nnopt_pos_buffer(cl_ctx, q1, pos0 + f);
+        // ...and the CROSS-attention's position, which must be updated HERE for the same reason.
+        // A replayed frame runs no host code, so any device buffer it reads has to be written by
+        // the frame loop on the live queue. CrossAttention_forward writes slot 1 itself, but it
+        // only executes on a LIVE frame — so frames 3..n replayed with xpos frozen at the last live
+        // frame and ln(N) stuck at ln(3). MEASURED: that made the replayed grid differ from live
+        // (crc 0xd3fbb814 vs 0xa90e644f) while two live renders were bit-identical to each other,
+        // so it was the replay, not GPU non-determinism.
+        nnopt_pos_buffer(cl_ctx, q1, xpos0 + f, /*constant=*/false, /*slot=*/1);
         nnopt_kinst_frame_begin();   // restart the dispatch ordinal that keys per-site kernels
         // Frame 0 is live and on the profiling queue: profile it once to see the GPU cost of every
         // dispatch in a real frame. One clFinish per render, no flag, no second run.
@@ -2800,10 +3247,33 @@ static std::vector<float> run_song_pipelined(OpenCLContext& cl_ctx, Weights& wei
         }
         cl_command_queue fq = capturing && rec ? rq : q1;
 
-        cl_mem tout = run_temporal_step(cl_ctx,weights,fq,ti,source,kc,vc,dim,pos0 + f);
-        if (!tout) { NNOPT_ERROR_FMT("pipeline: temporal frame %d", f); break; }
-        cl_mem tokbuf = run_depth_loop_gpu(cl_ctx,weights,fq,tout,nullptr,pos0+f);
-        pool_free(tout);
+        // One temporal pass per CFG stream. Same frame embedding `ti` for all of them; they differ
+        // only in conditioning and in their own caches. The dispatch sequence is identical every
+        // frame, which is what record/replay requires.
+        cl_mem tout_s[kMaxCfgStreams] = {nullptr};
+        bool frame_ok = true;
+        for (int s=0; s<NS; ++s) {
+            cl_mem csrc = (s == 0) ? cond.at(f) : neg[s-1].at(f);
+            if (f == 0 && s == 0) {
+                ++g_act_chunk;
+                { char an[32]; std::snprintf(an, sizeof an, "cond_source_s%d", s);
+                  nnopt_log_act(cl_ctx, fq, csrc, 256, an, g_act_chunk, f); }
+                nnopt_log_act(cl_ctx, fq, ti,   (size_t)dim, "temporal_in",  g_act_chunk, f);
+            }
+            tout_s[s] = run_temporal_step(cl_ctx,weights,fq,ti,csrc,kc[s],vc[s],xk[s],xv[s],dim,
+                                          pos0 + f, xpos0 + f);
+            if (!tout_s[s]) { NNOPT_ERROR_FMT("pipeline: temporal frame %d stream %d", f, s);
+                              frame_ok = false; break; }
+        }
+        if (!frame_ok) { for (int s=0;s<NS;++s) if (tout_s[s]) pool_free(tout_s[s]); break; }
+        cl_mem tout = tout_s[0];
+        if (f == 0) for (int s2 = 0; s2 < NS; ++s2) {
+            char an[32]; std::snprintf(an, sizeof an, "temporal_out_s%d", s2);
+            nnopt_log_act(cl_ctx, fq, tout_s[s2], (size_t)dim, an, g_act_chunk, f);
+        }
+        cl_mem tokbuf = run_depth_loop_gpu(cl_ctx,weights,fq,tout,nullptr,pos0+f,
+                                           n_neg ? &tout_s[1] : nullptr, n_neg, neg_scales);
+        for (int s=0; s<NS; ++s) pool_free(tout_s[s]);
         if (!tokbuf) { NNOPT_ERROR_FMT("pipeline: depth frame %d", f); break; }
         if (stk) {
             cl_mem pb = nnopt_pos_buffer(cl_ctx, q1, pos0 + f);
@@ -3072,8 +3542,12 @@ static std::vector<float> run_song_pipelined(OpenCLContext& cl_ctx, Weights& wei
     if (nwav_o) *nwav_o = (int)(ro.size()/2);
     if (owns_state) pool_free(ti);
     pool_free(grid_gpu);
-    if (owns_state) { for (int k=0;k<12;k++){ pool_free(kc[k]); pool_free(vc[k]); } }
-    else            { sess->pos = pos0 + n_frames; }   // the session owns its buffers
+    if (owns_state) { for (int s=0;s<NS;s++) for (int k=0;k<12;k++){
+                                              pool_free(kc[s][k]); pool_free(vc[s][k]);
+                                              if (xk[s][k]) pool_free(xk[s][k]);
+                                              if (xv[s][k]) pool_free(xv[s][k]); } }
+    else            { sess->pos = pos0 + n_frames;
+                      sess->xpos = xpos0 + n_frames; }  // the session owns its buffers
     clReleaseCommandQueue(q2);
     return ro;
 }
@@ -3084,6 +3558,19 @@ static std::vector<float> run_song_pipelined(OpenCLContext& cl_ctx, Weights& wei
 // op-test) goes through here, so there is one e2e path to optimize and to
 // benchmark. Timing is split AR/codec only in the sequential path — when
 // pipelined the two stages overlap by construction and only the total is real.
+// Markers only carry timestamps on a queue created with CL_QUEUE_PROFILING_ENABLE, and that is
+// deliberately OFF by default (OpenCLContext::init: it costs ~62 us of host time per dispatch
+// across ~48k dispatches a render). So the codec GPU span is measured when the queue can carry it
+// and reported as ABSENT otherwise — never as a zero, which on the report card is indistinguishable
+// from a codec that did no work.
+static bool queue_has_profiling(cl_command_queue q) {
+    cl_command_queue_properties props = 0;
+    if (!q) return false;
+    if (clGetCommandQueueInfo(q, CL_QUEUE_PROPERTIES, sizeof(props), &props, nullptr) != CL_SUCCESS)
+        return false;
+    return (props & CL_QUEUE_PROFILING_ENABLE) != 0;
+}
+
 bool run_song(OpenCLContext& cl_ctx, Weights& weights,
               const SongConditioning& cond, const SongConfig& cfg,
               SongResult& out, SongSession* sess) {
@@ -3120,32 +3607,181 @@ bool run_song(OpenCLContext& cl_ctx, Weights& weights,
 
     cl_command_queue queue = cl_ctx.queue();
     cl_int e = CL_SUCCESS;
-    cl_mem xb = pool_alloc(cl_ctx.context(), CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
-                           cond.temporal_input.size()*sizeof(float),
-                           const_cast<float*>(cond.temporal_input.data()), &e);
+    // ── frame-0 temporal seed ───────────────────────────────────────────────────────────────────
+    // Upstream starts a fresh piece from TWELVE ZERO RVQ codes: MagentaRT2StdMlxfn._initial_state[0]
+    // is (1,1,12) int64 = [0]*12, and those are global embedder ids, so the seed is row 0 of
+    // depthformer.decoder.embedder.layers.0._embedding averaged with itself twelve times — i.e.
+    // row 0, ||v|| = 2.574.
+    //
+    // The port instead uploaded weights/optest_input.bin whenever no style bundle was given, which
+    // is the app's ONLY path (the app sends prompt= with no style=). That fixture is a POST-RMSNorm
+    // capture from the op-test trace: cos 0.9976 to row 0 but 12.09x its magnitude, RMS 0.975 (i.e.
+    // unit-RMS). run_temporal_body is pre-norm with a residual, so an already-normalised, 12x-scaled
+    // seed rides the residual stream through all 12 layers instead of being normalised away.
+    // Frame 0 therefore starts somewhere upstream never starts, and every later frame is
+    // conditioned on that.
+    //
+    // (MAGENTA_PARITY_INVESTIGATION EXP-016 measured the deviation but compared the fixture against
+    // the mean of rows 6+q*1024 -- local code 0 per codebook, ||v|| = 0.4919 -- rather than against
+    // the twelve zero GLOBAL ids upstream actually embeds. Hence its "cos 0.20"; the real figure is
+    // 0.9976 and the deviation is one of scale and normalisation, not direction.)
+    //
+    // seed0=fixture restores the old behaviour for an A/B. Lowercase, because a NNOPT_* key cannot
+    // be typed on BrowserStack at all (see log_parity in main.cpp).
+    cl_mem xb = nullptr;
+    {
+        const char* s0 = std::getenv("NNOPT_SEED0");
+        const bool want_fixture = (s0 && std::strcmp(s0, "fixture") == 0);
+        if (cond.temporal_from_fixture && !want_fixture) {
+            xb = frame_embed_mean_gpu(cl_ctx, weights, queue, std::vector<int>(12, 0));
+            // Report the NORM, not just the choice. A seed can be the right vector at the wrong
+            // magnitude and every cosine-based check still passes -- that is exactly how a missing
+            // sqrt(dim) survived (see frame_embed_mean). Expect ~82.4 = ||embedder row 0|| * 32.
+            if (xb) {
+                std::vector<float> h(1024);
+                if (clEnqueueReadBuffer(queue, xb, CL_TRUE, 0, h.size()*sizeof(float), h.data(),
+                                        0, nullptr, nullptr) == CL_SUCCESS) {
+                    double n2 = 0.0; for (float v : h) n2 += (double)v * (double)v;
+                    std::fprintf(stderr, "SEED0 twelve-zero-codes norm=%.4f head=%.5f,%.5f,%.5f\n",
+                                 std::sqrt(n2), h[0], h[1], h[2]);
+                } else {
+                    std::fprintf(stderr, "SEED0 twelve-zero-codes (norm unread)\n");
+                }
+            }
+        } else {
+            xb = pool_alloc(cl_ctx.context(), CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
+                            cond.temporal_input.size()*sizeof(float),
+                            const_cast<float*>(cond.temporal_input.data()), &e);
+            std::fprintf(stderr, "SEED0 %s\n", cond.temporal_from_fixture ? "fixture (forced)" : "style bundle");
+        }
+        std::fflush(stderr);
+    }
     // Conditioning: prefer computing it on device from style tokens (the real path), and fall back
     // to a supplied 256-float vector only when no tokens were given.
-    cl_mem srcb = nullptr;
-    if (cond.style_tokens.size() == 144) {
+    // The conditioning STREAM: one encoded source per ramp step, or a single one when the caller
+    // supplied no ramp. Encoding is done here, up front — 144 token gathers, a 768->256 GEMV and a
+    // LayerNorm per step — so the frame loop only ever indexes an array.
+    CondStream cstream;
+    cstream.stride = (cond.ramp_stride > 0) ? cond.ramp_stride : 1;
+    auto encode_block = [&](const int32_t* blk) -> cl_mem {
         cl_mem tokb = pool_alloc(cl_ctx.context(), CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
-                                 cond.style_tokens.size()*sizeof(int32_t),
-                                 const_cast<int32_t*>(cond.style_tokens.data()), &e);
-        if (tokb) {
-            srcb = Encoder_forward(cl_ctx, weights, queue, tokb, 1, 0, 0, nullptr, nullptr, nullptr, nullptr);
-            pool_free(tokb);
+                                 (size_t)kConditioningTokens*sizeof(int32_t),
+                                 const_cast<int32_t*>(blk), &e);
+        if (!tokb) return nullptr;
+        cl_mem out = Encoder_forward(cl_ctx, weights, queue, tokb, 1, 0, 0, nullptr, nullptr, nullptr, nullptr);
+        pool_free(tokb);
+        return out;
+    };
+    const int ramp_steps = (cond.ramp_stride > 0 && !cond.style_ramp.empty())
+                         ? (int)(cond.style_ramp.size() / kConditioningTokens) : 0;
+    if (ramp_steps > 0) {
+        for (int i = 0; i < ramp_steps; ++i) {
+            cl_mem sb = encode_block(&cond.style_ramp[(size_t)i*kConditioningTokens]);
+            if (!sb) { NNOPT_ERROR_FMT("run_song: style encoder failed on ramp step %d", i);
+                       for (cl_mem m : cstream.src) pool_free(m); pool_free(xb); return false; }
+            cstream.src.push_back(sb);
         }
-        if (!srcb) { NNOPT_ERROR("run_song: style encoder failed on the supplied tokens"); pool_free(xb); return false; }
+        std::fprintf(stderr, "CONDITIONING ramp steps=%d stride=%d frames\n", ramp_steps, cstream.stride);
+    } else if (cond.style_tokens.size() == 144) {
+        cl_mem sb = encode_block(cond.style_tokens.data());
+        if (!sb) { NNOPT_ERROR("run_song: style encoder failed on the supplied tokens"); pool_free(xb); return false; }
+        cstream.src.push_back(sb);
         std::fprintf(stderr, "CONDITIONING computed on device from %zu style tokens\n", cond.style_tokens.size());
     } else {
-        srcb = pool_alloc(cl_ctx.context(), CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
-                          cond.source.size()*sizeof(float),
-                          const_cast<float*>(cond.source.data()), &e);
+        cl_mem sb = pool_alloc(cl_ctx.context(), CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
+                               cond.source.size()*sizeof(float),
+                               const_cast<float*>(cond.source.data()), &e);
+        if (sb) cstream.src.push_back(sb);
     }
+    cl_mem srcb = cstream.src.empty() ? nullptr : cstream.src.front();
     if (!xb || !srcb) {
         NNOPT_ERROR("run_song: conditioning buffer alloc failed");
-        if (xb) pool_free(xb); if (srcb) pool_free(srcb);
+        if (xb) pool_free(xb); for (cl_mem m : cstream.src) pool_free(m);
         return false;
     }
+
+    // ── classifier-free guidance ────────────────────────────────────────────────────────────────
+    // Upstream runs the depthformer over the real conditioning PLUS one copy per masked input, and
+    // combines their logits before sampling: cfg = pos + Σ scale_i·(pos − neg_i), scales
+    // {musiccoca 3.0, notes 1.0} (mlx/depthformer.py:247-257, mlx/system.py). This port sampled
+    // from `pos` alone — scale 0 — which is a much flatter distribution. Measured on the reference
+    // oracle, paired over 12 prompts at the same RNG: 0.071 of prompt-discrimination margin, with
+    // the reference ahead in 11 of 12 and one prompt ("gregorian chant") losing its identity
+    // outright (+0.169 → −0.175, i.e. matching a competing prompt better than the one asked for).
+    //
+    // A negative earns a stream only when its block actually DIFFERS from the positive. That is not
+    // an optimisation, it is the arithmetic: with no live MIDI the 128 note channels are already
+    // masked, so neg_notes == pos and its term (pos − neg) is identically zero. So the common
+    // render costs 2 temporal+depth passes, and only a MIDI performance costs 3.
+    auto masked_block = [](const std::vector<int32_t>& pos, int first, int count,
+                           std::vector<int32_t>& out) -> bool {
+        if ((int)pos.size() != kConditioningTokens) return false;
+        out = pos;
+        bool differs = false;
+        for (int i = first; i < first + count; ++i) {
+            if (out[i] != kMaskedCondToken) differs = true;
+            out[i] = kMaskedCondToken;
+        }
+        return differs;
+    };
+    CondStream cneg[kMaxCfgStreams - 1];
+    float      cneg_scale[kMaxCfgStreams - 1] = {0.0f};
+    int        n_neg = 0;
+    if (cond.style_tokens.size() == (size_t)kConditioningTokens) {
+        // CFG DEFAULT: no logit combine. Upstream has two mutually exclusive CFG mechanisms and this
+        // port used to ship BOTH, applying guidance twice (MAGENTA_PARITY_INVESTIGATION EXP-028/029):
+        //   * MagentaRT2System discretises the scales INTO the conditioning vector -- 144 channels,
+        //     the trailing 27,17,9 -- and never combines logits (arity = 0);
+        //   * the exported .mlxfn omits those channels (141) and combines logits from masked
+        //     negatives instead.
+        // This port builds the 144-channel vector, so it has already applied CFG once, in the
+        // tokens. Combining logits on top of that is guidance twice over. Measured on Adreno 840,
+        // frame 0 greedy, conditioning crc=0x5bd198af: with the combine ON the port agreed with the
+        // reference on 0 of 12 codebooks; with it OFF, 6/12 against the bf16 reference and 7/12
+        // against the 4-bit one -- the same spread the two upstream flavours have with each other.
+        //
+        // cfg=<scale> re-enables the logit combine for an A/B (the .mlxfn's mechanism, which
+        // EXP-007 measured as carrying real prompt adherence). It is opt-in because shipping both
+        // at once is the bug this default fixes.
+        float sc_mc = 0.0f, sc_nt = 0.0f;
+        midi_cfg_scales(&sc_mc, &sc_nt, nullptr);
+        sc_mc = 0.0f; sc_nt = 0.0f;
+        // cfg=<float> overrides the musiccoca LOGIT-combine scale for one request. cfg=0 drops the
+        // negative stream entirely (a zero scale is skipped below), which leaves ONLY the
+        // discretised cfg tokens already carried in the 144-channel conditioning vector -- i.e.
+        // exactly what MagentaRT2System does. Upstream has two mutually exclusive CFG mechanisms
+        // and this port currently ships BOTH; see EXP-028. Lowercase so it is typeable on a device
+        // farm.
+        if (const char* cfgs = std::getenv("NNOPT_CFGMC")) {
+            const float v = (float)std::atof(cfgs);
+            if (v >= 0.0f) { sc_mc = v; std::fprintf(stderr, "CFG_OVERRIDE musiccoca=%.3f\n", v); }
+        }
+        // Negatives are derived from the CURRENT block, not from a ramp step: masking musiccoca
+        // makes every ramp step identical anyway, and MIDI is applied uniformly across the ramp.
+        const struct { int first, count; float scale; const char* what; } kNegs[] = {
+            { 0,            kMidiStyleTokens, sc_mc, "musiccoca" },
+            { kMidiNotesAt, kMidiNotes,       sc_nt, "notes"     },
+        };
+        std::vector<int32_t> blk;
+        for (const auto& n : kNegs) {
+            if (n_neg >= kMaxCfgStreams - 1) break;
+            if (n.scale == 0.0f) continue;                       // a zero scale is no guidance
+            if (!masked_block(cond.style_tokens, n.first, n.count, blk)) continue;  // == positive
+            cl_mem nb = encode_block(blk.data());
+            if (!nb) { NNOPT_ERROR_FMT("run_song: style encoder failed on the %s negative", n.what);
+                       for (cl_mem m : cstream.src) pool_free(m);
+                       for (int i=0;i<n_neg;++i) for (cl_mem m : cneg[i].src) pool_free(m);
+                       pool_free(xb); return false; }
+            cneg[n_neg].src.push_back(nb);
+            cneg[n_neg].stride = 1;
+            cneg_scale[n_neg] = n.scale;
+            ++n_neg;
+        }
+    }
+    std::fprintf(stderr, "CFG streams=%d", 1 + n_neg);
+    for (int i = 0; i < n_neg; ++i) std::fprintf(stderr, " scale%d=%.2f", i, cneg_scale[i]);
+    std::fprintf(stderr, "%s\n", n_neg ? "" : " (no negatives — guidance inactive)");
+    std::fflush(stderr);
 
     // chunk <= 0 means "size it to this device". The codec's per-chunk buffers scale linearly with
     // the number of frames, and on a 4 GB phone anything past ~15 frames blew the allocator — but
@@ -3234,9 +3870,10 @@ bool run_song(OpenCLContext& cl_ctx, Weights& weights,
         if (sess->pos > 2 * keep && n_frames + keep <= kARMaxFrames) {
             const size_t row = 1024 * sizeof(float);
             const int    src = sess->pos - keep;
-            for (int k = 0; k < 12; ++k) {
-                clEnqueueCopyBuffer(queue, sess->kc[k], sess->kc[k], (size_t)src*row, 0, (size_t)keep*row, 0, nullptr, nullptr);
-                clEnqueueCopyBuffer(queue, sess->vc[k], sess->vc[k], (size_t)src*row, 0, (size_t)keep*row, 0, nullptr, nullptr);
+            for (int s = 0; s < sess->n_streams; ++s) for (int k = 0; k < 12; ++k) {
+                if (!sess->kc[s][k]) continue;
+                clEnqueueCopyBuffer(queue, sess->kc[s][k], sess->kc[s][k], (size_t)src*row, 0, (size_t)keep*row, 0, nullptr, nullptr);
+                clEnqueueCopyBuffer(queue, sess->vc[s][k], sess->vc[s][k], (size_t)src*row, 0, (size_t)keep*row, 0, nullptr, nullptr);
             }
             sess->pos = keep;
             std::fprintf(stderr, "AR_CACHE_COMPACT kept=%d frames, pos=%d (piece continues)\n", keep, sess->pos);
@@ -3252,14 +3889,17 @@ bool run_song(OpenCLContext& cl_ctx, Weights& weights,
     if (cfg.pipeline) {
         int nw = 0;
         double p_ar_ms=0.0, p_codec_ms=0.0;
-        ro = run_song_pipelined(cl_ctx, weights, queue, xb, srcb, n_frames, CHUNK, &nw,
-                                &p_ar_ms, &p_codec_ms, &out.tokens, sess);
+        ro = run_song_pipelined(cl_ctx, weights, queue, xb, cstream, n_frames, CHUNK, &nw,
+                                &p_ar_ms, &p_codec_ms, &out.tokens, sess,
+                                n_neg ? cneg : nullptr, n_neg, n_neg ? cneg_scale : nullptr);
         // Host-issue spans, not disjoint wall: the stages overlap, so these sum to more than
         // total_s. Reported anyway because 0.000/0.000 told us nothing at all.
         out.ar_s = p_ar_ms/1000.0; out.codec_s = p_codec_ms/1000.0;
         nwav = nw;
     } else {
-        std::vector<int> grid = run_generate(cl_ctx, weights, queue, xb, srcb, n_frames, sess);
+        std::vector<int> grid = run_generate(cl_ctx, weights, queue, xb, cstream, n_frames, sess,
+                                             n_neg ? cneg : nullptr, n_neg,
+                                             n_neg ? cneg_scale : nullptr);
         out.tokens = grid;          // see SongResult::tokens — the only comparable AR output
         const auto t1 = clk::now();
         // global token → per-codebook RVQ code: strip the 6 reserved ids and the codebook offset.
@@ -3304,6 +3944,11 @@ bool run_song(OpenCLContext& cl_ctx, Weights& weights,
         const bool ab_fp16_selected = (ab_envp && ab_envp[0] != '0');
         double ab_dot = 0.0, ab_na = 0.0, ab_nb = 0.0, ab_err = 0.0;
         int    ab_n = 0;
+        // Codec GPU span, sequential path. run_song_pipelined brackets its own decode on q2; this
+        // branch never did, so `codec_gpu` was 0 for every pipeline=0 render and `gpu_busy` counted
+        // the AR queue alone while the codec did 70%+ of the work. Same marker pair, same meaning.
+        const bool codec_prof = queue_has_profiling(queue);
+        std::vector<cl_event> seq_mk_a, seq_mk_b;
         for (int f0 = 0; f0 < n_frames; ) {
             int cf = std::min(chunk, n_frames - f0);
             // Absorb a remainder smaller than the codec minimum into this chunk instead of
@@ -3338,7 +3983,16 @@ bool run_song(OpenCLContext& cl_ctx, Weights& weights,
                 ab_extra_s += std::chrono::duration<double>(clk::now() - ab_t0).count();
                 g_codec_peak_alloc = 0;   // the timed pass measures its own peak, not the reference's
             }
+            cl_event mk0 = nullptr, mk1 = nullptr;
+            if (codec_prof && clEnqueueMarkerWithWaitList)
+                clEnqueueMarkerWithWaitList(queue, 0, nullptr, &mk0);
             int nw = 0; cl_mem cw = run_codec_decode(cl_ctx, weights, queue, ccodes, cf, &nw);
+            if (codec_prof && clEnqueueMarkerWithWaitList)
+                clEnqueueMarkerWithWaitList(queue, 0, nullptr, &mk1);
+            // Tracked before the failure check below: a chunk that fails still enqueued its
+            // markers, and they have to be released whichever way this iteration exits.
+            if (mk0 && mk1) { seq_mk_a.push_back(mk0); seq_mk_b.push_back(mk1); }
+            else { if (mk0) clReleaseEvent(mk0); if (mk1) clReleaseEvent(mk1); }
             if (!cw) {
                 // Too big for this device after all — halve and retry the same frames. Only a chunk
                 // that fails at the floor is a real failure.
@@ -3402,6 +4056,25 @@ bool run_song(OpenCLContext& cl_ctx, Weights& weights,
         nwav = (int)(ro.size()/2);
         out.ar_s    = std::chrono::duration<double>(t1-t0).count();
         out.codec_s = std::chrono::duration<double>(clk::now()-t1).count() - ab_extra_s;
+        // Sum the per-chunk GPU spans. Every chunk above ends in a BLOCKING readback, so the queue
+        // is already drained and these timestamps are final; the clFinish is belt-and-braces for
+        // the early-break path. Placed after codec_s so nothing here can inflate the reported wall.
+        if (!seq_mk_a.empty()) {
+            clFinish(queue);
+            double seq_codec_gpu_ms = 0.0;
+            for (size_t i = 0; i < seq_mk_a.size(); ++i) {
+                cl_ulong ta = 0, tb = 0;
+                if (clGetEventProfilingInfo(seq_mk_a[i], CL_PROFILING_COMMAND_END,
+                                            sizeof(ta), &ta, nullptr) != CL_SUCCESS) continue;
+                if (clGetEventProfilingInfo(seq_mk_b[i], CL_PROFILING_COMMAND_END,
+                                            sizeof(tb), &tb, nullptr) != CL_SUCCESS) continue;
+                if (tb > ta) seq_codec_gpu_ms += (double)(tb - ta) / 1e6;
+            }
+            for (size_t i = 0; i < seq_mk_a.size(); ++i) {
+                clReleaseEvent(seq_mk_a[i]); clReleaseEvent(seq_mk_b[i]);
+            }
+            nnopt_set_codec_gpu_ms(seq_codec_gpu_ms);
+        }
         if (o_codec_ab) {
             const double denom = std::sqrt(ab_na) * std::sqrt(ab_nb);
             const double cosv  = (denom > 0.0) ? (ab_dot / denom) : 0.0;
@@ -3414,7 +4087,8 @@ bool run_song(OpenCLContext& cl_ctx, Weights& weights,
         }
     }
     out.total_s = std::chrono::duration<double>(clk::now()-t0).count() - ab_extra_s;
-    pool_free(xb); pool_free(srcb);
+    pool_free(xb); for (cl_mem m : cstream.src) pool_free(m);
+    for (int i = 0; i < n_neg; ++i) for (cl_mem m : cneg[i].src) pool_free(m);
 
     out.pcm = std::move(ro);
     out.n_samples = nwav;
@@ -3431,6 +4105,74 @@ bool run_song(OpenCLContext& cl_ctx, Weights& weights,
 // It deliberately bypasses the AR: greedy sampling means one flipped token becomes different music,
 // which drowns out exactly the small localised seam error this is looking for. A fixed-seed
 // synthetic grid keeps the input constant so any difference is the codec's doing.
+// ── codecref: is THIS codec the same function as Google's? ─────────────────────────────────────
+// codecchunk above compares the device against ITSELF (whole vs chunked), and codecab compares fp16
+// against fp32 — both are blind to an error present in every device path. This one compares against
+// the reference implementation, which is the only check that can catch "the port's SpectroStream
+// computes something else entirely".
+//
+// The grid is the same fixed-seed LCG codecchunk uses, so the Mac can generate a bit-identical
+// input with nothing transferred: reproduce st=0x9E3779B9, st=st*1664525+1013904223, c=(st>>13)%1024
+// and feed it to spectrostream.quantizer.codes_to_embeddings_layer -> embeddings_to_waveform_layer.
+// (Codes are the non-unique 0..1023 form both sides already use: magenta_rt/mlx/system.py:96 does
+// (tok-6)%1024, and backbone.cpp's grid->codes does the same, the -q*1024 term vanishing mod 1024.)
+//
+// Only a FINGERPRINT is printed, not the waveform: the device this runs on is usually a farm phone
+// with no way to get a file off it, and per-frame RMS/peak is small enough to travel in the stderr
+// the app already surfaces while still making a broken decoder obvious.
+bool nnopt_codecref_check(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queue, int T) {
+    if (T <= 0) T = 50;
+    const int NCB = 12, FS = 1920;   // samples per frame, per channel
+    std::vector<int> codes((size_t)T * NCB);
+    uint32_t st = 0x9E3779B9u;       // MUST match nnopt_codecchunk_check and the Mac generator
+    for (auto& c : codes) { st = st * 1664525u + 1013904223u; c = (int)((st >> 13) % 1024); }
+
+    codec_stream_reset();
+    int nw = 0;
+    cl_mem w = run_codec_decode(cl_ctx, weights, queue, codes, T, &nw, nullptr);
+    if (!w) { NNOPT_ERROR("codecref: decode failed"); return false; }
+    std::vector<float> h((size_t)nw * 2);
+    clEnqueueReadBuffer(queue, w, CL_TRUE, 0, h.size()*sizeof(float), h.data(), 0, nullptr, nullptr);
+    pool_free(w);
+
+    double gpeak = 0.0, gss = 0.0;
+    for (float v : h) { const double a = std::fabs((double)v); if (a > gpeak) gpeak = a; gss += (double)v*(double)v; }
+    const double grms = h.empty() ? 0.0 : std::sqrt(gss / (double)h.size());
+    const int nfr = nw / FS;
+    std::fprintf(stderr, "CODECREF T=%d nsamples=%d frames=%d peak=%.6f rms=%.6f\n", T, nw, nfr, gpeak, grms);
+    // Per-frame RMS and peak over the interleaved stereo pair — 2 lines, ~1.5 KB, enough to see a
+    // 400 ms seam as a periodic dip and a dead/garbage decoder as a flat or exploding curve.
+    std::fprintf(stderr, "CODECREF_RMS");
+    for (int f = 0; f < nfr; ++f) {
+        double ss = 0.0;
+        for (int i = 0; i < FS*2; ++i) { const double v = h[(size_t)f*FS*2 + i]; ss += v*v; }
+        std::fprintf(stderr, " %.6f", std::sqrt(ss / (double)(FS*2)));
+    }
+    std::fprintf(stderr, "\n");
+    std::fprintf(stderr, "CODECREF_PEAK");
+    for (int f = 0; f < nfr; ++f) {
+        double pk = 0.0;
+        for (int i = 0; i < FS*2; ++i) { const double a = std::fabs((double)h[(size_t)f*FS*2 + i]); if (a > pk) pk = a; }
+        std::fprintf(stderr, " %.6f", pk);
+    }
+    std::fprintf(stderr, "\n");
+    // First samples, so a channel swap or an interleaving bug is visible without any statistics.
+    std::fprintf(stderr, "CODECREF_HEAD");
+    for (int i = 0; i < 16 && i < (int)h.size(); ++i) std::fprintf(stderr, " %.6f", h[i]);
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+    return true;
+}
+
+// Mirrors the fp16 decision in conv2d_op (explicit NNOPT_CODECFP16, else Adreno 8xx and up) so the
+// chunk self-check can size its tolerance to the arithmetic that will actually run. Reading the same
+// two inputs rather than a counter keeps it correct BEFORE any conv has executed.
+static bool nnopt_codec_fp16_in_use(OpenCLContext& cl_ctx) {
+    const char* e = std::getenv("NNOPT_CODECFP16");
+    if (e && *e) return e[0] != '0';
+    return nnopt_adreno_model(cl_ctx) >= 800;   // must track the conv2d_op decision above
+}
+
 bool nnopt_codecchunk_check(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queue,
                             int T, int CK) {
     if (T <= 0) T = 20;
@@ -3477,16 +4219,39 @@ bool nnopt_codecchunk_check(OpenCLContext& cl_ctx, Weights& weights, cl_command_
     // Samples per frame, so the worst sample can be named as "frame k", which is what says
     // whether the error sits on a chunk boundary or is spread through the signal.
     const size_t spf = (T > 0) ? (ref.size()/2) / (size_t)T : 0;
+    const double peak = (refmax > 0 ? refmax : 1.0);
+    const double meand = n ? sum/(double)n : 0.0;
+
+    // ── the tolerance has to match the arithmetic actually running ──────────────────────────────
+    // This was a flat 1e-5 of peak, which is an fp32-exactness bound. The SHIPPED Adreno 8xx path
+    // decodes the codec in half precision (CLBlast HGEMM accumulating in fp16 with K up to 4608),
+    // where regrouping the same work into chunks moves the last bits by ~1% of peak as a matter of
+    // course. So on every real device the check failed, called codec_stream_disable(), and the
+    // engine spent the whole session without the streaming state that makes audio gapless — which
+    // is the 400 ms seam users hear. Measured on an Adreno 840: max 1.11% of peak, mean 0.028% of
+    // peak, i.e. ~1100x over the old budget and entirely benign.
+    //
+    // What this check EXISTS to catch is state that is structurally wrong — the failure it was
+    // written for decayed the render to SILENCE over a handful of chunks, i.e. ~100% error that
+    // grows. Both bounds below are far under that and the mean bound is the one that catches drift:
+    // fp16 noise is sparse and bounded, a broken state is biased and everywhere.
+    const bool fp16_codec = nnopt_codec_fp16_in_use(cl_ctx);
+    const double tol_max  = fp16_codec ? 3.0e-2 : 1.0e-5;   // isolated worst sample
+    const double tol_mean = fp16_codec ? 2.0e-3 : 1.0e-5;   // drift across the whole signal
+    const bool ok = (ref.size() == got.size()) &&
+                    (maxd <= tol_max * peak) && (meand <= tol_mean * peak);
+
     std::fprintf(stderr,
-        "CODECCHUNK T=%d chunk=%d stream=%d  ref=%zu got=%zu samples  "
-        "max|diff|=%.6g (%.2f%% of peak) at sample %zu = frame %.2f  mean|diff|=%.6g  peak=%.6g  -> %s\n",
-        T, CK, codec_stream_enabled() ? 1 : 0, ref.size(), got.size(),
-        maxd, refmax > 0 ? 100.0*maxd/refmax : 0.0, argmax_i,
+        "CODECCHUNK T=%d chunk=%d stream=%d fp16=%d  ref=%zu got=%zu samples  "
+        "max|diff|=%.6g (%.2f%% of peak, tol %.2f%%) at sample %zu = frame %.2f  "
+        "mean|diff|=%.6g (%.3f%% of peak, tol %.3f%%)  peak=%.6g  -> %s\n",
+        T, CK, codec_stream_enabled() ? 1 : 0, fp16_codec ? 1 : 0, ref.size(), got.size(),
+        maxd, 100.0*maxd/peak, 100.0*tol_max, argmax_i,
         spf ? (double)(argmax_i/2) / (double)spf : 0.0,
-        n ? sum/(double)n : 0.0, refmax,
-        (ref.size() == got.size() && maxd <= 1e-5 * (refmax > 0 ? refmax : 1.0)) ? "IDENTICAL" : "DIFFERS");
+        meand, 100.0*meand/peak, 100.0*tol_mean, refmax,
+        ok ? "IDENTICAL" : "DIFFERS");
     std::fflush(stderr);
-    return ref.size() == got.size() && maxd <= 1e-5 * (refmax > 0 ? refmax : 1.0);
+    return ok;
 }
 
 std::vector<float> model_forward_graph(
@@ -3840,7 +4605,8 @@ std::vector<float> model_forward_graph(
             if (sf) { size_t rd=std::fread(src.data(),sizeof(float),src.size(),sf); std::fclose(sf); (void)rd; }
             cl_int es; cl_mem srcb = pool_alloc(cl_ctx.context(), CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
                                                     src.size()*sizeof(float), src.data(), &es);
-            std::vector<int> grid = run_generate(cl_ctx, weights, queue, xb, srcb, n_frames);
+            CondStream cs1; cs1.src.push_back(srcb);
+            std::vector<int> grid = run_generate(cl_ctx, weights, queue, xb, cs1, n_frames);
             pool_free(srcb);
             FILE* of = std::fopen("layer_dumps/optest_out.bin", "wb");
             if (of) { for (int t : grid) { int32_t v = t; std::fwrite(&v, sizeof(int32_t), 1, of); } std::fclose(of); }

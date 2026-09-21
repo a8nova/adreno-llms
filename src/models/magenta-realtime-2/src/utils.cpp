@@ -601,6 +601,15 @@ void nnopt_pin_perf_cores(const char* who) {
     if (on < 0) { const char* e = std::getenv("NNOPT_CPUPIN"); on = (e && e[0] == '1') ? 1 : 0; }
     if (!on) return;
 
+    // Everything below is Linux/Android: cpu_set_t and sched_setaffinity do not exist on Darwin, and
+    // the big-core detection reads /sys/devices/system/cpu, which is not there either. Guarded rather
+    // than ported so the HOST build (macOS, Apple OpenCL — the numerical-parity lane) compiles; a host
+    // run is for correctness, never for timing, so there is nothing here worth emulating.
+#if !defined(__linux__) && !defined(__ANDROID__)
+    std::fprintf(stderr, "CPUPIN %s: not supported on this host — ignored\n", who);
+    std::fflush(stderr);
+    return;
+#else
     const int ncpu = (int)sysconf(_SC_NPROCESSORS_CONF);
     if (ncpu <= 1) return;
     std::vector<long> khz((size_t)ncpu, 0);
@@ -661,6 +670,7 @@ void nnopt_pin_perf_cores(const char* who) {
                          "setaffinity=%d nice %d->%d (setpriority=%d)\n",
                  who, ncpu, best/1000, blist, wlist, why, rc, old_nice, new_nice, prc);
     std::fflush(stderr);
+#endif
 }
 
 // Codec GPU span for the last render, in ms. Reported next to the AR's so "GPU busy" finally
@@ -1026,8 +1036,23 @@ cl_mem nnopt_gemv(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queu
     // fixed 8 outputs per workgroup. NOUT only parameterises linear_bias_fused_f32.
     const size_t nwg = ((size_t)out_dim + 7) / 8;
     const size_t gws[2] = {(size_t)rows, nwg * 64}, lws[2] = {1, 64};
-    if (cl_ctx.profEnqueue(use, 2, gws, lws, "gemv") != CL_SUCCESS) {
-        NNOPT_ERROR_FMT("nnopt_gemv: enqueue %s", w_key.c_str());
+    const cl_int eqg = cl_ctx.profEnqueue(use, 2, gws, lws, "gemv");
+    if (eqg != CL_SUCCESS) {
+        // The code and the geometry, not just the key: this fired on the macOS host build with no
+        // way to tell an invalid work-group size from an invalid kernel arg, and the two point at
+        // completely different bugs.
+        // WHICH kernel and what IT says it can take. The variant is picked several branches up
+        // (v8 / subgroup / q4 / w8), so the key alone does not identify the program that failed, and
+        // CL_KERNEL_WORK_GROUP_SIZE is per kernel OBJECT — the device-wide limit can be fine while
+        // this one is not.
+        char fn[128] = {0}; size_t kwg = 0; cl_ulong klm = 0;
+        clGetKernelInfo(use, CL_KERNEL_FUNCTION_NAME, sizeof(fn) - 1, fn, nullptr);
+        clGetKernelWorkGroupInfo(use, cl_ctx.device(), CL_KERNEL_WORK_GROUP_SIZE, sizeof(kwg), &kwg, nullptr);
+        clGetKernelWorkGroupInfo(use, cl_ctx.device(), CL_KERNEL_LOCAL_MEM_SIZE, sizeof(klm), &klm, nullptr);
+        NNOPT_ERROR_FMT("nnopt_gemv: enqueue %s err=%d gws=%zux%zu lws=%zux%zu in=%d out=%d rows=%d "
+                        "kernel=%s kernel_wg_max=%zu kernel_local=%llu",
+                        w_key.c_str(), (int)eqg, gws[0], gws[1], lws[0], lws[1],
+                        in_dim, out_dim, rows, fn, kwg, (unsigned long long)klm);
         pool_free(out);
         return nullptr;
     }
@@ -1451,8 +1476,16 @@ static bool nnopt_is_depth_mlp(const std::string& k) {
 static int nnopt_int8_scope() {
     static int v = -1, ep = -1;
     if (ep != nnopt_toggle_epoch()) {
+        // DEFAULT 0 = no int8, i.e. the fp16 path. This is the ONLY path that has ever been
+        // compared against the MLX reference: the live 10 s trace (conditioning bit-exact, frame-0
+        // temporal_in 0.014%, temporal_out 0.19%), the double-CFG fix, the frame-0 seed and the
+        // codec cosine 1.000000 were all measured with int8=0. int8 quantises the AR's own weights
+        // -- the exact stage the double-CFG bug lived in -- so it cannot be assumed equivalent, and
+        // it has never been measured against the reference even once. It used to default to 4,
+        // which meant the app shipped a path nobody had verified while the verified one sat behind
+        // an opt-in chip. NNOPT_INT8SCOPE=4 still arms it for a deliberate speed experiment.
         const char* e = std::getenv("NNOPT_INT8SCOPE");
-        v = e ? std::atoi(e) : 4;
+        v = e ? std::atoi(e) : 0;
         ep = nnopt_toggle_epoch();
     }
     return v;
@@ -1479,6 +1512,258 @@ static bool nnopt_int8_eligible(const std::string& k) {
 }
 
 // ── nnopt_gemv_fused — see utils.h ──────────────────────────────────────────
+// ── software global barrier: probe + verdict ────────────────────────────────────────────────────
+namespace { int g_bar_max_groups = -1; }
+int nnopt_barrier_max_groups() { return g_bar_max_groups < 0 ? 0 : g_bar_max_groups; }
+
+void nnopt_barrier_probe(OpenCLContext& cl_ctx) {
+    if (g_bar_max_groups >= 0) return;            // once per process
+    g_bar_max_groups = 0;
+    cl_int err = CL_SUCCESS;
+
+    cl_uint cus = 0;
+    clGetDeviceInfo(cl_ctx.device(), CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(cus), &cus, nullptr);
+
+    cl_command_queue q = cl_ctx.queue();
+    const size_t L = 128;
+    const int rounds = 64;
+
+    cl_mem bar = clCreateBuffer(cl_ctx.context(), CL_MEM_READ_WRITE, 3*sizeof(int), nullptr, &err);
+    cl_mem out = clCreateBuffer(cl_ctx.context(), CL_MEM_READ_WRITE, 4*sizeof(int), nullptr, &err);
+    if (!bar || !out) { std::fprintf(stderr, "BARPROBE alloc failed\n"); return; }
+
+    // Sweep LDS ballast x G. Ballast 0 is the trivial kernel (a bound no real kernel can hold);
+    // the higher rungs are what a megakernel actually looks like to the scheduler.
+    const int kBallast[4] = {0, 4096, 8192, 16384};
+    int best_by_ballast[4] = {0,0,0,0};
+    for (int bi = 0; bi < 4; ++bi) {
+    char popts[64];
+    std::snprintf(popts, sizeof(popts), "-D LDS_BALLAST=%d", kBallast[bi]);
+    cl_program p = cl_ctx.build_program_from_file("kernels/barrier_probe.cl", popts);
+    if (!p) { std::fprintf(stderr, "BARPROBE build failed (ballast=%d)\n", kBallast[bi]); continue; }
+    cl_kernel k = clCreateKernel(p, "barrier_probe", &err);
+    if (!k || err != CL_SUCCESS) { std::fprintf(stderr, "BARPROBE kernel err=%d\n", (int)err); continue; }
+
+    // The occupancy facts a megakernel is sized by. PRIVATE_MEM_SIZE is the spill detector: this
+    // codebase has already measured an 18x slowdown from an accumulator array going to scratch.
+    size_t kwg = 0, kmul = 0; cl_ulong klmem = 0, kpmem = 0;
+    clGetKernelWorkGroupInfo(k, cl_ctx.device(), CL_KERNEL_WORK_GROUP_SIZE, sizeof(kwg), &kwg, nullptr);
+    clGetKernelWorkGroupInfo(k, cl_ctx.device(), CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, sizeof(kmul), &kmul, nullptr);
+    clGetKernelWorkGroupInfo(k, cl_ctx.device(), CL_KERNEL_LOCAL_MEM_SIZE, sizeof(klmem), &klmem, nullptr);
+    clGetKernelWorkGroupInfo(k, cl_ctx.device(), CL_KERNEL_PRIVATE_MEM_SIZE, sizeof(kpmem), &kpmem, nullptr);
+    std::fprintf(stderr, "BARPROBE cus=%u kernel_wg_max=%zu wg_multiple=%zu local=%lluB private=%lluB\n",
+                 (unsigned)cus, kwg, kmul,
+                 (unsigned long long)klmem, (unsigned long long)kpmem);
+
+
+    // SWEEP, do not assume. Every G at or below the residency bound should complete all rounds;
+    // the first G that does not is the bound. Probing ABOVE it is the point — that is the case a
+    // megakernel must never launch, and it is only safe to discover here because the spin is bounded.
+    int best = 0;
+    // Sweep well past the CU count. The first version stopped at 4x CUs and reported 48 — which
+    // was its own CEILING, not a limit of the device, and it then capped the MLP megakernel at 48
+    // workgroups while the split GEMV it replaces launches 384. A latency-bound GEMV starved of
+    // concurrency loses more than the dispatches it saves, so how far this actually goes matters.
+    for (cl_uint G : { (cl_uint)1, (cl_uint)2, (cl_uint)4, cus ? cus : 12u,
+                       cus ? cus*2 : 24u, cus ? cus*4 : 48u, cus ? cus*8 : 96u,
+                       cus ? cus*16 : 192u, cus ? cus*32 : 384u }) {
+        if (G == 0) continue;
+        const int zero[3] = {0,0,0};
+        clEnqueueWriteBuffer(q, bar, CL_TRUE, 0, sizeof(zero), zero, 0, nullptr, nullptr);
+        const int z2[4] = {0,0,0,0};
+        clEnqueueWriteBuffer(q, out, CL_TRUE, 0, sizeof(z2), z2, 0, nullptr, nullptr);
+        const int Gi = (int)G;
+        clSetKernelArg(k,0,sizeof(cl_mem),&bar); clSetKernelArg(k,1,sizeof(cl_mem),&out);
+        clSetKernelArg(k,2,sizeof(int),&Gi);     clSetKernelArg(k,3,sizeof(int),&rounds);
+        const size_t g = (size_t)G * L;
+        const cl_int e = clEnqueueNDRangeKernel(q,k,1,nullptr,&g,&L,0,nullptr,nullptr);
+        if (e != CL_SUCCESS) { std::fprintf(stderr, "BARPROBE G=%u enqueue err=%d\n", (unsigned)G, (int)e); continue; }
+        clFinish(q);
+        int r[2] = {-1,-1};
+        clEnqueueReadBuffer(q, out, CL_TRUE, 0, sizeof(r), r, 0, nullptr, nullptr);
+        const bool ok = (r[0] == rounds && r[1] == 0);
+        std::fprintf(stderr, "BARPROBE G=%-3u rounds_done=%-3d abort=%d -> %s\n",
+                     (unsigned)G, r[0], r[1], ok ? "OK" : "FAILED");
+        if (ok && (int)G > best) best = (int)G;
+    }
+    best_by_ballast[bi] = best;
+    std::fprintf(stderr, "BARPROBE ballast=%-6d local_actual=%lluB max_safe_groups=%d%s\n",
+                 kBallast[bi], (unsigned long long)klmem, best,
+                 (kBallast[bi] > 0 && klmem < (cl_ulong)kBallast[bi]) ? "  <-- BALLAST NOT ALLOCATED, result meaningless" : "");
+    clReleaseKernel(k);
+    }   // ballast loop
+
+    // The verdict a megakernel must obey is the one measured at realistic LDS, not the trivial one.
+    g_bar_max_groups = best_by_ballast[2];   // 8 KB rung
+    std::fprintf(stderr, "BARPROBE VERDICT cus=%u  G(lds=0)=%d  G(4K)=%d  G(8K)=%d  G(16K)=%d"
+                 "  -> using %d — megakernel %s\n",
+                 (unsigned)cus, best_by_ballast[0], best_by_ballast[1],
+                 best_by_ballast[2], best_by_ballast[3], g_bar_max_groups,
+                 g_bar_max_groups >= 8 ? "viable at useful width" :
+                 (g_bar_max_groups >= 2 ? "viable but NARROW" : "NOT viable"));
+    // ── step 2 precondition: can a megakernel pass DATA across the barrier? ─────────────────────
+    // The bound above says the barrier completes. This says whether what was written before it is
+    // readable after it by a DIFFERENT workgroup — the thing dense1 -> dense2 depends on.
+    if (g_bar_max_groups >= 2) {
+        cl_program pv = cl_ctx.build_program_from_file("kernels/barrier_probe.cl", "-D LDS_BALLAST=0");
+        cl_kernel kv = pv ? clCreateKernel(pv, "visibility_probe", &err) : nullptr;
+        if (kv) {
+            const int N = 4096;                       // ints per workgroup slice
+            for (int G : { 4, 12, g_bar_max_groups }) {
+                if (G < 2) continue;
+                cl_mem data = clCreateBuffer(cl_ctx.context(), CL_MEM_READ_WRITE,
+                                             (size_t)G*N*sizeof(int), nullptr, &err);
+                if (!data) continue;
+                const int zero[3] = {0,0,0}, z4[4] = {0,0,0,0};
+                clEnqueueWriteBuffer(q, bar, CL_TRUE, 0, sizeof(zero), zero, 0, nullptr, nullptr);
+                clEnqueueWriteBuffer(q, out, CL_TRUE, 0, sizeof(z4), z4, 0, nullptr, nullptr);
+                clSetKernelArg(kv,0,sizeof(cl_mem),&bar); clSetKernelArg(kv,1,sizeof(cl_mem),&data);
+                clSetKernelArg(kv,2,sizeof(cl_mem),&out); clSetKernelArg(kv,3,sizeof(int),&G);
+                clSetKernelArg(kv,4,sizeof(int),&N);
+                const size_t gv = (size_t)G * L;
+                if (clEnqueueNDRangeKernel(q,kv,1,nullptr,&gv,&L,0,nullptr,nullptr) == CL_SUCCESS) {
+                    clFinish(q);
+                    int r[4] = {0,0,0,0};
+                    clEnqueueReadBuffer(q, out, CL_TRUE, 0, sizeof(r), r, 0, nullptr, nullptr);
+                    std::fprintf(stderr, "BARVIS G=%-3d slice=%d ints  ran=%d mismatches=%d -> %s\n",
+                                 G, N, r[0], r[1],
+                                 (r[0] == 1 && r[1] == 0) ? "VISIBLE (megakernel can pass data)"
+                                                          : "NOT VISIBLE");
+                }
+                clReleaseMemObject(data);
+            }
+            clReleaseKernel(kv);
+        } else {
+            std::fprintf(stderr, "BARVIS kernel build failed err=%d\n", (int)err);
+        }
+    }
+
+    std::fflush(stderr);
+    clReleaseMemObject(bar); clReleaseMemObject(out);
+}
+
+// ── depth-MLP megakernel ────────────────────────────────────────────────────────────────────────
+bool nnopt_megamlp_enabled() {
+    static int v = -1, ep = -1;
+    if (ep != nnopt_toggle_epoch()) {
+        const char* e = std::getenv("NNOPT_MEGAMLP");
+        v = (e && e[0] != '0') ? 1 : 0;
+        ep = nnopt_toggle_epoch();
+    }
+    return v != 0;
+}
+
+cl_mem nnopt_depth_mlp_mega(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queue,
+                            cl_mem x, const std::string& wp, const std::string& rms_key) {
+    const std::string k1 = wp + ".layers.1.inner._linear";
+    const std::string k2 = wp + ".layers.3.inner._linear";
+    // Eligibility. Anything unusual returns null and the caller runs the ordinary split path —
+    // this must never be a hard failure, only a decline.
+    if (weights.has_tensor(k1 + ".weight.scale") || weights.has_tensor(k2 + ".weight.scale"))
+        return nullptr;                                   // quantised: not this path's job
+    int hid = 0, dim = 0, dim2 = 0, hid2 = 0;
+    if (!nnopt_weight_dims(weights, k1 + ".weight", &hid, &dim))  return nullptr;
+    if (!nnopt_weight_dims(weights, k2 + ".weight", &dim2, &hid2)) return nullptr;
+    if (dim != dim2 || hid != hid2 || (dim & 3) || (hid & 3))     return nullptr;
+
+    cl_mem W1 = weights.get_buffer(k1 + ".weight"), b1 = weights.get_buffer(k1 + ".bias");
+    cl_mem W2 = weights.get_buffer(k2 + ".weight"), b2 = weights.get_buffer(k2 + ".bias");
+    cl_mem sc = weights.get_buffer(rms_key);
+    if (!W1 || !b1 || !W2 || !b2 || !sc) return nullptr;
+
+    static cl_kernel k = nullptr;
+    static cl_mem    bar = nullptr;
+    static int       nout = 4;
+    cl_int err = CL_SUCCESS;
+    if (!k) {
+        // Build every tile size and REPORT each one's footprint before choosing. private>0 is
+        // spill; this is the cheapest place to see the curve rather than guess at it.
+        const char* e = std::getenv("NNOPT_MEGANOUT");
+        const int want = e ? std::atoi(e) : 4;
+        for (int n : {4, 8, 16}) {
+            char o[32]; std::snprintf(o, sizeof(o), "-D NOUT=%d", n);
+            cl_program pp = cl_ctx.build_program_from_file("kernels/depth_mlp_mega.cl", o);
+            if (!pp) { std::fprintf(stderr, "MEGAMLP NOUT=%d build failed\n", n); continue; }
+            cl_kernel kk = clCreateKernel(pp, "depth_mlp_mega", &err);
+            if (!kk) continue;
+            size_t kwg = 0; cl_ulong kpriv = 0, klocal = 0;
+            clGetKernelWorkGroupInfo(kk, cl_ctx.device(), CL_KERNEL_WORK_GROUP_SIZE, sizeof(kwg), &kwg, nullptr);
+            clGetKernelWorkGroupInfo(kk, cl_ctx.device(), CL_KERNEL_PRIVATE_MEM_SIZE, sizeof(kpriv), &kpriv, nullptr);
+            clGetKernelWorkGroupInfo(kk, cl_ctx.device(), CL_KERNEL_LOCAL_MEM_SIZE, sizeof(klocal), &klocal, nullptr);
+            std::fprintf(stderr, "MEGAMLP NOUT=%-2d wg_max=%zu local=%lluB private=%lluB%s%s\n",
+                         n, kwg, (unsigned long long)klocal, (unsigned long long)kpriv,
+                         kpriv > 0 ? "  SPILLING" : "  clean",
+                         n == want ? "   <= USING" : "");
+            if (n == want) { k = kk; nout = n; } else clReleaseKernel(kk);
+        }
+        if (!k) { std::fprintf(stderr, "MEGAMLP no usable variant — split path\n"); return nullptr; }
+        // Barrier state lives for the life of the process. The kernel adopts the published sense on
+        // entry, so it never needs re-zeroing between dispatches — a host reset would cost the very
+        // enqueue this path exists to remove.
+        const int z[3] = {0,0,0};
+        bar = clCreateBuffer(cl_ctx.context(), CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                             sizeof(z), (void*)z, &err);
+        if (!bar) { k = nullptr; return nullptr; }
+        size_t kwg = 0; cl_ulong kpriv = 0, klocal = 0;
+        clGetKernelWorkGroupInfo(k, cl_ctx.device(), CL_KERNEL_WORK_GROUP_SIZE, sizeof(kwg), &kwg, nullptr);
+        clGetKernelWorkGroupInfo(k, cl_ctx.device(), CL_KERNEL_PRIVATE_MEM_SIZE, sizeof(kpriv), &kpriv, nullptr);
+        clGetKernelWorkGroupInfo(k, cl_ctx.device(), CL_KERNEL_LOCAL_MEM_SIZE, sizeof(klocal), &klocal, nullptr);
+        // PRIVATE_MEM_SIZE is the spill alarm. Non-zero here is the 18x cliff this codebase has hit
+        // before, and the reason step 2 exists at all.
+        std::fprintf(stderr, "MEGAMLP kernel wg_max=%zu local=%lluB private=%lluB%s\n",
+                     kwg, (unsigned long long)klocal, (unsigned long long)kpriv,
+                     kpriv > 0 ? "  <-- SPILLING" : "");
+    }
+
+    const size_t L = 64;                          // matches reqd_work_group_size in the kernel
+    int G = nnopt_barrier_max_groups();
+    if (G > hid / nout) G = hid / nout;           // no more workgroups than dense1 has NOUT tiles
+    if (G < 2) return nullptr;
+
+    cl_mem scratch = pool_alloc(cl_ctx.context(), CL_MEM_READ_WRITE, (size_t)hid*sizeof(float), nullptr, &err);
+    cl_mem out     = pool_alloc(cl_ctx.context(), CL_MEM_READ_WRITE, (size_t)dim*sizeof(float), nullptr, &err);
+    if (!scratch || !out) { if (scratch) pool_free(scratch); if (out) pool_free(out); return nullptr; }
+
+    cl_kernel ki = nnopt_kernel_instance(k, wp, ".megamlp");
+    const float eps = 1e-6f;
+    int ai = 0;
+    clSetKernelArg(ki, ai++, sizeof(cl_mem), &x);       clSetKernelArg(ki, ai++, sizeof(cl_mem), &sc);
+    clSetKernelArg(ki, ai++, sizeof(cl_mem), &W1);      clSetKernelArg(ki, ai++, sizeof(cl_mem), &b1);
+    clSetKernelArg(ki, ai++, sizeof(cl_mem), &W2);      clSetKernelArg(ki, ai++, sizeof(cl_mem), &b2);
+    clSetKernelArg(ki, ai++, sizeof(cl_mem), &scratch); clSetKernelArg(ki, ai++, sizeof(cl_mem), &out);
+    clSetKernelArg(ki, ai++, sizeof(cl_mem), &bar);
+    clSetKernelArg(ki, ai++, sizeof(int), &dim);        clSetKernelArg(ki, ai++, sizeof(int), &hid);
+    clSetKernelArg(ki, ai++, sizeof(float), &eps);      clSetKernelArg(ki, ai++, sizeof(int), &G);
+
+    const size_t gws = (size_t)G * L;
+    const cl_int e = cl_ctx.profEnqueue(ki, 1, &gws, &L, "megamlp");
+    pool_free(scratch);
+    if (e != CL_SUCCESS) {
+        std::fprintf(stderr, "MEGAMLP enqueue err=%d G=%d dim=%d hid=%d\n", (int)e, G, dim, hid);
+        pool_free(out); return nullptr;
+    }
+    return out;
+}
+
+// ── the RESADD slot (see utils.h) ───────────────────────────────────────────────────────────────
+namespace { NnoptResAdd g_ra; bool g_ra_armed=false, g_ra_taken=false; }
+bool nnopt_resadd_enabled() {
+    // DEFAULT OFF. Unlike the kv/pack fusions this one is not a pure launch-count reduction: the
+    // pre-norm GEMV grows a second reduction and re-forms the block output in every workgroup, so
+    // it has to earn its place on the device before it becomes the default. NNOPT_FUSERA=1.
+    static int v=-1, ep=-1;
+    if (ep != nnopt_toggle_epoch()) {
+        const char* e = std::getenv("NNOPT_FUSERA");
+        v = (e && e[0] != '0') ? 1 : 0;
+        ep = nnopt_toggle_epoch();
+    }
+    return v != 0;
+}
+void nnopt_resadd_arm(const NnoptResAdd& ra){ g_ra=ra; g_ra_armed=true; g_ra_taken=false; }
+bool nnopt_resadd_consumed(){ return g_ra_taken; }
+NnoptResAdd nnopt_resadd_pending(){ return g_ra_armed ? g_ra : NnoptResAdd(); }
+void nnopt_resadd_clear(){ g_ra_armed=false; g_ra_taken=false; g_ra=NnoptResAdd(); }
+
 cl_mem nnopt_gemv_fused(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queue,
                         cl_mem x, const std::string& w_key,
                         int rows, int in_dim, int out_dim, cl_mem bias,
@@ -1498,6 +1783,17 @@ cl_mem nnopt_gemv_fused(OpenCLContext& cl_ctx, Weights& weights, cl_command_queu
     // The fold assumes the row divides into float4s, matching the base kernel's `in_dim>>2` loop.
     if ((in_dim & 3) != 0)
         return nnopt_gemv(cl_ctx, weights, queue, x, w_key, rows, in_dim, out_dim, bias);
+
+    // Take the pending post-norm+residual, if one is armed and this is the GEMV it was meant for.
+    // Every bail-out ABOVE this point leaves it armed, so the arming site materialises it instead —
+    // that is the whole safety story, so nothing below here may bail without honouring it.
+    // NOTHING IS MUTATED HERE. The slot is only marked taken once the RESADD variant has actually
+    // built and this call is committed to using it — see below. Deciding and committing in one step
+    // was wrong: if the variant failed to compile on the device, the fallback ran a GEMV on proj
+    // instead of the block input while the caller believed the value had been formed, which is
+    // silent garbage rather than a slow answer.
+    const bool want_ra = g_ra_armed && !g_ra_taken && want_rms &&
+                         g_ra.proj && g_ra.dim == in_dim && rows == 1;
 
     // NNOPT_INT8SCOPE is the single control now. There used to be a second one here
     // (NNOPT_INT8DEPTH) plus a runtime autotuner that could override both — three ways to answer
@@ -1603,18 +1899,18 @@ cl_mem nnopt_gemv_fused(OpenCLContext& cl_ctx, Weights& weights, cl_command_queu
     // never applied in the first place.
     static int constx = 0;
 
-    const int variant = (constx ? 512 : 0) | (use_img ? 256 : 0) | (use_dot8 ? 128 : 0) |
+    const int variant = (want_ra ? 1024 : 0) | (constx ? 512 : 0) | (use_img ? 256 : 0) | (use_dot8 ? 128 : 0) |
                         (nout_bit << 5) | (wide_on ? 16 : 0) |
                         (use_i8 ? 8 : 0) | (want_rms ? 4 : 0) | (bias ? 2 : 0) | (apply_gelu ? 1 : 0);
-    static cl_kernel k_var[1024] = {nullptr};
-    static int       k_bad[1024] = {0};
+    static cl_kernel k_var[2048] = {nullptr};
+    static int       k_bad[2048] = {0};
     if (!k_var[variant] && !k_bad[variant]) {
-        char opts[160];
+        char opts[192];
         std::snprintf(opts, sizeof(opts),
                       "-D PRENORM=%d -D BIAS=%d -D GELU=%d -D INT8=%d -D WIDE=%d -D NOUT=%d "
-                      "-D DOT8=%d -D IMG=%d -D CONSTX=%d -D DOT8_SWAP=%d",
+                      "-D DOT8=%d -D IMG=%d -D CONSTX=%d -D DOT8_SWAP=%d -D RESADD=%d",
                       want_rms ? 1 : 0, bias ? 1 : 0, apply_gelu ? 1 : 0, use_i8 ? 1 : 0, wide_on, nout,
-                      use_dot8 ? 1 : 0, use_img ? 1 : 0, constx, 0);
+                      use_dot8 ? 1 : 0, use_img ? 1 : 0, constx, 0, want_ra ? 1 : 0);
         cl_program p = cl_ctx.build_program_from_file("kernels/linear_bias_fused_f32.cl", opts);
         if (p) k_var[variant] = clCreateKernel(p, "linear_fused_f32", &err);
         if (!k_var[variant]) {
@@ -1626,9 +1922,12 @@ cl_mem nnopt_gemv_fused(OpenCLContext& cl_ctx, Weights& weights, cl_command_queu
     // g_gemv_delegating says "you were called from nnopt_gemv"; return null and let it run its own
     // fp16 path instead.
     if (!k_var[variant]) {
+        // The slot is untouched, so the arming site still owns it and will materialise it.
         if (g_gemv_delegating) return nullptr;
         return nnopt_gemv(cl_ctx, weights, queue, x, w_key, rows, in_dim, out_dim, bias);
     }
+    // Committed: from here every exit either enqueues the RESADD kernel or is a hard error.
+    if (want_ra) { x = g_ra.proj; g_ra_taken = true; }
 
     cl_mem out = pool_alloc(cl_ctx.context(), CL_MEM_READ_WRITE,
                             (size_t)rows * out_dim * sizeof(float), nullptr, &err);
@@ -1646,6 +1945,8 @@ cl_mem nnopt_gemv_fused(OpenCLContext& cl_ctx, Weights& weights, cl_command_queu
                              "in __global\n");
         std::fflush(stderr);
         pool_free(out);
+        // Re-entering means the retry must be able to take the slot again.
+        if (want_ra) g_ra_taken = false;
         return nnopt_gemv_fused(cl_ctx, weights, queue, x, w_key, rows, in_dim, out_dim, bias,
                                 rms_key, apply_gelu);
     }
@@ -1655,6 +1956,10 @@ cl_mem nnopt_gemv_fused(OpenCLContext& cl_ctx, Weights& weights, cl_command_queu
     if (bias)     clSetKernelArg(k, ai++, sizeof(cl_mem), &bias);
     if (want_rms) { clSetKernelArg(k, ai++, sizeof(cl_mem), &rms_scale);
                     clSetKernelArg(k, ai++, sizeof(float),  &eps); }
+    if (want_ra)  { clSetKernelArg(k, ai++, sizeof(cl_mem), &g_ra.resid);
+                    clSetKernelArg(k, ai++, sizeof(cl_mem), &g_ra.scale);
+                    clSetKernelArg(k, ai++, sizeof(float),  &g_ra.eps);
+                    clSetKernelArg(k, ai++, sizeof(cl_mem), &g_ra.out); }
     clSetKernelArg(k, ai++, sizeof(cl_mem), &out);
     clSetKernelArg(k, ai++, sizeof(int), &in_dim);
     clSetKernelArg(k, ai++, sizeof(int), &out_dim);
@@ -1684,7 +1989,8 @@ static cl_command_queue g_live_queue = nullptr;
 void nnopt_set_live_queue(cl_command_queue q) { g_live_queue = q; }
 static cl_command_queue nnopt_live_queue() { return g_live_queue; }
 
-cl_mem nnopt_pos_buffer(OpenCLContext& cl_ctx, cl_command_queue queue, int pos, bool constant) {
+cl_mem nnopt_pos_buffer(OpenCLContext& cl_ctx, cl_command_queue queue, int pos, bool constant,
+                        int slot) {
     cl_int err = CL_SUCCESS;
     if (constant) {
         static std::map<int, cl_mem> consts;
@@ -1695,25 +2001,30 @@ cl_mem nnopt_pos_buffer(OpenCLContext& cl_ctx, cl_command_queue queue, int pos, 
         consts[pos] = b;
         return b;
     }
-    static cl_mem buf = nullptr;
-    static int last = -0x7fffffff;
-    if (!buf) {
-        buf = clCreateBuffer(cl_ctx.context(), CL_MEM_READ_WRITE, sizeof(int), nullptr, &err);
-        if (!buf) return nullptr;
+    // Two independent mutable slots. 0 is the temporal frame position, 1 the cross-attention's
+    // xpos. They advance in lockstep today, but they are separate concepts (xpos counts for the
+    // life of the piece, pos is the attention position) and a replayed dispatch reads whatever its
+    // slot holds — so a future divergence must not silently alias one onto the other.
+    if (slot < 0 || slot > 1) return nullptr;
+    static cl_mem buf[2]  = {nullptr, nullptr};
+    static int    last[2] = {-0x7fffffff, -0x7fffffff};
+    if (!buf[slot]) {
+        buf[slot] = clCreateBuffer(cl_ctx.context(), CL_MEM_READ_WRITE, sizeof(int), nullptr, &err);
+        if (!buf[slot]) return nullptr;
     }
     cl_command_queue wq = g_live_queue ? g_live_queue : queue;
-    if (pos != last) {
+    if (pos != last[slot]) {
         // NON-blocking: a blocking write drains the queue and this is hit once per frame — it was
         // CL_TRUE first and cost +70% on AR wall. The staging ring keeps the source alive, since an
         // async write must not point at a dead stack variable.
         static int stage[256];
         static int si = 0;
         stage[si] = pos;
-        const cl_int e = clEnqueueWriteBuffer(wq, buf, CL_FALSE, 0, sizeof(int),
+        const cl_int e = clEnqueueWriteBuffer(wq, buf[slot], CL_FALSE, 0, sizeof(int),
                                               &stage[si], 0, nullptr, nullptr);
         si = (si + 1) % 256;
         if (e != CL_SUCCESS) return nullptr;
-        last = pos;
+        last[slot] = pos;
     }
-    return buf;
+    return buf[slot];
 }
