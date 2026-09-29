@@ -110,3 +110,7 @@ bool midi_apply_to_conditioning(const MidiState& midi, std::vector<int32_t>& tok
 // `pos + scale*(pos - neg)`, in the sampler. Both read from here so they cannot drift apart.
 // Any output pointer may be null.
 void midi_cfg_scales(float* musiccoca, float* notes, float* drums);
+// Live conditioning policy (request keys cfgtok= / mctail=), applied to every finished block.
+void midi_set_cfg_scales(float musiccoca, float notes, float drums);
+void midi_set_musiccoca_tail(int levels);
+bool midi_apply_live_policy(std::vector<int32_t>& tokens);

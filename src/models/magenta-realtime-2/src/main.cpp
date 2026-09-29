@@ -47,6 +47,8 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+std::string nnopt_force_summary();   // backbone.cpp: teacher-forcing verdict (NNOPT_FORCE)
+void nnopt_force_rewind();           // backbone.cpp: a new piece starts the forced codes over
 
 
 // Frame-0 pipeline norms, defined in backbone.cpp. Declared HERE at file scope, not inside the
@@ -74,6 +76,7 @@ struct Options {
     bool xgemm_sweep = false;
     int  codecchunk_T = 0, codecchunk_CK = 0;   // codecchunk=T,CHUNK; 0 = do not run
     int  codecref_T = 0;                        // codecref=T; 0 = do not run
+    bool bwprobe = false;                       // bwprobe=1: measure GPU read bandwidth after the render
     std::string style;
     std::string out = "output.wav";
     bool        serve = false;
@@ -384,6 +387,7 @@ void log_parity(int idx, const std::string& device, const Options& o,
             idx, ccrc, g_trace_src, g_trace_ti, g_trace_to, gcrc, codes.size());
         std::fflush(stderr);
     }
+    { const std::string fs = nnopt_force_summary(); if (!fs.empty()) std::fprintf(stderr, "%s idx=%d\n", fs.c_str(), idx); }
     std::fprintf(stderr, "LOG_PARITY_GRID idx=%d n=%zu frames=%zu crc=0x%08x head=%s\n",
                  idx, codes.size(), codes.size() / (size_t)NUM_CB,
                  parity_crc32(codes.data(), codes.size()),
@@ -510,10 +514,18 @@ bool apply_kv(const std::string& key, const std::string& value, Options& o) {
     // discretised cfg tokens in the conditioning vector (EXP-028's option B).
     if (key == "cfg")           { setenv("NNOPT_CFGMC", value.c_str(), 1);
                                   g_request_env.push_back("NNOPT_CFGMC"); return true; }
+    // cfgtok=<musiccoca>,<notes>,<drums> — the CFG scales carried by the 3 conditioning channels
+    // (upstream Collider: 5,0,4). mctail=<n> — mask the n finest MusicCoCa levels (upstream live: 6).
+    if (key == "cfgtok")        { float a = 3, b = 1, c = 1;
+                                  if (std::sscanf(value.c_str(), "%f,%f,%f", &a, &b, &c) != 3) return false;
+                                  midi_set_cfg_scales(a, b, c); return true; }
+    if (key == "mctail")        { midi_set_musiccoca_tail(std::atoi(value.c_str())); return true; }
     if (key == "seed")          { o.cfg.seed = (unsigned)std::strtoul(value.c_str(), nullptr, 10); return true; }
     // codecchunk=T,CHUNK — run the chunked-vs-whole codec comparison for this request and print
     // CODECCHUNK, then carry on serving. The op-test form runs once at startup and returns from
     // main, which on a device with no shell means it can never be taken.
+    // bwprobe=1 — sustained GPU read bandwidth, the roofline for the AR (bytes of weights per frame).
+    if (key == "bwprobe")       { o.bwprobe = value != "0"; return true; }
     if (key == "codecref")      { o.codecref_T = std::atoi(value.c_str()); return true; }
     if (key == "codecchunk")    { const size_t c = value.find(',');
                                   o.codecchunk_T  = std::atoi(value.substr(0, c).c_str());
@@ -859,6 +871,55 @@ bool resolve_blend_tokens(OpenCLContext& cl_ctx,
     return true;
 }
 
+// ── bandwidth probe ─────────────────────────────────────────────────────────────────────────────
+// The AR is memory-bound: every frame streams ~630 MB of fp16 weights, so sustained GPU read
+// bandwidth sets its ceiling (frames/s = GB/s / GB per frame). Two read shapes, both reduced so the
+// compiler cannot drop the loads: float4 (64-bit-lane-friendly) and half8 as uint4 (128-bit, the
+// shape the fp16 GEMV weights are read in). 256 MB, well past any on-chip cache; best of 5.
+static void bw_probe(OpenCLContext& cl_ctx) {
+    static const char* src =
+        "__kernel void rd4(__global const float4* a, __global float* o, const int n){\n"
+        "  float4 s=(float4)(0); for(int i=get_global_id(0);i<n;i+=get_global_size(0)) s+=a[i];\n"
+        "  if(s.x+s.y+s.z+s.w==1234.5f) o[0]=s.x; }\n"
+        "__kernel void rd16(__global const uint4* a, __global uint* o, const int n){\n"
+        "  uint4 s=(uint4)(0); for(int i=get_global_id(0);i<n;i+=get_global_size(0)) s^=a[i];\n"
+        "  if(s.x+s.y+s.z+s.w==12345u) o[0]=s.x; }\n";
+    cl_program p = cl_ctx.build_program(src);
+    if (!p) { std::fprintf(stderr, "BWPROBE failed to build\n"); return; }
+    cl_int e = CL_SUCCESS;
+    const size_t bytes = (size_t)256 << 20;
+    cl_mem a = clCreateBuffer(cl_ctx.context(), CL_MEM_READ_WRITE, bytes, nullptr, &e);
+    cl_mem o = clCreateBuffer(cl_ctx.context(), CL_MEM_READ_WRITE, 64, nullptr, &e);
+    if (!a || !o) { std::fprintf(stderr, "BWPROBE alloc failed\n"); return; }
+    const unsigned char z = 1;
+    clEnqueueFillBuffer(cl_ctx.queue(), a, &z, 1, 0, bytes, 0, nullptr, nullptr);
+    clFinish(cl_ctx.queue());
+    double best[2] = {0, 0};
+    const char* names[2] = {"rd4", "rd16"};
+    for (int k = 0; k < 2; ++k) {
+        cl_kernel kk = clCreateKernel(p, names[k], &e);
+        if (!kk) continue;
+        const int n = (int)(bytes / 16);
+        clSetKernelArg(kk, 0, sizeof(cl_mem), &a); clSetKernelArg(kk, 1, sizeof(cl_mem), &o);
+        clSetKernelArg(kk, 2, sizeof(int), &n);
+        for (size_t gws : {(size_t)1 << 16, (size_t)1 << 18, (size_t)1 << 20}) {
+            const size_t lws = 64;
+            for (int rep = 0; rep < 5; ++rep) {
+                clFinish(cl_ctx.queue());
+                const auto t0 = std::chrono::steady_clock::now();
+                clEnqueueNDRangeKernel(cl_ctx.queue(), kk, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+                clFinish(cl_ctx.queue());
+                const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                if (rep > 0 && s > 0) best[k] = std::max(best[k], (double)bytes / s / 1e9);
+            }
+        }
+        clReleaseKernel(kk);
+    }
+    clReleaseMemObject(a); clReleaseMemObject(o); clReleaseProgram(p);
+    std::fprintf(stderr, "BWPROBE f4_gbs=%.1f u16_gbs=%.1f bytes_mb=%zu\n", best[0], best[1], bytes >> 20);
+    std::fflush(stderr);
+}
+
 // Render one chunk and write it. Returns false if the pipeline produced nothing.
 bool generate_to_file(OpenCLContext& cl_ctx, Weights& weights, const Options& o,
                       SongSession* sess, SongResult& r, SongConditioning& cond) {
@@ -883,6 +944,15 @@ bool generate_to_file(OpenCLContext& cl_ctx, Weights& weights, const Options& o,
     // LAST and in place, because the style block above may have come straight out of the per-prompt
     // cache: baking MIDI into that cache would make every note-on look like a prompt change and pay
     // for a MusicCoCa text-tower pass that nothing asked for.
+    // Player's CFG scales and style-level mask, onto the block and every ramp step (no-op at defaults).
+    if (cond.style_tokens.size() == (size_t)kConditioningTokens) {
+        midi_apply_live_policy(cond.style_tokens);
+        for (size_t off = 0; off + kConditioningTokens <= cond.style_ramp.size(); off += kConditioningTokens) {
+            std::vector<int32_t> blk(cond.style_ramp.begin() + off, cond.style_ramp.begin() + off + kConditioningTokens);
+            midi_apply_live_policy(blk);
+            std::copy(blk.begin(), blk.end(), cond.style_ramp.begin() + off);
+        }
+    }
     if (o.midi.active && cond.style_tokens.size() == (size_t)kConditioningTokens) {
         if (!midi_apply_to_conditioning(o.midi, cond.style_tokens)) return false;
         // Every ramp step is a conditioning block in its own right, so held notes have to be
@@ -1276,6 +1346,7 @@ int main(int argc, char** argv) {
         // a surface you drag. steer=0 restores the old policy (new conditioning = new piece); an
         // explicit reset=1 from the caller always wins.
         req.cfg.reset = explicit_reset || (cond_changed && !req.steer);
+        if (req.cfg.reset) nnopt_force_rewind();
         char wav[64];
         std::snprintf(wav, sizeof(wav), "output_serve_%d.wav", idx);
         req.out = wav;
@@ -1293,6 +1364,7 @@ int main(int argc, char** argv) {
             nnopt_codecchunk_check(cl_ctx, weights, cl_ctx.queue(), req.codecchunk_T, req.codecchunk_CK);
         if (req.codecref_T > 0)
             nnopt_codecref_check(cl_ctx, weights, cl_ctx.queue(), req.codecref_T);
+        if (req.bwprobe) bw_probe(cl_ctx);
         // Same reports the one-shot path prints. On a device farm the app IS the only way in, so a
         // measurement that is only reachable from the CLI is a measurement we never get to take.
         //

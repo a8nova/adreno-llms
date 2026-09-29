@@ -3,6 +3,7 @@
 // No OpenCL, no weights, no engine state. See midi.h for the encoding and for why this is its own
 // translation unit; tests/midi_oracle_test.cpp compiles it against upstream's own implementation.
 
+#include <cmath>
 #include "midi.h"
 
 #include <cstdio>
@@ -119,13 +120,47 @@ static const float kCfgStep[3] = {0.2f, 0.2f, 1.0f};
 // written out again: the conditioning channels tell the model how hard to follow each stream and
 // the guidance actually does it, so if those two ever disagreed the model would be told one thing
 // and given another, silently.
+// Live override of the three scales (request key cfgtok=) and of how many fine MusicCoCa levels are
+// masked (mctail=). Unset, both reproduce the constants above exactly, so every render that does
+// not ask keeps its conditioning byte-for-byte.
+static float g_cfg_scale[3] = {-1.0f + kCfgStep[0] * (float)kCfg[0],
+                               -1.0f + kCfgStep[1] * (float)kCfg[1],
+                               -1.0f + kCfgStep[2] * (float)kCfg[2]};
+static int g_mc_tail = 0;
+
+void midi_set_cfg_scales(float musiccoca, float notes, float drums) {
+    g_cfg_scale[0] = musiccoca; g_cfg_scale[1] = notes; g_cfg_scale[2] = drums;
+}
+void midi_set_musiccoca_tail(int levels) { g_mc_tail = levels < 0 ? 0 : (levels > kMidiStyleTokens ? kMidiStyleTokens : levels); }
+
+// magenta_rt/mlx/export.py _discretize_cfg_token, in the same float32 arithmetic: clamp to
+// [-1, 7], bin = round((v + 1) / step) (mx.round is round-half-to-even, as is nearbyintf in the
+// default rounding mode), clip to [0, max_bin]. The +kMidiOffset is added by the caller.
+static int cfg_bin(float v, float step, int max_bin) {
+    const float c = v < -1.0f ? -1.0f : (v > 7.0f ? 7.0f : v);
+    float b = std::nearbyintf((c - (-1.0f)) / step);
+    if (b < 0.0f) b = 0.0f;
+    if (b > (float)max_bin) b = (float)max_bin;
+    return (int)b;
+}
+
+// Applied to a finished 144-token block, last, like MIDI: the block may come out of the per-prompt
+// cache. Upstream's live engine (core/src/mlx_engine.cpp generate_frame) keeps only the coarsest
+// 12 - kMusicCoCaMaskedTailLevels style levels and pins the rest to the mask id; the CFG channels
+// carry whatever scales the player set.
+bool midi_apply_live_policy(std::vector<int32_t>& tokens) {
+    if ((int)tokens.size() != kMidiConditioningTokens) return false;
+    for (int i = kMidiStyleTokens - g_mc_tail; i < kMidiStyleTokens; ++i) tokens[i] = kMaskedCondToken;
+    static const int kMaxBin[3] = {40, 40, 8};
+    for (int c = 0; c < 3; ++c)
+        tokens[kMidiCfgAt + c] = cfg_bin(g_cfg_scale[c], kCfgStep[c], kMaxBin[c]) + kMidiOffset;
+    return true;
+}
+
 void midi_cfg_scales(float* musiccoca, float* notes, float* drums) {
-    const float v0 = -1.0f + kCfgStep[0] * (float)kCfg[0];   // 3.0
-    const float v1 = -1.0f + kCfgStep[1] * (float)kCfg[1];   // 1.0
-    const float v2 = -1.0f + kCfgStep[2] * (float)kCfg[2];   // 1.0
-    if (musiccoca) *musiccoca = v0;
-    if (notes)     *notes     = v1;
-    if (drums)     *drums     = v2;
+    if (musiccoca) *musiccoca = g_cfg_scale[0];
+    if (notes)     *notes     = g_cfg_scale[1];
+    if (drums)     *drums     = g_cfg_scale[2];
 }
 
 bool midi_build_conditioning(const std::vector<int32_t>& style_tokens, const MidiState* midi,
@@ -140,6 +175,9 @@ bool midi_build_conditioning(const std::vector<int32_t>& style_tokens, const Mid
     for (int t : style_tokens)               out.push_back(t + kMidiOffset);
     for (int i = 0; i < kMidiNotes; ++i)     out.push_back(-1 + kMidiOffset);
     for (int i = 0; i < kMidiDrums; ++i)     out.push_back(-1 + kMidiOffset);
+    // +7 like every other channel: export.py:234 redefines NUM_RESERVED_TOKENS as 6 + 1 before
+    // _discretize_cfg_token uses it. Verified 2026-09-29: the published mrt2_small.mlxfn is an
+    // 8-bit, num_cfgs=0 export and reproduces it 600/600 codes.
     for (int c : kCfg)                       out.push_back(c + kMidiOffset);
     // Applied as a patch rather than woven into the loops above so there is ONE implementation of
     // "where do the MIDI channels live", shared with the serve loop's cached-block path.

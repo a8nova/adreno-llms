@@ -500,6 +500,58 @@ unsigned nnopt_get_sample_seed() { return g_sample_seed; }
 // computed once and every stream reads the same buffer. What does diverge is the depth self-
 // attention KV cache, because step 0 diverged: hence kc/vc per stream.
 static const int kMaxCfgStreams = 3;   // positive + musiccoca-negative + notes-negative
+
+// ── teacher forcing (parity only) ───────────────────────────────────────────────────────────────
+// NNOPT_FORCE=<file of comma-separated codes, frame-major, 12 per frame, port numbering> makes the
+// greedy depth loop record its OWN argmax and top-2 logit gap at every step, then feed the FILE's
+// code instead. Every step then sees exactly the reference's history, so a disagreement is a
+// per-step verdict on the math, not the butterfly effect of an earlier near-tie. The summary line
+// (LOG_FORCE) lists each disagreement with the port's own gap: a real bug disagrees with a wide
+// gap, precision noise only where the reference itself was nearly tied.
+namespace {
+std::vector<int>   g_force;          // loaded codes
+std::string        g_force_path;
+std::vector<int>   g_force_own;      // port's own pick per position (-1 = not reached)
+std::vector<float> g_force_gap;      // port's own top-2 gap per position
+int g_force_frame = 0;               // frames generated since the piece started (live-safe index)
+}
+// Forced codes are indexed by frames generated since the piece began, NOT by the AR position:
+// live mode compacts the AR cache (pos drops back to 64) while the piece continues.
+void nnopt_force_rewind() { g_force_frame = 0; std::fill(g_force_own.begin(), g_force_own.end(), -1); }
+static bool force_active() {
+    const char* e = std::getenv("NNOPT_FORCE");
+    if (!e || !*e) { g_force.clear(); g_force_path.clear(); return false; }
+    if (g_force_path != e) {
+        g_force.clear(); g_force_path = e;
+        if (FILE* f = std::fopen(e, "rb")) {
+            std::string t; char b[4096]; size_t n;
+            while ((n = std::fread(b, 1, sizeof b, f)) > 0) t.append(b, n);
+            std::fclose(f);
+            size_t i = 0;
+            while (i < t.size()) { size_t j = t.find(',', i); if (j == std::string::npos) j = t.size();
+                                   g_force.push_back(std::atoi(t.substr(i, j - i).c_str())); i = j + 1; }
+        }
+        std::fprintf(stderr, "FORCE loaded %zu codes from %s\n", g_force.size(), e);
+    }
+    return !g_force.empty();
+}
+std::string nnopt_force_summary() {
+    if (!force_active() || g_force_own.empty()) return std::string();
+    int n = 0, agree = 0; std::string bad;
+    int shown = 0;
+    for (size_t i = 0; i < g_force_own.size() && i < g_force.size(); ++i) {
+        if (g_force_own[i] < 0) continue;
+        ++n;
+        if (g_force_own[i] == g_force[i]) { ++agree; continue; }
+        if (shown++ < 16) {
+            char b[64]; std::snprintf(b, sizeof b, "%sf%zu.q%zu:%d/%d:%.3f", bad.empty() ? "" : ",",
+                                      i / 12, i % 12, g_force_own[i], g_force[i], g_force_gap[i]);
+            bad += b;
+        }
+    }
+    char h[96]; std::snprintf(h, sizeof h, "LOG_FORCE n=%d agree=%d bad=", n, agree);
+    return std::string(h) + (bad.empty() ? "none" : bad);
+}
 static cl_mem run_depth_loop_gpu(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue queue,
                                        cl_mem temporal_out, const std::vector<float>* fixed_inputs = nullptr,
                                        int frame_idx = 0,
@@ -574,7 +626,10 @@ static cl_mem run_depth_loop_gpu(OpenCLContext& cl_ctx, Weights& weights, cl_com
             if (!frame_buf) { NNOPT_ERROR("depth loop: sampler frame buffer");
                               for (int s=0;s<NS;++s) if (lg[s]) pool_free(lg[s]); break; }
         }
-        if (NS > 1 && g_sample_temp > 0.0f && cfk) {
+        // Guidance applies at EVERY temperature, greedy included: the exported .mlxfn combines the
+        // streams and then samples, and the combine kernel treats temperature <= 0 as a plain argmax
+        // of the combined logits. Taking argmax of the positive stream alone was a different model.
+        if (NS > 1 && cfk) {
             // CFG combine + sample. Unused negative slots alias the positive and carry scale 0, so
             // the kernel needs no branch and the term is exactly zero.
             static const std::string kSampleCfg("depth.sample.cfg");
@@ -611,6 +666,19 @@ static cl_mem run_depth_loop_gpu(OpenCLContext& cl_ctx, Weights& weights, cl_com
             clSetKernelArg(amki,0,sizeof(cl_mem),&logits); clSetKernelArg(amki,1,sizeof(cl_mem),&tokbuf);
             clSetKernelArg(amki,2,sizeof(int),&base); clSetKernelArg(amki,3,sizeof(int),&cnt); clSetKernelArg(amki,4,sizeof(int),&q);
             cl_ctx.profEnqueue(amki,1,&ag,&al,"argmax");
+            (void)frame_idx;
+            const size_t fi = (size_t)g_force_frame * NUM_CB + (size_t)q;
+            if (force_active() && fi < g_force.size()) {
+                if (g_force_own.size() != g_force.size()) { g_force_own.assign(g_force.size(), -1); g_force_gap.assign(g_force.size(), 0.0f); }
+                std::vector<float> lv((size_t)CBSIZE); int own = 0;
+                clEnqueueReadBuffer(queue, logits, CL_TRUE, 0, lv.size()*sizeof(float), lv.data(), 0, nullptr, nullptr);
+                clEnqueueReadBuffer(queue, tokbuf, CL_TRUE, (size_t)q*sizeof(int), sizeof(int), &own, 0, nullptr, nullptr);
+                float b1 = -INFINITY, b2 = -INFINITY;
+                for (float v : lv) { if (v > b1) { b2 = b1; b1 = v; } else if (v > b2) b2 = v; }
+                g_force_own[fi] = own - lo; g_force_gap[fi] = b1 - b2;
+                const int forced = lo + g_force[fi];
+                clEnqueueWriteBuffer(queue, tokbuf, CL_TRUE, (size_t)q*sizeof(int), sizeof(int), &forced, 0, nullptr, nullptr);
+            }
         }
         for (int s=0; s<NS; ++s) pool_free(lg[s]);
         if (q < NUM_CB-1) {
@@ -633,6 +701,7 @@ static cl_mem run_depth_loop_gpu(OpenCLContext& cl_ctx, Weights& weights, cl_com
     }
     for (int s=NS-1; s>=1; --s) if (depth_in[s] && depth_in[s] != depth_in[0]) pool_free(depth_in[s]);
     pool_free(depth_in[0]);
+    if (g_sample_temp <= 0.0f && !(NS > 1 && cfk) && force_active()) ++g_force_frame;
     for (int s=0; s<NS; ++s) for (int L=0; L<2; ++L) { pool_free(kc_s[s][L]); pool_free(vc_s[s][L]); }
     return tokbuf;  // GPU [12] int — caller frees; no readback here
 }
@@ -2010,7 +2079,13 @@ static cl_mem conv2d_op(OpenCLContext& cl_ctx, Weights& weights, cl_command_queu
     // Direct (col-buffer-free) path: kernel fuses ELU into the gather, handles batch. Used by the
     // non-CLBlast build always, and by the CLBlast build under NNOPT_DIRECTCONV.
 #ifdef USE_CLBLAST
-    if (direct_conv_enabled()) {
+    // Cout <= 4 goes direct too: as a GEMM it has N = Cout columns, and CLBlast tiles N by 64, so
+    // the codec's final 7x7 conv (64 -> 2 channels, K = 3136) spent ~97% of its work on padding —
+    // measured 398 ms per 2 s of audio on an Adreno 840, 23% of all GPU time, for ~1.2 GFLOP of math.
+    // Enabled when kernels/codec_smalln.cl is shipped (so a lab A/B can hold it on one side only).
+    static int smalln = -1;
+    if (smalln < 0) { FILE* f = std::fopen("kernels/codec_smalln.cl", "rb"); smalln = f ? 1 : 0; if (f) std::fclose(f); }
+    if (direct_conv_enabled() || (smalln && Cout <= 4)) {
 #endif
         out = conv_direct(cl_ctx,queue,in_eff,K,b,B,Tin_eff,F,Cin,Tout,Fout,Cout,kH,kW,sh,sw,padT0,padF0,
                           /*transpose=*/false, /*apply_elu=*/apply_elu);
@@ -2343,6 +2418,115 @@ static cl_mem conv_clblast_fp16(OpenCLContext& cl_ctx, cl_command_queue queue, c
         s_wt16[Wbuf] = w; Wh = w;
       } }
 
+    // ── strided conv-transpose: one dense GEMM per output phase (kernels/convT_phase_f16.cl) ──
+    // The full im2col of a transposed conv is mostly zeros (only taps with kh ≡ to+padT mod sh and
+    // kw ≡ fo+padF mod sw are live), and the HGEMM multiplies all of them. Per phase the live taps are
+    // fixed, so each phase is a dense GEMM over K/(sh*sw) taps. Falls through to the full path when
+    // the kernel file is absent (e.g. a lab build's original-kernel side) or NNOPT_CONVTPHASE=0.
+    static int phase_on = -1, phase_epoch = -1;
+    if (phase_epoch != nnopt_toggle_epoch()) {
+        const char* e = std::getenv("NNOPT_CONVTPHASE");
+        phase_on = (e && e[0] == '0') ? 0 : 1;
+        phase_epoch = nnopt_toggle_epoch();
+    }
+    static int phase_state = -1;   // -1 unbuilt, 0 unavailable, 1 ready
+    static cl_kernel k_pcol = nullptr, k_pw = nullptr, k_pscat = nullptr;
+    if (transposed && (sh > 1 || sw > 1) && phase_on && phase_state < 0) {
+        FILE* pf = std::fopen("kernels/convT_phase_f16.cl", "rb");
+        cl_program pp = nullptr;
+        if (pf) { std::fclose(pf); pp = cl_ctx.build_program_from_file("kernels/convT_phase_f16.cl"); }
+        if (pp) {
+            k_pcol  = clCreateKernel(pp, "im2col_convT_phase_f16", &err);
+            k_pw    = clCreateKernel(pp, "convT_phase_weights_f16", &err);
+            k_pscat = clCreateKernel(pp, "convT_phase_scatter_f16", &err);
+        }
+        phase_state = (k_pcol && k_pw && k_pscat) ? 1 : 0;
+        std::fprintf(stderr, "CONVT_PHASE %s\n", phase_state ? "on" : "unavailable (full im2col path)");
+        std::fflush(stderr);
+    }
+    if (transposed && (sh > 1 || sw > 1) && phase_on && phase_state == 1) {
+        cl_mem out = pool_alloc(cl_ctx.context(), CL_MEM_READ_WRITE, (size_t)M*N*sizeof(float), nullptr, &err);
+        if (!out) { pool_free(sc); return nullptr; }
+        static std::map<std::pair<cl_mem,int>, cl_mem> s_wphase;
+        bool ok = true;
+        for (int rt = 0; rt < sh && ok; ++rt) for (int rf = 0; rf < sw && ok; ++rf) {
+            const int to0 = (((rt - p1) % sh) + sh) % sh, fo0 = (((rf - p2) % sw) + sw) % sw;
+            if (to0 >= Tout || fo0 >= Fout) continue;
+            const int Tp = (Tout - to0 + sh - 1) / sh, Fp = (Fout - fo0 + sw - 1) / sw;
+            const int nkh = (rt < kH) ? (kH - rt + sh - 1) / sh : 0;
+            const int nkw = (rf < kW) ? (kW - rf + sw - 1) / sw : 0;
+            const int Mp = B * Tp * Fp;
+            const int Kp = nkh * nkw * Cin;   // 0 would mean bias only — exact, never the case here
+            cl_mem Cp = pool_alloc(cl_ctx.context(), CL_MEM_READ_WRITE, (size_t)Mp*N*sizeof(cl_half), nullptr, &err);
+            if (!Cp) { ok = false; break; }
+            { clSetKernelArg(k_bias,0,sizeof(cl_mem),&biasbuf); clSetKernelArg(k_bias,1,sizeof(cl_mem),&Cp);
+              clSetKernelArg(k_bias,2,sizeof(int),&Mp);         clSetKernelArg(k_bias,3,sizeof(int),&N);
+              clSetKernelArg(k_bias,4,sizeof(cl_mem),&sc);
+              size_t bg=(size_t)Mp*N;
+              if (cl_ctx.profEnqueue(k_bias,1,&bg,nullptr,"bias16") != CL_SUCCESS) { pool_free(Cp); ok = false; break; } }
+            if (Kp > 0) {
+                const std::pair<cl_mem,int> key(Wbuf, rt * 64 + rf);
+                cl_mem Wp = nullptr;
+                auto it = s_wphase.find(key);
+                if (it != s_wphase.end()) Wp = it->second;
+                else {
+                    Wp = clCreateBuffer(cl_ctx.context(), CL_MEM_READ_WRITE, (size_t)Kp*N*sizeof(cl_half), nullptr, &err);
+                    if (!Wp) { pool_free(Cp); ok = false; break; }
+                    int ai = 0;
+                    clSetKernelArg(k_pw,ai++,sizeof(cl_mem),&Wh); clSetKernelArg(k_pw,ai++,sizeof(cl_mem),&Wp);
+                    clSetKernelArg(k_pw,ai++,sizeof(int),&N);     clSetKernelArg(k_pw,ai++,sizeof(int),&Cin);
+                    clSetKernelArg(k_pw,ai++,sizeof(int),&kW);    clSetKernelArg(k_pw,ai++,sizeof(int),&rt);
+                    clSetKernelArg(k_pw,ai++,sizeof(int),&rf);    clSetKernelArg(k_pw,ai++,sizeof(int),&nkw);
+                    clSetKernelArg(k_pw,ai++,sizeof(int),&sh);    clSetKernelArg(k_pw,ai++,sizeof(int),&sw);
+                    clSetKernelArg(k_pw,ai++,sizeof(int),&Kp);
+                    size_t wg2[2]={(size_t)Kp,(size_t)N};
+                    if (cl_ctx.profEnqueue(k_pw,2,wg2,nullptr,"wphase16") != CL_SUCCESS) { clReleaseMemObject(Wp); pool_free(Cp); ok = false; break; }
+                    s_wphase[key] = Wp;
+                }
+                cl_mem colp = pool_alloc(cl_ctx.context(), CL_MEM_READ_WRITE, (size_t)Mp*Kp*sizeof(cl_half), nullptr, &err);
+                if (!colp) { pool_free(Cp); ok = false; break; }
+                { int ai = 0; const int elu_flag = apply_elu ? 1 : 0;
+                  clSetKernelArg(k_pcol,ai++,sizeof(cl_mem),&in);  clSetKernelArg(k_pcol,ai++,sizeof(cl_mem),&colp);
+                  clSetKernelArg(k_pcol,ai++,sizeof(int),&B);      clSetKernelArg(k_pcol,ai++,sizeof(int),&T);
+                  clSetKernelArg(k_pcol,ai++,sizeof(int),&F);      clSetKernelArg(k_pcol,ai++,sizeof(int),&Cin);
+                  clSetKernelArg(k_pcol,ai++,sizeof(int),&Tp);     clSetKernelArg(k_pcol,ai++,sizeof(int),&Fp);
+                  clSetKernelArg(k_pcol,ai++,sizeof(int),&to0);    clSetKernelArg(k_pcol,ai++,sizeof(int),&fo0);
+                  clSetKernelArg(k_pcol,ai++,sizeof(int),&rt);     clSetKernelArg(k_pcol,ai++,sizeof(int),&rf);
+                  clSetKernelArg(k_pcol,ai++,sizeof(int),&nkh);    clSetKernelArg(k_pcol,ai++,sizeof(int),&nkw);
+                  clSetKernelArg(k_pcol,ai++,sizeof(int),&sh);     clSetKernelArg(k_pcol,ai++,sizeof(int),&sw);
+                  clSetKernelArg(k_pcol,ai++,sizeof(int),&p1);     clSetKernelArg(k_pcol,ai++,sizeof(int),&p2);
+                  clSetKernelArg(k_pcol,ai++,sizeof(int),&elu_flag); clSetKernelArg(k_pcol,ai++,sizeof(cl_mem),&sc);
+                  size_t ig[2]={(size_t)Kp,(size_t)Mp};
+                  if (cl_ctx.profEnqueue(k_pcol,2,ig,nullptr,"im2colTp16") != CL_SUCCESS) { pool_free(colp); pool_free(Cp); ok = false; break; } }
+                cl_command_queue qq = queue;
+                cl_event pev = nullptr;
+                const bool want_pev = OpenCLContext::profWantEvent();
+                const cl_half one_h = 0x3C00;
+                cl_ctx.compTic();   // profile builds only: whole-GEMM wall (CLBlast's event covers its last kernel)
+                const CLBlastStatusCode pst = CLBlastHgemm(CLBlastLayoutRowMajor, CLBlastTransposeNo, CLBlastTransposeNo,
+                    (size_t)Mp,(size_t)N,(size_t)Kp, one_h, colp,0,(size_t)Kp, Wp,0,(size_t)N, one_h, Cp,0,(size_t)N, &qq,
+                    want_pev ? &pev : nullptr);
+                { char nm[64]; std::snprintf(nm, sizeof nm, "gemmTp K%d N%d", Kp, N); cl_ctx.compAccum(nm); }
+                if (want_pev && pev) OpenCLContext::profEventAdd("hgemmTp", pev);
+                pool_free(colp);
+                if (pst != CLBlastSuccess) { NNOPT_ERROR_FMT("codec fp16: phase HGEMM st=%d", (int)pst); pool_free(Cp); ok = false; break; }
+            }
+            { int ai = 0;
+              clSetKernelArg(k_pscat,ai++,sizeof(cl_mem),&Cp);  clSetKernelArg(k_pscat,ai++,sizeof(cl_mem),&out);
+              clSetKernelArg(k_pscat,ai++,sizeof(int),&N);      clSetKernelArg(k_pscat,ai++,sizeof(int),&Tp);
+              clSetKernelArg(k_pscat,ai++,sizeof(int),&Fp);     clSetKernelArg(k_pscat,ai++,sizeof(int),&to0);
+              clSetKernelArg(k_pscat,ai++,sizeof(int),&fo0);    clSetKernelArg(k_pscat,ai++,sizeof(int),&sh);
+              clSetKernelArg(k_pscat,ai++,sizeof(int),&sw);     clSetKernelArg(k_pscat,ai++,sizeof(int),&Tout);
+              clSetKernelArg(k_pscat,ai++,sizeof(int),&Fout);   clSetKernelArg(k_pscat,ai++,sizeof(int),&Mp);
+              clSetKernelArg(k_pscat,ai++,sizeof(cl_mem),&sc);
+              size_t sg[2]={(size_t)N,(size_t)Mp};
+              if (cl_ctx.profEnqueue(k_pscat,2,sg,nullptr,"scatterTp16") != CL_SUCCESS) { pool_free(Cp); ok = false; break; } }
+            pool_free(Cp);
+        }
+        if (ok) { pool_free(sc); return out; }
+        pool_free(out);   // any failure: fall through to the full path
+    }
+
     // ── col (fp16, scaled) ──
     cl_mem colh = pool_alloc(cl_ctx.context(), CL_MEM_READ_WRITE, (size_t)M*K*sizeof(cl_half), nullptr, &err);
     if (!colh) { NNOPT_ERROR("codec fp16: col alloc"); pool_free(sc); return nullptr; }
@@ -2386,10 +2570,12 @@ static cl_mem conv_clblast_fp16(OpenCLContext& cl_ctx, cl_command_queue queue, c
     cl_event gev = nullptr;
     const bool want_ev = OpenCLContext::profWantEvent();
     const cl_half one = 0x3C00;   // 1.0 in IEEE binary16
+    cl_ctx.compTic();   // profile builds only: whole-GEMM wall (CLBlast's event covers its last kernel)
     CLBlastStatusCode st = nogemm ? CLBlastSuccess
       : CLBlastHgemm(CLBlastLayoutRowMajor, CLBlastTransposeNo, CLBlastTransposeNo,
         (size_t)M,(size_t)N,(size_t)K, one, colh,0,(size_t)K, Wh,0,(size_t)N, one, ch,0,(size_t)N, &q,
         want_ev ? &gev : nullptr);
+    { char nm[64]; std::snprintf(nm, sizeof nm, "gemm%s K%d N%d", transposed ? "T" : "", K, N); cl_ctx.compAccum(nm); }
     if (want_ev && gev) OpenCLContext::profEventAdd("hgemm", gev);
     pool_free(colh);
     if (st != CLBlastSuccess) { NNOPT_ERROR_FMT("codec fp16: CLBlastHgemm st=%d", (int)st); pool_free(ch); pool_free(sc); return nullptr; }
@@ -3744,6 +3930,8 @@ bool run_song(OpenCLContext& cl_ctx, Weights& weights,
         // EXP-007 measured as carrying real prompt adherence). It is opt-in because shipping both
         // at once is the bug this default fixes.
         float sc_mc = 0.0f, sc_nt = 0.0f;
+        // Tokens only, no logit combine: the published mrt2_small.mlxfn (what the Mac app downloads) is an
+        // export with num_cfgs=0 -- verified 2026-09-29 by re-exporting it and matching 600/600 codes.
         midi_cfg_scales(&sc_mc, &sc_nt, nullptr);
         sc_mc = 0.0f; sc_nt = 0.0f;
         // cfg=<float> overrides the musiccoca LOGIT-combine scale for one request. cfg=0 drops the
