@@ -35,9 +35,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Dtype: NNOPT_DTYPE=fp16 builds the half-precision binary into build/fp16/
-# with -DNNOPT_DTYPE=fp16. Default fp32 uses build/.
-NNOPT_DTYPE="${NNOPT_DTYPE:-fp32}"
+# Dtype: fp16 (the default, and the only build that ships) goes to build/fp16/ with
+# -DNNOPT_DTYPE=fp16. NNOPT_DTYPE=fp32 still builds the fp32 reference binary into build/.
+NNOPT_DTYPE="${NNOPT_DTYPE:-fp16}"
 case "$NNOPT_DTYPE" in
     fp16) BUILD_DIR="build/fp16"; CMAKE_DTYPE_ARG="-DNNOPT_DTYPE=fp16" ;;
     fp32|"") BUILD_DIR="build"; CMAKE_DTYPE_ARG="-DNNOPT_DTYPE=fp32"; NNOPT_DTYPE="fp32" ;;
