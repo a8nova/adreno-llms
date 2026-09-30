@@ -14,7 +14,7 @@ Beyond text generation, eight model types now run **fully on-device** on Adreno 
 - **👁️ Vision (VLM)** — [SmolVLM-256M-Instruct](src/models/smolvlm-256m-instruct/) and [LFM2.5-VL-450M](src/models/lfm2-5-vl-450m/): image + text in, text out.
 - **🗣️ Speech (TTS)** — [MMS-TTS](src/models/mms-tts/), [Kokoro-82M](src/models/kokoro-82m/) and [Pocket-TTS](src/models/pocket-tts/): text in, speech out.
 - **🎧 Listening (ASR)** — [Whisper-tiny](src/models/whisper-tiny/) (with real-time streaming transcription) and [Moonshine-tiny](src/models/moonshine-tiny/) (raw-waveform in, no mel stage — RTF ~0.3 one-shot): speech in, text out.
-- **🎵 Music (text→music)** — [MusicGen-small](src/models/musicgen-small/): text prompt in, music out.
+- **🎵 Music (text→music)** — [MusicGen-small](src/models/musicgen-small/): text prompt in, music out. [Magenta RealTime 2](src/models/magenta-realtime-2/): a live, continuous stream of music you steer with text prompts while it plays, in real time on Adreno 840.
 - **🌐 Translation (S2ST/S2TT)** — [SeamlessM4T UnitY-small](src/models/seamless-m4t-unity-small/): speech in → translated speech or text out (English/Spanish/Portuguese/Hindi/Russian).
 - **🎙️ Voice cloning (tone-color conversion)** — [OpenVoice V2](src/models/openvoice-v2/): speech in → the same speech re-voiced in a target speaker's tone color, fused single-pass clone at ~2× real-time.
 - **🏔️ Depth (monocular depth estimation)** — [Depth-Anything-V2-Small](src/models/depth-anything-v2-small/): single RGB image in, per-pixel depth map out — 5.2 s/frame at 518×686 fp16 on Adreno 620, cosine 0.99999 vs the PyTorch reference.
@@ -94,6 +94,7 @@ RTF = processing time / audio duration (lower is better; < 1.0 = faster than rea
 | Model | Precision | Params | Architecture | Decode tok/s | Output | Notes |
 |---|:-:|---:|---|---:|---|---|
 | [MusicGen-small](src/models/musicgen-small/) | fp16 | ~590M | T5 enc + 24-layer token LM + EnCodec | **11.0** | 32 kHz mono | RTF ~6.9× (a 5 s clip ≈ 34 s wall); peak ~2.7 GB; mega-fused decode + fp16 texture path |
+| [Magenta RealTime 2](src/models/magenta-realtime-2/) | fp16 | 230M | MusicCoCa text tower + frame-autoregressive transformer + depthformer + SpectroStream codec | **300** | 48 kHz stereo, continuous | **Live, real time on Adreno 840 only** (Galaxy S26 Ultra): each 40 ms frame generated in ~31 ms (1.28× headroom), 10 min continuous with 0 dropouts, measured 2026-09-30. 300 tok/s is the real-time rate (25 frames × 12 RVQ), paced by playback |
 
 ### Speech translation (S2ST / S2TT)
 
