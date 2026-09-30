@@ -628,7 +628,10 @@ Weights* g_musiccoca = nullptr;
 // RVQ (sub-millisecond) instead of N tower passes. This is the difference between a surface that
 // steers in real time and one that costs 150 ms x N per 2 s of audio.
 std::unordered_map<std::string, std::vector<float>> g_emb_cache;
-constexpr size_t kEmbCacheMax = 32;   // the app's surface holds at most 8 prompts
+// The app's surface holds up to 12 prompts, and its genre packs swap all of them at once: at 32 a
+// few genre switches filled the cache, cleared it, and charged every prompt ~150 ms again. 256
+// entries of 768 floats is ~0.8 MB.
+constexpr size_t kEmbCacheMax = 256;
 
 void release_musiccoca() {
     delete g_musiccoca;
