@@ -1,0 +1,2196 @@
+{
+  "version": "1.0",
+  "model_class": "MagentaRT2System",
+  "nodes": [
+    {
+      "op": "QuantizedEmbedding",
+      "dump_name": "sampler.depthformer.decoder.embedder.layers.0._embedding",
+      "module_path": "sampler.depthformer.decoder.embedder.layers.0._embedding",
+      "input_shape": [
+        1,
+        1,
+        12
+      ],
+      "output_shape": [
+        1,
+        1,
+        12,
+        1024
+      ],
+      "order": 0,
+      "weight_prefix": "sampler.depthformer.decoder.embedder.layers.0._embedding",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedEmbedding",
+      "dump_name": "sampler.depthformer.encoder.body.layers.0.layers.0.layers.1.layers.1._embedding",
+      "module_path": "sampler.depthformer.encoder.body.layers.0.layers.0.layers.1.layers.1._embedding",
+      "input_shape": [
+        1,
+        1,
+        12
+      ],
+      "output_shape": [
+        1,
+        1,
+        12,
+        768
+      ],
+      "order": 1,
+      "weight_prefix": "sampler.depthformer.encoder.body.layers.0.layers.0.layers.1.layers.1._embedding",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.encoder.body.layers.0.layers.0.layers.1.layers.3.inner._linear",
+      "module_path": "sampler.depthformer.encoder.body.layers.0.layers.0.layers.1.layers.3.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        768
+      ],
+      "output_shape": [
+        1,
+        1,
+        256
+      ],
+      "order": 2,
+      "weight_prefix": "sampler.depthformer.encoder.body.layers.0.layers.0.layers.1.layers.3.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "sampler.depthformer.encoder.body.layers.3._layer_norm",
+      "module_path": "sampler.depthformer.encoder.body.layers.3._layer_norm",
+      "input_shape": [
+        1,
+        1,
+        256
+      ],
+      "output_shape": [
+        1,
+        1,
+        256
+      ],
+      "order": 3,
+      "weight_prefix": "sampler.depthformer.encoder.body.layers.3._layer_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.0.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.0.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 4,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.0.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.0.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.0.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 5,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.0.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.1.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.1.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 6,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.1.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.1.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.1.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 7,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.1.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.2.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.2.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 8,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.2.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.2.body.layers.1.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.2.body.layers.1.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 9,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.2.body.layers.1.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.2.body.layers.3.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.2.body.layers.3.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 10,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.2.body.layers.3.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.2.body.layers.5._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.2.body.layers.5._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 11,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.0.layers.2.body.layers.5._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.0.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.0.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 12,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.0.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.0.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.0.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 13,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.0.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.1.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.1.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 14,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.1.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.1.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.1.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 15,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.1.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.2.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.2.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 16,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.2.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.2.body.layers.1.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.2.body.layers.1.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 17,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.2.body.layers.1.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.2.body.layers.3.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.2.body.layers.3.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 18,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.2.body.layers.3.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.2.body.layers.5._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.2.body.layers.5._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 19,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.1.layers.2.body.layers.5._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.0.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.0.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 20,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.0.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.0.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.0.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 21,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.0.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.1.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.1.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 22,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.1.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.1.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.1.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 23,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.1.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.2.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.2.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 24,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.2.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.2.body.layers.1.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.2.body.layers.1.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 25,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.2.body.layers.1.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.2.body.layers.3.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.2.body.layers.3.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 26,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.2.body.layers.3.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.2.body.layers.5._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.2.body.layers.5._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 27,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.2.layers.2.body.layers.5._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.0.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.0.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 28,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.0.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.0.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.0.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 29,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.0.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.1.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.1.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 30,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.1.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.1.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.1.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 31,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.1.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.2.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.2.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 32,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.2.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.2.body.layers.1.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.2.body.layers.1.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 33,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.2.body.layers.1.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.2.body.layers.3.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.2.body.layers.3.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 34,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.2.body.layers.3.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.2.body.layers.5._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.2.body.layers.5._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 35,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.3.layers.2.body.layers.5._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.0.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.0.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 36,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.0.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.0.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.0.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 37,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.0.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.1.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.1.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 38,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.1.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.1.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.1.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 39,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.1.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.2.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.2.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 40,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.2.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.2.body.layers.1.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.2.body.layers.1.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 41,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.2.body.layers.1.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.2.body.layers.3.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.2.body.layers.3.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 42,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.2.body.layers.3.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.2.body.layers.5._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.2.body.layers.5._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 43,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.4.layers.2.body.layers.5._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.0.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.0.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 44,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.0.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.0.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.0.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 45,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.0.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.1.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.1.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 46,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.1.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.1.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.1.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 47,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.1.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.2.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.2.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 48,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.2.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.2.body.layers.1.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.2.body.layers.1.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 49,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.2.body.layers.1.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.2.body.layers.3.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.2.body.layers.3.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 50,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.2.body.layers.3.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.2.body.layers.5._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.2.body.layers.5._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 51,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.5.layers.2.body.layers.5._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.0.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.0.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 52,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.0.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.0.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.0.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 53,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.0.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.1.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.1.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 54,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.1.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.1.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.1.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 55,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.1.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.2.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.2.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 56,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.2.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.2.body.layers.1.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.2.body.layers.1.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 57,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.2.body.layers.1.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.2.body.layers.3.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.2.body.layers.3.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 58,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.2.body.layers.3.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.2.body.layers.5._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.2.body.layers.5._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 59,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.6.layers.2.body.layers.5._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.0.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.0.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 60,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.0.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.0.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.0.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 61,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.0.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.1.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.1.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 62,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.1.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.1.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.1.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 63,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.1.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.2.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.2.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 64,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.2.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.2.body.layers.1.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.2.body.layers.1.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 65,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.2.body.layers.1.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.2.body.layers.3.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.2.body.layers.3.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 66,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.2.body.layers.3.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.2.body.layers.5._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.2.body.layers.5._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 67,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.7.layers.2.body.layers.5._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.0.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.0.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 68,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.0.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.0.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.0.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 69,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.0.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.1.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.1.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 70,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.1.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.1.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.1.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 71,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.1.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.2.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.2.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 72,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.2.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.2.body.layers.1.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.2.body.layers.1.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 73,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.2.body.layers.1.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.2.body.layers.3.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.2.body.layers.3.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 74,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.2.body.layers.3.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.2.body.layers.5._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.2.body.layers.5._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 75,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.8.layers.2.body.layers.5._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.0.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.0.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 76,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.0.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.0.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.0.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 77,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.0.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.1.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.1.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 78,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.1.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.1.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.1.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 79,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.1.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.2.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.2.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 80,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.2.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.2.body.layers.1.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.2.body.layers.1.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 81,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.2.body.layers.1.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.2.body.layers.3.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.2.body.layers.3.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 82,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.2.body.layers.3.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.2.body.layers.5._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.2.body.layers.5._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 83,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.9.layers.2.body.layers.5._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.0.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.0.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 84,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.0.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.0.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.0.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 85,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.0.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.1.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.1.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 86,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.1.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.1.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.1.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 87,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.1.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.2.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.2.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 88,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.2.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.2.body.layers.1.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.2.body.layers.1.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 89,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.2.body.layers.1.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.2.body.layers.3.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.2.body.layers.3.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 90,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.2.body.layers.3.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.2.body.layers.5._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.2.body.layers.5._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 91,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.10.layers.2.body.layers.5._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.0.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.0.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 92,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.0.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.0.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.0.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 93,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.0.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.1.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.1.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 94,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.1.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.1.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.1.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 95,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.1.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.2.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.2.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 96,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.2.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.2.body.layers.1.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.2.body.layers.1.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        4096
+      ],
+      "order": 97,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.2.body.layers.1.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.2.body.layers.3.inner._linear",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.2.body.layers.3.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        4096
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 98,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.2.body.layers.3.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.2.body.layers.5._rms_norm",
+      "module_path": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.2.body.layers.5._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        1024
+      ],
+      "order": 99,
+      "weight_prefix": "sampler.depthformer.decoder.temporal_body.layers.0.layers.11.layers.2.body.layers.5._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.depth_body.layers.0.inner._linear",
+      "module_path": "sampler.depthformer.decoder.depth_body.layers.0.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        1024
+      ],
+      "output_shape": [
+        1,
+        1,
+        768
+      ],
+      "order": 100,
+      "weight_prefix": "sampler.depthformer.decoder.depth_body.layers.0.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.0.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.0.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        768
+      ],
+      "output_shape": [
+        1,
+        1,
+        768
+      ],
+      "order": 101,
+      "weight_prefix": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.0.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.0.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.0.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        768
+      ],
+      "output_shape": [
+        1,
+        1,
+        768
+      ],
+      "order": 102,
+      "weight_prefix": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.0.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.2.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.2.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        768
+      ],
+      "output_shape": [
+        1,
+        1,
+        768
+      ],
+      "order": 103,
+      "weight_prefix": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.2.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.2.body.layers.1.inner._linear",
+      "module_path": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.2.body.layers.1.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        768
+      ],
+      "output_shape": [
+        1,
+        1,
+        3072
+      ],
+      "order": 104,
+      "weight_prefix": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.2.body.layers.1.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.2.body.layers.3.inner._linear",
+      "module_path": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.2.body.layers.3.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        3072
+      ],
+      "output_shape": [
+        1,
+        1,
+        768
+      ],
+      "order": 105,
+      "weight_prefix": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.2.body.layers.3.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.2.body.layers.5._rms_norm",
+      "module_path": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.2.body.layers.5._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        768
+      ],
+      "output_shape": [
+        1,
+        1,
+        768
+      ],
+      "order": 106,
+      "weight_prefix": "sampler.depthformer.decoder.depth_body.layers.1.layers.0.layers.2.body.layers.5._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.0.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.0.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        768
+      ],
+      "output_shape": [
+        1,
+        1,
+        768
+      ],
+      "order": 107,
+      "weight_prefix": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.0.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.0.body.layers.4._rms_norm",
+      "module_path": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.0.body.layers.4._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        768
+      ],
+      "output_shape": [
+        1,
+        1,
+        768
+      ],
+      "order": 108,
+      "weight_prefix": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.0.body.layers.4._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.2.body.layers.0._rms_norm",
+      "module_path": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.2.body.layers.0._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        768
+      ],
+      "output_shape": [
+        1,
+        1,
+        768
+      ],
+      "order": 109,
+      "weight_prefix": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.2.body.layers.0._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.2.body.layers.1.inner._linear",
+      "module_path": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.2.body.layers.1.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        768
+      ],
+      "output_shape": [
+        1,
+        1,
+        3072
+      ],
+      "order": 110,
+      "weight_prefix": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.2.body.layers.1.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.2.body.layers.3.inner._linear",
+      "module_path": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.2.body.layers.3.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        3072
+      ],
+      "output_shape": [
+        1,
+        1,
+        768
+      ],
+      "order": 111,
+      "weight_prefix": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.2.body.layers.3.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "RMSNorm",
+      "dump_name": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.2.body.layers.5._rms_norm",
+      "module_path": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.2.body.layers.5._rms_norm",
+      "input_shape": [
+        1,
+        1,
+        768
+      ],
+      "output_shape": [
+        1,
+        1,
+        768
+      ],
+      "order": 112,
+      "weight_prefix": "sampler.depthformer.decoder.depth_body.layers.1.layers.1.layers.2.body.layers.5._rms_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "LayerNorm",
+      "dump_name": "sampler.depthformer.decoder.depth_body.layers.2._layer_norm",
+      "module_path": "sampler.depthformer.decoder.depth_body.layers.2._layer_norm",
+      "input_shape": [
+        1,
+        1,
+        768
+      ],
+      "output_shape": [
+        1,
+        1,
+        768
+      ],
+      "order": 113,
+      "weight_prefix": "sampler.depthformer.decoder.depth_body.layers.2._layer_norm",
+      "is_pre_hook": false,
+      "reference_only": true
+    },
+    {
+      "op": "QuantizedLinear",
+      "dump_name": "sampler.depthformer.decoder.depth_body.layers.3.inner._linear",
+      "module_path": "sampler.depthformer.decoder.depth_body.layers.3.inner._linear",
+      "input_shape": [
+        1,
+        1,
+        768
+      ],
+      "output_shape": [
+        1,
+        1,
+        12294
+      ],
+      "order": 114,
+      "weight_prefix": "sampler.depthformer.decoder.depth_body.layers.3.inner._linear",
+      "is_pre_hook": false,
+      "reference_only": true
+    }
+  ],
+  "_nnport_capture_version": "2026-06-16-auto-dep-install-retry-v6",
+  "_raw_node_count_before_dedup": 115,
+  "_framework": "mlx"
+}

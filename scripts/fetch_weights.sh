@@ -13,6 +13,7 @@
 #   musicgen-small  seamless-m4t-unity-small  openvoice-v2  smolvlm-256m-instruct
 #   pocket-tts  moonshine-tiny  depth-anything-v2-small  stable-audio-open-small
 #   functiongemma-270m-it  bonsai (Q1_0 1-bit; fetches 8B + 4B + 1.7B + tokenizer)
+#   magenta-realtime-2
 #
 # Per model, this fetches the base set the runtime needs:
 #   weights/model.fp16.bin
@@ -41,7 +42,7 @@ HF_BRANCH="${HF_BRANCH:-main}"
 HF_BASE="https://huggingface.co/${HF_REPO}/resolve/${HF_BRANCH}"
 
 
-MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m smolvlm-256m-instruct mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m pocket-tts musicgen-small seamless-m4t-unity-small openvoice-v2 functiongemma-270m-it moonshine-tiny depth-anything-v2-small stable-audio-open-small bonsai bonsai-27b)
+MODELS=(granite-4-0-350m lfm2-5-350m lfm2-5-vl-450m smolvlm-256m-instruct mamba-130m mamba2-130m qwen2-5-0-5b smollm2-135m-instruct whisper-tiny kokoro-82m pocket-tts musicgen-small seamless-m4t-unity-small openvoice-v2 functiongemma-270m-it moonshine-tiny depth-anything-v2-small stable-audio-open-small bonsai bonsai-27b magenta-realtime-2)
 BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer.json tokenizer_vocab.bin)
 # whisper-tiny + moonshine-tiny (ASR), musicgen-small (text→music),
 # seamless-m4t-unity-small (speech translation) and functiongemma-270m-it
@@ -67,6 +68,14 @@ STABLE_AUDIO_BASE_FILES=(model.fp16.bin model.fp16.meta.json t5_encoder.fp16.bin
 POCKET_BASE_FILES=(model.fp16.bin model.fp16.meta.json tokenizer_vocab.bin \
   voices/alba.fp16.bin voices/azelma.fp16.bin voices/cosette.fp16.bin voices/eponine.fp16.bin \
   voices/fantine.fp16.bin voices/javert.fp16.bin voices/jean.fp16.bin voices/marius.fp16.bin)
+# magenta-realtime-2 (live music): transformer + depthformer + style encoder in
+# model.fp16.bin, the SpectroStream codec (fp32, with its index), the MusicCoCa
+# text tower + SentencePiece vocab for prompts, the iSTFT window, and the two
+# op-test fixtures deploy_android.sh requires. No tokenizer_vocab.bin.
+MAGENTA_BASE_FILES=(model.fp16.bin model.fp16.meta.json \
+  model.codec.f32.bin model.codec.f32.idx model.codec.f32.meta.json \
+  musiccoca.fp16.bin musiccoca.fp16.meta.json musiccoca_spm.bin \
+  istft_window.bin optest_input.bin optest_source.bin)
 
 # Which models currently have which quant variants published on HF. Update when
 # new quant bundles are uploaded.
@@ -144,6 +153,8 @@ file_list_for() {
     files=("${KOKORO_BASE_FILES[@]}")
   elif [ "${model}" = "pocket-tts" ]; then
     files=("${POCKET_BASE_FILES[@]}")    # model + meta + tokenizer_vocab + 8 v1 voices
+  elif [ "${model}" = "magenta-realtime-2" ]; then
+    files=("${MAGENTA_BASE_FILES[@]}")   # model + codec + MusicCoCa + fixtures (11 files)
   elif [ "${model}" = "whisper-tiny" ] || [ "${model}" = "musicgen-small" ] || [ "${model}" = "seamless-m4t-unity-small" ] || [ "${model}" = "functiongemma-270m-it" ] || [ "${model}" = "moonshine-tiny" ]; then
     files=("${WHISPER_BASE_FILES[@]}")   # model.fp16.bin + meta + tokenizer_vocab.bin
   else

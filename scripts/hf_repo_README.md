@@ -49,6 +49,9 @@ Decode tok/s = 5-run warm median, fp16, greedy (`temperature=0, seed=42`), 32-to
 | `moonshine-tiny/model.fp16.bin` | [UsefulSensors/moonshine-tiny](https://huggingface.co/UsefulSensors/moonshine-tiny) | ~27M | streaming ASR (see repo) | MIT |
 | `depth-anything-v2-small/model.fp16.bin` | [depth-anything/Depth-Anything-V2-Small-hf](https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf) | ~25M | depth estimation (see repo) | Apache 2.0 |
 | `stable-audio-open-small/model.fp16.bin` | [stabilityai/stable-audio-open-small](https://huggingface.co/stabilityai/stable-audio-open-small) | ~341M | text→audio (see repo) | Stability AI Community License |
+| `magenta-realtime-2/` (11 files) | [google/magenta-realtime-2](https://huggingface.co/google/magenta-realtime-2) | 230M | live music, real time on Adreno 840 (see repo) | CC BY 4.0 |
+
+**Magenta RealTime 2 attribution.** The files under `magenta-realtime-2/` are Copyright 2026 Google LLC (Google DeepMind), from [google/magenta-realtime-2](https://huggingface.co/google/magenta-realtime-2), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Changes made here: converted to this runtime's layout (fp16 transformer weights, fp32 SpectroStream codec, and the MusicCoCa text tower and SentencePiece vocab extracted from Google's release). They are not retrained or fine-tuned. Google's usage terms on the model card also apply. This mirror is not affiliated with or endorsed by Google.
 
 **OpenELM-270M-Instruct is partially hosted here.** Under `openelm-270m-instruct/` you'll find only the small companion files:
 

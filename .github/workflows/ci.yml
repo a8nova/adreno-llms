@@ -36,6 +36,7 @@ jobs:
           - kokoro-82m
           - lfm2-5-350m
           - lfm2-5-vl-450m
+          - magenta-realtime-2
           - mamba-130m
           - mamba2-130m
           - mms-tts
