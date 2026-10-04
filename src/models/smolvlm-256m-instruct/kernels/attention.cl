@@ -265,17 +265,66 @@ __kernel void gqa_attn_scores(
 // We require sub_group_size == WG_SIZE so a single subgroup spans the WG.
 //
 // Global work: (total_rows * 64), local: 64
+// ── Work-group reduction: subgroup fast path + portable fallback ────────────
+// sub_group_reduce_* needs cl_khr_subgroups, and it is only CORRECT when one
+// subgroup spans the whole work-group — which only qcom_reqd_sub_group_size
+// ("full") guarantees. MEASURED on PowerVR Rogue GE8320 (Vivo Y21), whose driver
+// has neither: every program using these builtins failed to build with
+//   "candidate unavailable as it requires OpenCL extension 'cl_khr_subgroups'"
+// their kernels were therefore absent, the dispatches were skipped, and the model
+// emitted confident garbage at an impossible 11 tok/s. The host compile-probes
+// BOTH the builtin and the attribute and defines NNOPT_SUBGROUP_REDUCE=1 only
+// when both genuinely work (see opencl_context.cpp).
+#if NNOPT_SUBGROUP_REDUCE
 #pragma OPENCL EXTENSION cl_khr_subgroups : enable
 #pragma OPENCL EXTENSION cl_qcom_reqd_sub_group_size : enable
+#define NNOPT_WAVE_ATTR __attribute__((qcom_reqd_sub_group_size("full")))
+#define NNOPT_DECL_SCRATCH(name, n)
+#define NNOPT_REDUCE_ADD(name, lid, n, v) sub_group_reduce_add(v)
+#define NNOPT_REDUCE_MAX(name, lid, n, v) sub_group_reduce_max(v)
+#else
+#define NNOPT_WAVE_ATTR
+#define NNOPT_DECL_SCRATCH(name, n) __local float name[n]
+// Barrier tree reduce over the whole work-group. Safe at every call site here:
+// they are all lane-uniform (early-outs branch on get_group_id(), which is
+// uniform), so every lane reaches every barrier.
+static inline float nnopt_wg_reduce_add(__local float* s, int lid, int n, float v) {
+  s[lid] = v;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int off = n >> 1; off > 0; off >>= 1) {
+    if (lid < off) s[lid] += s[lid + off];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  const float r = s[0];
+  barrier(CLK_LOCAL_MEM_FENCE);   // scratch reusable after this point
+  return r;
+}
+static inline float nnopt_wg_reduce_max(__local float* s, int lid, int n, float v) {
+  s[lid] = v;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int off = n >> 1; off > 0; off >>= 1) {
+    if (lid < off) s[lid] = fmax(s[lid], s[lid + off]);
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  const float r = s[0];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  return r;
+}
+#define NNOPT_REDUCE_ADD(name, lid, n, v) nnopt_wg_reduce_add(name, lid, n, v)
+#define NNOPT_REDUCE_MAX(name, lid, n, v) nnopt_wg_reduce_max(name, lid, n, v)
+#endif
 #define SM_WG 64
 __kernel
 __attribute__((reqd_work_group_size(SM_WG, 1, 1)))
-__attribute__((qcom_reqd_sub_group_size("full")))
+NNOPT_WAVE_ATTR
 void gqa_softmax(
     __global storage_t* scores,
     const int seq_q,
     const int seq_k,
     const int total_rows) {
+  // Scratch for the non-subgroup reduction fallback; expands to
+  // nothing when NNOPT_SUBGROUP_REDUCE is on.
+  NNOPT_DECL_SCRATCH(nnopt_red, SM_WG);
   (void)seq_q;
   const int r = (int)get_group_id(0);
   const int lid = (int)get_local_id(0);
@@ -289,7 +338,7 @@ void gqa_softmax(
     float v = (float)LOAD(scores, base + c);
     if (v > lm) lm = v;
   }
-  float row_max = sub_group_reduce_max(lm);
+  float row_max = NNOPT_REDUCE_MAX(nnopt_red, lid, SM_WG, lm);
 
   // Pass 2: exp + write back + per-lane partial sum → subgroup_reduce_add.
   float ls = 0.0f;
@@ -299,7 +348,7 @@ void gqa_softmax(
     STORE(scores, base + c, e);
     ls += e;
   }
-  float row_sum = sub_group_reduce_add(ls);
+  float row_sum = NNOPT_REDUCE_ADD(nnopt_red, lid, SM_WG, ls);
 
   // Pass 3: normalize.
   const float inv = native_recip(row_sum + 1e-20f);

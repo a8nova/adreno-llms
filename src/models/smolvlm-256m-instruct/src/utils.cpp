@@ -1,4 +1,7 @@
 #include "utils.h"
+#include "texture_policy.h"
+#include "team_gemv.h"
+#include "model_config.h"
 #include "debug_utils.h"   // NNOPT_ERROR_FMT — used by element_add / pytorch_linear / etc.
 #include "opencl_context.h"  // nnopt_build_program_cached — kernel-binary disk cache
 
@@ -534,9 +537,32 @@ static bool gemv_ensure_init(cl_command_queue queue) {
 #ifdef NNOPT_USE_FP16
 // Public dispatch: fused GEMV + element-wise residual add. Decode-only fast path
 // for down_proj (lets caller skip a separate add_residual kernel dispatch).
+// PowerVR (texture-denied) decode GEMVs: kernels/gemv_team.cl via team_gemv.h.
+// nullptr when the team path is off; callers then use their usual kernel.
+static team_gemv::Ctx* team_ctx(cl_command_queue q) {
+    auto& t = team_gemv::Ctx::get(q);
+    if (!t.enabled()) return nullptr;
+    using namespace MODEL_CONFIG;
+    t.maybe_sweep(q, HIDDEN_SIZE, INTERMEDIATE_SIZE, NUM_ATTENTION_HEADS * HEAD_DIM,
+                  NUM_KEY_VALUE_HEADS * HEAD_DIM, TEXT_CONFIG_VOCAB_SIZE);
+    return &t;
+}
+
+bool gemv_m1_rmsnorm_qkv_team_dispatch(cl_command_queue queue,
+                                       int N_q, int N_kv, int K, float eps,
+                                       cl_mem x, cl_mem gamma,
+                                       cl_mem W_q, cl_mem W_k, cl_mem W_v,
+                                       cl_mem Y_q, cl_mem Y_k, cl_mem Y_v) {
+    auto* t = team_ctx(queue);
+    if (!t || !t->fuse_norm() || (K & 7) != 0 || !gamma) return false;
+    return t->qkv(queue, x, W_q, W_k, W_v, Y_q, Y_k, Y_v, N_q, N_kv, K, nullptr, gamma, eps);
+}
+
 bool gemv_m1_residual_fp16_dispatch(cl_command_queue queue,
                                     int N, int K,
                                     cl_mem x, cl_mem W, cl_mem residual, cl_mem out) {
+    if (auto* t = team_ctx(queue))
+        if ((K & 7) == 0 && t->gemv_addres(queue, x, W, residual, out, N, K)) return true;
     if (!gemv_ensure_init(queue)) return false;
     cl_kernel k = gemv_state().kernel_residual;
     if (!set_arg_checked(k, 0, sizeof(cl_mem), &x, "x")) return false;
@@ -730,12 +756,58 @@ void gemv_m1_qkv_image_fp16(
 // reduce for the rmsnorm ss-pass (cl_khr_subgroups + full subgroup ok in
 // rmsnorm pattern); __local tree-reduce for the GEMV tail (matches the rest
 // of the image-GEMV family, where subgroup reduce regressed in #25a).
+// ── Work-group reduction: subgroup fast path + portable fallback ────────────
+// sub_group_reduce_* needs cl_khr_subgroups, and it is only CORRECT when one
+// subgroup spans the whole work-group — which only qcom_reqd_sub_group_size
+// ("full") guarantees. MEASURED on PowerVR Rogue GE8320 (Vivo Y21), whose driver
+// has neither: every program using these builtins failed to build with
+//   "candidate unavailable as it requires OpenCL extension 'cl_khr_subgroups'"
+// their kernels were therefore absent, the dispatches were skipped, and the model
+// emitted confident garbage at an impossible 11 tok/s. The host compile-probes
+// BOTH the builtin and the attribute and defines NNOPT_SUBGROUP_REDUCE=1 only
+// when both genuinely work (see opencl_context.cpp).
+#if NNOPT_SUBGROUP_REDUCE
 #pragma OPENCL EXTENSION cl_khr_subgroups : enable
 #pragma OPENCL EXTENSION cl_qcom_reqd_sub_group_size : enable
+#define NNOPT_WAVE_ATTR __attribute__((qcom_reqd_sub_group_size("full")))
+#define NNOPT_DECL_SCRATCH(name, n)
+#define NNOPT_REDUCE_ADD(name, lid, n, v) sub_group_reduce_add(v)
+#define NNOPT_REDUCE_MAX(name, lid, n, v) sub_group_reduce_max(v)
+#else
+#define NNOPT_WAVE_ATTR
+#define NNOPT_DECL_SCRATCH(name, n) __local float name[n]
+// Barrier tree reduce over the whole work-group. Safe at every call site here:
+// they are all lane-uniform (early-outs branch on get_group_id(), which is
+// uniform), so every lane reaches every barrier.
+static inline float nnopt_wg_reduce_add(__local float* s, int lid, int n, float v) {
+  s[lid] = v;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int off = n >> 1; off > 0; off >>= 1) {
+    if (lid < off) s[lid] += s[lid + off];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  const float r = s[0];
+  barrier(CLK_LOCAL_MEM_FENCE);   // scratch reusable after this point
+  return r;
+}
+static inline float nnopt_wg_reduce_max(__local float* s, int lid, int n, float v) {
+  s[lid] = v;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int off = n >> 1; off > 0; off >>= 1) {
+    if (lid < off) s[lid] = fmax(s[lid], s[lid + off]);
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  const float r = s[0];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  return r;
+}
+#define NNOPT_REDUCE_ADD(name, lid, n, v) nnopt_wg_reduce_add(name, lid, n, v)
+#define NNOPT_REDUCE_MAX(name, lid, n, v) nnopt_wg_reduce_max(name, lid, n, v)
+#endif
 
 __kernel
 __attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
-__attribute__((qcom_reqd_sub_group_size("full")))
+NNOPT_WAVE_ATTR
 void gemv_m1_rmsnorm_qkv_image_fp16(
     __global const half* x,
     __global const half* gamma,
@@ -749,6 +821,9 @@ void gemv_m1_rmsnorm_qkv_image_fp16(
     const int N_q,
     const int N_kv,
     const int K) {
+  // Scratch for the non-subgroup reduction fallback; expands to
+  // nothing when NNOPT_SUBGROUP_REDUCE is on.
+  NNOPT_DECL_SCRATCH(nnopt_red, WG_SIZE);
   const int row = (int)get_group_id(0);
   const int lid = (int)get_local_id(0);
   const int total = N_q + 2 * N_kv;
@@ -762,7 +837,7 @@ void gemv_m1_rmsnorm_qkv_image_fp16(
     float4 xv = convert_float4(vload4(k4, x));
     ss += dot(xv, xv);
   }
-  const float total_ss = sub_group_reduce_add(ss);
+  const float total_ss = NNOPT_REDUCE_ADD(nnopt_red, lid, WG_SIZE, ss);
   const float inv_rms = rsqrt(total_ss / (float)K + eps);
 
   // Pass 2: GEMV with normalized x = x * inv_rms * gamma.
@@ -814,7 +889,7 @@ void gemv_m1_rmsnorm_qkv_image_fp16(
 
 __kernel
 __attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
-__attribute__((qcom_reqd_sub_group_size("full")))
+NNOPT_WAVE_ATTR
 void gemv_m1_rmsnorm_residual_image_swiglu_fp16(
     __global const half* attn_out,
     __global const half* hidden_states,
@@ -826,6 +901,9 @@ void gemv_m1_rmsnorm_residual_image_swiglu_fp16(
     const float eps,
     const int N,
     const int K) {
+  // Scratch for the non-subgroup reduction fallback; expands to
+  // nothing when NNOPT_SUBGROUP_REDUCE is on.
+  NNOPT_DECL_SCRATCH(nnopt_red, WG_SIZE);
   const int row = (int)get_group_id(0);
   const int lid = (int)get_local_id(0);
   if (row >= N) return;
@@ -845,7 +923,7 @@ void gemv_m1_rmsnorm_residual_image_swiglu_fp16(
   }
   barrier(CLK_LOCAL_MEM_FENCE);  // local_sum fully populated before pass 2.
 
-  const float total_ss = sub_group_reduce_add(ss);
+  const float total_ss = NNOPT_REDUCE_ADD(nnopt_red, lid, WG_SIZE, ss);
   const float inv_rms = rsqrt(total_ss / (float)K + eps);
 
   // WG 0 publishes sum to sum_buf for the downstream mlp_down + residual.
@@ -990,6 +1068,15 @@ cl_mem get_or_create_weight_image(cl_context ctx, cl_command_queue queue,
     auto it = cache.find(weight_buf);
     if (it != cache.end()) return it->second;
 
+    {   // Rogue texture denylist (texture_policy.h): fall back to the buffer path.
+        cl_device_id d_ = nullptr;
+        if (clGetCommandQueueInfo(queue, CL_QUEUE_DEVICE, sizeof(d_), &d_, nullptr) == CL_SUCCESS &&
+            !nnopt_textures_allowed(d_)) {
+            cache[weight_buf] = nullptr;
+            return nullptr;
+        }
+    }
+
     if ((K & 3) != 0) {
         // Image2D layout is CL_RGBA: 4 fp16 per pixel. K must be divisible by 4.
         cache[weight_buf] = nullptr;
@@ -1058,6 +1145,15 @@ WeightImageArray get_or_create_weight_image_array(cl_context ctx,
     auto& cache = weight_image_array_cache();
     auto it = cache.find(weight_buf);
     if (it != cache.end()) return it->second;
+
+    {   // Rogue texture denylist (texture_policy.h): fall back to the buffer path.
+        cl_device_id d_ = nullptr;
+        if (clGetCommandQueueInfo(queue, CL_QUEUE_DEVICE, sizeof(d_), &d_, nullptr) == CL_SUCCESS &&
+            !nnopt_textures_allowed(d_)) {
+            cache[weight_buf] = result;
+            return result;
+        }
+    }
 
     if ((K & 3) != 0) {
         cache[weight_buf] = result;
@@ -2032,6 +2128,8 @@ bool gemv_m1_qkv_fp16_dispatch(cl_command_queue queue,
                                 cl_mem x,
                                 cl_mem W_q, cl_mem W_k, cl_mem W_v,
                                 cl_mem Y_q, cl_mem Y_k, cl_mem Y_v) {
+    if (auto* t = team_ctx(queue))
+        if ((K & 7) == 0 && t->qkv(queue, x, W_q, W_k, W_v, Y_q, Y_k, Y_v, N_q, N_kv, K)) return true;
     if (!qkv_ensure_init(queue)) return false;
     cl_kernel k = qkv_state().kernel;
     if (!set_arg_checked(k, 0, sizeof(cl_mem), &x, "x")) return false;
@@ -2057,6 +2155,8 @@ bool gemv_m1_qkv_fp16_dispatch(cl_command_queue queue,
 bool gemv_m1_swiglu_fp16_dispatch(cl_command_queue queue,
                                   int N, int K,
                                   cl_mem x, cl_mem W_gate, cl_mem W_up, cl_mem out) {
+    if (auto* t = team_ctx(queue))
+        if ((K & 7) == 0 && t->swiglu(queue, x, W_gate, W_up, out, N, K)) return true;
     if (!swiglu_ensure_init(queue)) return false;
     cl_kernel k = swiglu_state().kernel;
     if (!set_arg_checked(k, 0, sizeof(cl_mem), &x, "x")) return false;
@@ -2102,6 +2202,8 @@ bool pytorch_linear(cl_command_queue queue,
 #ifdef NNOPT_USE_FP16
     // Custom GEMV beats CLBlast Hgemm at M=1 for our shapes (decode path).
     if (M == 1) {
+        if (auto* t = team_ctx(queue))
+            if ((K & 7) == 0 && t->gemv(queue, x, W, out, N, K)) return true;
         if (gemv_m1_fp16_dispatch_internal(queue, N, K, x, W, out)) {
             NNOPT_DEBUG_SYNC(queue);
             return true;

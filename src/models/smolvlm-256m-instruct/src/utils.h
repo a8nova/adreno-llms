@@ -160,6 +160,15 @@ bool gemv_m1_qkv_fused_fp16_dispatch(cl_command_queue queue,
 
 // Fused Q/K/V projection (M=1 fp16 only). Reads `x[K]` once and dispatches
 // across (N_q + 2*N_kv) output rows in a single kernel.
+// RMSNorm(x; gamma, eps) fused into the Q/K/V projection, PowerVR team-GEMV
+// path only (kernels/gemv_team.cl, FUSE_NORM). x is the RAW residual stream.
+// Returns false when that path is off, so the caller normalizes separately.
+bool gemv_m1_rmsnorm_qkv_team_dispatch(cl_command_queue queue,
+                                       int N_q, int N_kv, int K, float eps,
+                                       cl_mem x, cl_mem gamma,
+                                       cl_mem W_q, cl_mem W_k, cl_mem W_v,
+                                       cl_mem Y_q, cl_mem Y_k, cl_mem Y_v);
+
 bool gemv_m1_qkv_fp16_dispatch(cl_command_queue queue,
                                 int N_q, int N_kv, int K,
                                 cl_mem x,

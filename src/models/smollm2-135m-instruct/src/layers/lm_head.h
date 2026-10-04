@@ -26,6 +26,9 @@ private:
     Weights& weights_;
 
     cl_mem w_ = nullptr; // aliased from embed_tokens.weight if tied
+public:
+    cl_mem weight() const { return w_; }
+private:
 
     // Decode fast-path GEMV (M=1) — dispatched automatically from forward() when M==1.
     cl_program block_fused_prog_ = nullptr;

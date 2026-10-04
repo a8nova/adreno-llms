@@ -44,14 +44,19 @@ int Sampler::sample(std::vector<float>& logits,
     // 4. Build sorted index for top-k / top-p filtering
     std::vector<int> indices(logits.size());
     std::iota(indices.begin(), indices.end(), 0);
-    std::sort(indices.begin(), indices.end(),
-              [&](int a, int b) { return logits[a] > logits[b]; });
 
-    // 5. Top-k: keep only the k highest logits
+    // 5. Top-k: keep only the k highest logits. Only those k need ordering, so
+    // partial_sort (O(V log k)) instead of sorting the whole vocabulary: with
+    // V=49280 the full sort was ~10 ms/token on a Cortex-A53 (Vivo Y21).
     int keep = static_cast<int>(logits.size());
     if (config_.top_k > 0 && config_.top_k < keep) {
         keep = config_.top_k;
     }
+    auto by_logit = [&](int a, int b) { return logits[a] > logits[b]; };
+    if (keep < static_cast<int>(indices.size()))
+        std::partial_sort(indices.begin(), indices.begin() + keep, indices.end(), by_logit);
+    else
+        std::sort(indices.begin(), indices.end(), by_logit);
 
     // 6. Softmax over kept logits
     float max_val = logits[indices[0]];

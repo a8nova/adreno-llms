@@ -199,7 +199,11 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
     cl_command_queue_properties q_props = 0;
     {
         const char* e = std::getenv("NNOPT_PROFILE");
+#ifdef NNOPT_PROFILE_DEFAULT_ON
+        if (!(e && e[0] == '0')) q_props |= CL_QUEUE_PROFILING_ENABLE;
+#else
         if (e && e[0] == '1') q_props |= CL_QUEUE_PROFILING_ENABLE;
+#endif
     }
     queue_ = clCreateCommandQueue(context_, device_, q_props, &err);
     if (err != CL_SUCCESS) return false;

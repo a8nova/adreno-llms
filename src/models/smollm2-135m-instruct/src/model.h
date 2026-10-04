@@ -46,7 +46,9 @@ public:
     // Decode fast path (single-token forward at decode). Dispatched from
     // forward(seq_len==1, start_pos>0) to call scaffold-provided fused
     // kernels in kernels/block_fused.cl. Agent fills in the body.
-    std::vector<float> forward_decode(int32_t token_id, int start_pos);
+    // want_logits=false: prompt token whose logits are discarded -- skip the
+    // final norm, lm_head and readback, and return a 1-element vector on success.
+    std::vector<float> forward_decode(int32_t token_id, int start_pos, bool want_logits = true);
 
     // Greedy decode fast path: skips the V=49152 fp16 logits readback
     // (98 KB GPU→CPU per token, blocking) by running argmax on-GPU and

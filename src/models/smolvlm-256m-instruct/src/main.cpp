@@ -38,6 +38,7 @@
 //   };
 
 #include "model.h"
+#include "forward_dispatch.h"
 #include "model_config.h"
 #include "opencl_context.h"
 #include "weights.h"
@@ -120,6 +121,8 @@ int main(int argc, char** argv) {
                 sampler_config.top_k = std::stoi(argv[++i]);
             } else if (a == "--top-p" && i + 1 < argc) {
                 sampler_config.top_p = std::stof(argv[++i]);
+            } else if (a == "--repetition-penalty" && i + 1 < argc) {
+                sampler_config.repetition_penalty = std::stof(argv[++i]);
             } else if (a == "--seed" && i + 1 < argc) {
                 sampler_config.seed = static_cast<uint32_t>(std::stoul(argv[++i]));
             } else if (a == "--max-tokens" && i + 1 < argc) {
@@ -193,12 +196,22 @@ int main(int argc, char** argv) {
                  elapsed_ms(t_weights));
 
     Sampler sampler(sampler_config);
+    // A non-greedy sampler needs real logits from each decode step; greedy
+    // runs can keep the GPU-argmax shortcut (one int read back per token).
+    nnopt_set_decode_needs_logits(sampler_config.temperature > 0.0f ||
+                                  sampler_config.repetition_penalty != 1.0f);
 
     Model model(cl_ctx, weights);
     if (!model.initialize()) {
         NNOPT_ERROR("Model::initialize() failed — see prior NNOPT_ERROR for the layer that failed");
         return 1;
     }
+
+    // Every kernel program has been built by now. A program that failed to build
+    // does NOT stop initialize() — its kernels are simply absent and their
+    // dispatches get skipped, so the model runs fast and emits meaningless
+    // tokens. Say so loudly here rather than letting that reach a user as output.
+    nnopt_report_build_failures();
 
     // ── Interactive REPL ──
     // `--interactive` opens a stdin-driven loop with three commands:
@@ -477,6 +490,10 @@ int main(int argc, char** argv) {
         generated_so_far.push_back(next);
 
         if (sampler_config.eos_token_id >= 0 && next == sampler_config.eos_token_id) break;
+        // SmolVLM ends its turn with <end_of_utterance> (the --interactive loop
+        // above already stops on it). Without this the one-shot path -- which
+        // Edgi uses -- ran on past the answer into number noise until max tokens.
+        if (next == 49279 /* <end_of_utterance> */) break;
         std::cout << tok.decode(std::vector<int32_t>{next}) << std::flush;
 
         // Next-step decode: feed ONLY the new token. start_pos is the absolute

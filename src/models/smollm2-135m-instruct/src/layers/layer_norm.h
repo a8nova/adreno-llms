@@ -28,6 +28,9 @@ public:
     // by this LayerNorm instance and reused across decode steps.
     cl_mem forward_decode(cl_command_queue queue, cl_mem input);
 
+    // Gamma buffer, for kernels that fuse this norm (team_gemv FUSE_NORM).
+    cl_mem gamma() const { return weight_; }
+
 private:
     OpenCLContext& cl_ctx_;
     Weights& weights_;

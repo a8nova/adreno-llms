@@ -125,8 +125,11 @@
 #include "forward_dispatch.h"
 #include "utils.h"  // nnopt_storage_t, pytorch_linear, nnopt_f16_to_f32
 #include "profile.h"
+#include "team_gemv.h"
+#include "rotary_tables.h"
 
 #include <CL/cl.h>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -172,11 +175,158 @@ static cl_mem upload_input_ids(OpenCLContext& cl_ctx,
 
 }  // namespace
 
+// ── PowerVR team decode step ────────────────────────────────────────────────
+// One token through the text decoder for texture-denied GPUs (team_gemv.h).
+// Persistent buffers, no per-layer allocations, 5 launches per layer:
+//   QKV (input RMSNorm fused) -> RoPE+KV-append+attention -> o_proj (+residual)
+//   -> gate/up SwiGLU (post-attention RMSNorm fused) -> down (+residual)
+// then lm_head with the final RMSNorm fused, and GPU argmax (same one-hot
+// result the generic seq_len==1 path returns). The generic path above runs
+// ~10 launches and ~8 clCreateBuffer/clRelease per layer, which on a 1-CU
+// PowerVR GE8320 cost more than the matrix work. Returns {} if unavailable.
+static bool g_decode_needs_logits = false;
+void nnopt_set_decode_needs_logits(bool needs) { g_decode_needs_logits = needs; }
+
+static std::vector<float> team_decode_step(OpenCLContext& cl_ctx, Weights& weights,
+                                           int32_t token, int start_pos) {
+    using namespace MODEL_CONFIG;
+    cl_command_queue q = cl_ctx.queue();
+    auto& tg = team_gemv::Ctx::get(q);
+    const int H = HIDDEN_SIZE, I = INTERMEDIATE_SIZE, V = VOCAB_SIZE;
+    const int QN = NUM_ATTENTION_HEADS * HEAD_DIM, KVN = NUM_KEY_VALUE_HEADS * HEAD_DIM;
+    const int GRP = NUM_ATTENTION_HEADS / NUM_KEY_VALUE_HEADS, KVH = NUM_KEY_VALUE_HEADS;
+    const float eps = (float)RMS_NORM_EPS;
+    if (HEAD_DIM != 64 || GRP > 4 || !tg.attn_rope_kernel() || !tg.embed_kernel() || !tg.rms_row_kernel() ||
+        !tg.fuse_norm())
+        return {};
+
+    struct Bufs {
+        bool ok = false;
+        cl_mem ids, x, xn, qb, kb, vb, attn, act, logits, idx, cos, sin;
+        std::vector<cl_mem> in_g, post_g, wq, wk, wv, wo, wg, wu, wd, kc, vc;
+        cl_mem emb, norm_g, lm;
+        int kv_max = 0;
+    };
+    static Bufs b;
+    if (!b.ok) {
+        cl_context ctx = cl_ctx.context();
+        auto mk = [&](size_t bytes) { cl_int e; return clCreateBuffer(ctx, CL_MEM_READ_WRITE, bytes, nullptr, &e); };
+        b.ids = mk(4); b.x = mk((size_t)H * 2); b.xn = mk((size_t)H * 2); b.qb = mk((size_t)QN * 2); b.kb = mk((size_t)KVN * 2);
+        b.vb = mk((size_t)KVN * 2); b.attn = mk((size_t)QN * 2); b.act = mk((size_t)I * 2);
+        b.logits = mk((size_t)V * 2); b.idx = mk(4);
+        if (!nnopt_get_rotary_tables(cl_ctx, MAX_POSITION_EMBEDDINGS, HEAD_DIM, (float)ROPE_THETA, b.cos, b.sin))
+            return {};
+        char key[128];
+        auto W = [&](const char* fmt, int i) {
+            std::snprintf(key, sizeof(key), fmt, i);
+            return weights.get_buffer(std::string(key));
+        };
+        for (int i = 0; i < NUM_HIDDEN_LAYERS; ++i) {
+            b.in_g.push_back(W("model.text_model.layers.%d.input_layernorm.weight", i));
+            b.post_g.push_back(W("model.text_model.layers.%d.post_attention_layernorm.weight", i));
+            b.wq.push_back(W("model.text_model.layers.%d.self_attn.q_proj.weight", i));
+            b.wk.push_back(W("model.text_model.layers.%d.self_attn.k_proj.weight", i));
+            b.wv.push_back(W("model.text_model.layers.%d.self_attn.v_proj.weight", i));
+            b.wo.push_back(W("model.text_model.layers.%d.self_attn.o_proj.weight", i));
+            b.wg.push_back(W("model.text_model.layers.%d.mlp.gate_proj.weight", i));
+            b.wu.push_back(W("model.text_model.layers.%d.mlp.up_proj.weight", i));
+            b.wd.push_back(W("model.text_model.layers.%d.mlp.down_proj.weight", i));
+            cl_mem K = nullptr, Vv = nullptr;
+            if (!nnopt_text_kv_cache(cl_ctx, i, KVN, &K, &Vv, &b.kv_max)) return {};
+            b.kc.push_back(K); b.vc.push_back(Vv);
+        }
+        b.emb = weights.get_buffer("model.text_model.embed_tokens.weight");
+        b.norm_g = weights.get_buffer("model.text_model.norm.weight");
+        b.lm = weights.get_buffer("lm_head.weight");
+        for (cl_mem m : {b.ids, b.x, b.qb, b.kb, b.vb, b.attn, b.act, b.logits, b.idx, b.emb, b.norm_g, b.lm})
+            if (!m) return {};
+        b.ok = true;
+    }
+    if (start_pos >= b.kv_max) return {};
+
+    clEnqueueWriteBuffer(q, b.ids, CL_FALSE, 0, 4, &token, 0, nullptr, nullptr);
+    {
+        cl_kernel ke = tg.embed_kernel();
+        const int n = 1;
+        clSetKernelArg(ke, 0, sizeof(cl_mem), &b.ids);
+        clSetKernelArg(ke, 1, sizeof(cl_mem), &b.emb);
+        clSetKernelArg(ke, 2, sizeof(cl_mem), &b.x);
+        clSetKernelArg(ke, 3, sizeof(int), &H);
+        clSetKernelArg(ke, 4, sizeof(int), &n);
+        if (!tg.launch_raw(q, ke, (size_t)(H + 63) / 64 * 64, 64)) return {};
+    }
+    const float scale = 1.0f / std::sqrt((float)HEAD_DIM);
+    cl_kernel ka = tg.attn_rope_kernel();
+    for (int i = 0; i < NUM_HIDDEN_LAYERS; ++i) {
+        if (!tg.qkv(q, b.x, b.wq[i], b.wk[i], b.wv[i], b.qb, b.kb, b.vb, QN, KVN, H,
+                    nullptr, b.in_g[i], eps)) return {};
+        clSetKernelArg(ka, 0, sizeof(cl_mem), &b.qb);
+        clSetKernelArg(ka, 1, sizeof(cl_mem), &b.kb);
+        clSetKernelArg(ka, 2, sizeof(cl_mem), &b.vb);
+        clSetKernelArg(ka, 3, sizeof(cl_mem), &b.kc[i]);
+        clSetKernelArg(ka, 4, sizeof(cl_mem), &b.vc[i]);
+        clSetKernelArg(ka, 5, sizeof(cl_mem), &b.cos);
+        clSetKernelArg(ka, 6, sizeof(cl_mem), &b.sin);
+        clSetKernelArg(ka, 7, sizeof(cl_mem), &b.attn);
+        clSetKernelArg(ka, 8, sizeof(int), &GRP);
+        clSetKernelArg(ka, 9, sizeof(int), &KVH);
+        clSetKernelArg(ka, 10, sizeof(int), &start_pos);
+        clSetKernelArg(ka, 11, sizeof(float), &scale);
+        if (!tg.launch_raw(q, ka, (size_t)KVH * 64, 64)) return {};
+        // x += Wo . attn ; act = SwiGLU(norm(x)) ; x += Wd . act   (in place)
+        if (!tg.gemv_addres(q, b.attn, b.wo[i], b.x, b.x, H, QN)) return {};
+        if (!tg.swiglu(q, b.x, b.wg[i], b.wu[i], b.act, I, H, nullptr, b.post_g[i], eps)) return {};
+        if (!tg.gemv_addres(q, b.act, b.wd[i], b.x, b.x, H, I)) return {};
+    }
+    {   // final RMSNorm as its own 1-WG launch: fusing it into lm_head made each
+        // of lm_head's ~1500 work-groups redo it (24.1 vs 19.7 ms on the GE8320)
+        cl_kernel kr = tg.rms_row_kernel();
+        const int precise = 1;
+        clSetKernelArg(kr, 0, sizeof(cl_mem), &b.x);
+        clSetKernelArg(kr, 1, sizeof(cl_mem), &b.norm_g);
+        clSetKernelArg(kr, 2, sizeof(cl_mem), &b.xn);
+        clSetKernelArg(kr, 3, sizeof(int), &H);
+        clSetKernelArg(kr, 4, sizeof(float), &eps);
+        clSetKernelArg(kr, 5, sizeof(int), &precise);
+        if (!tg.launch_raw(q, kr, 64, 64)) return {};
+    }
+    if (!tg.gemv(q, b.xn, b.lm, b.logits, V, H)) return {};
+    if (g_decode_needs_logits) {
+        // Sampling (temperature / repetition penalty): the generic path's
+        // GPU-argmax shortcut would silently turn every reply greedy (and
+        // SmolVLM loops when greedy), so hand the sampler the real logits.
+        static std::vector<uint16_t> h;
+        h.resize((size_t)V);
+        if (clEnqueueReadBuffer(q, b.logits, CL_TRUE, 0, (size_t)V * 2, h.data(), 0, nullptr,
+                                nullptr) != CL_SUCCESS) return {};
+        std::vector<float> out((size_t)V);
+        for (int i = 0; i < V; ++i) out[(size_t)i] = nnopt_f16_to_f32(h[(size_t)i]);
+        return out;
+    }
+    if (!argmax_fp16_dispatch(q, V, b.logits, b.idx)) return {};
+    int32_t tok = 0;
+    if (clEnqueueReadBuffer(q, b.idx, CL_TRUE, 0, 4, &tok, 0, nullptr, nullptr) != CL_SUCCESS) return {};
+    std::vector<float> out((size_t)V, 0.0f);
+    if (tok >= 0 && tok < V) out[(size_t)tok] = 1.0e30f;
+    return out;
+}
+
 std::vector<float> model_forward_graph(OpenCLContext& cl_ctx,
                                        Weights& weights,
                                        const std::vector<int32_t>& input_ids,
                                        int start_pos) {
     NNOPT_CHECKPOINT("model_forward_graph entry (graph-mode backbone)");
+#ifdef NNOPT_USE_FP16
+    if (input_ids.size() == 1 && input_ids[0] != MODEL_CONFIG::IMAGE_TOKEN_ID &&
+        team_gemv::Ctx::get(cl_ctx.queue()).enabled()
+#ifdef NNOPT_DEBUG
+        && !nnopt_debug_layers_enabled()
+#endif
+       ) {
+        std::vector<float> r = team_decode_step(cl_ctx, weights, input_ids[0], start_pos);
+        if (!r.empty()) return r;
+    }
+#endif
 
     cl_command_queue queue = cl_ctx.queue();
     if (!queue) {

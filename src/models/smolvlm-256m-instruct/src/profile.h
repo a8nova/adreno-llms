@@ -35,7 +35,15 @@ inline bool enabled() {
     static int cached = -1;
     if (cached < 0) {
         const char* e = getenv("NNOPT_PROFILE");
+        // Compile-time door: the Edgi app has no way to set env vars for the
+        // engine child process, so a device-only profiling run (e.g. PowerVR
+        // Rogue on BrowserStack, where there is no adb) can only be armed at
+        // build time. NNOPT_PROFILE=0 still forces it off.
+#ifdef NNOPT_PROFILE_DEFAULT_ON
+        cached = (e && e[0] == '0') ? 0 : 1;
+#else
         cached = (e && e[0] && e[0] != '0') ? 1 : 0;
+#endif
         if (cached) {
             std::atexit([]() {
                 auto& s = stats();
@@ -44,7 +52,7 @@ inline bool enabled() {
                           [](const auto& a, const auto& b) {
                               return a.second.total_ns > b.second.total_ns;
                           });
-                fprintf(stderr, "\n=== PROFILE SUMMARY ===\n");
+                fprintf(stderr, "\nNNOPT_PROF: === PROFILE SUMMARY ===\n");
                 uint64_t grand = 0;
                 for (auto& r : rows) grand += r.second.total_ns;
                 for (auto& r : rows) {
@@ -53,11 +61,11 @@ inline bool enabled() {
                         ? (double)r.second.total_ns / r.second.calls / 1e3 : 0.0;
                     const double pct = grand ? (100.0 * r.second.total_ns / grand) : 0.0;
                     fprintf(stderr,
-                            "PROFILE %-28s total_ms=%10.3f  calls=%7llu  mean_us=%9.2f  pct=%5.1f%%\n",
+                            "NNOPT_PROF: %-28s total_ms=%10.3f  calls=%7llu  mean_us=%9.2f  pct=%5.1f%%\n",
                             r.first.c_str(), total_ms,
                             (unsigned long long)r.second.calls, mean_us, pct);
                 }
-                fprintf(stderr, "PROFILE %-28s total_ms=%10.3f\n", "(SUM)", (double)grand / 1e6);
+                fprintf(stderr, "NNOPT_PROF: %-28s total_ms=%10.3f\n", "(SUM)", (double)grand / 1e6);
                 fflush(stderr);
             });
         }

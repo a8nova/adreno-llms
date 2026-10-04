@@ -3,6 +3,7 @@
 
 #include "model.h"
 #include "sampler.h"
+#include "team_gemv.h"
 #include "debug_utils.h"
 #include "utils.h"
 #include "model_config.h"
@@ -150,12 +151,12 @@ int32_t Model::forward_decode_greedy(int32_t token_id, int start_pos) {
 
     if (!replayed) {
         for (int i = 0; i < MODEL_CONFIG::NUM_HIDDEN_LAYERS; i++) {
-            cl_mem normed = input_layernorm_[i]->forward_decode(queue, hidden_for_layers);
+            cl_mem normed = (self_attn_[i]->fuses_input_norm() ? hidden_for_layers : input_layernorm_[i]->forward_decode(queue, hidden_for_layers));
             if (!normed) { if (hidden_for_layers != decode_hidden_buf_) clReleaseMemObject(hidden_for_layers); return -1; }
             if (!self_attn_[i]->forward_decode_into_residual(queue, normed, start_pos, hidden_for_layers)) {
                 if (hidden_for_layers != decode_hidden_buf_) clReleaseMemObject(hidden_for_layers); return -1;
             }
-            cl_mem normed2 = post_attention_layernorm_[i]->forward_decode(queue, hidden_for_layers);
+            cl_mem normed2 = (mlp_[i]->fuses_input_norm() ? hidden_for_layers : post_attention_layernorm_[i]->forward_decode(queue, hidden_for_layers));
             if (!normed2) { if (hidden_for_layers != decode_hidden_buf_) clReleaseMemObject(hidden_for_layers); return -1; }
             if (!mlp_[i]->forward_decode_into_residual(queue, normed2, hidden_for_layers)) {
                 if (hidden_for_layers != decode_hidden_buf_) clReleaseMemObject(hidden_for_layers); return -1;
@@ -174,10 +175,10 @@ int32_t Model::forward_decode_greedy(int32_t token_id, int start_pos) {
         } else {
             bool rec_ok = true;
             for (int i = 0; i < MODEL_CONFIG::NUM_HIDDEN_LAYERS; i++) {
-                cl_mem normed = input_layernorm_[i]->forward_decode(record_queue_, decode_hidden_buf_);
+                cl_mem normed = (self_attn_[i]->fuses_input_norm() ? decode_hidden_buf_ : input_layernorm_[i]->forward_decode(record_queue_, decode_hidden_buf_));
                 if (!normed) { rec_ok = false; break; }
                 if (!self_attn_[i]->forward_decode_into_residual(record_queue_, normed, start_pos, decode_hidden_buf_)) { rec_ok = false; break; }
-                cl_mem normed2 = post_attention_layernorm_[i]->forward_decode(record_queue_, decode_hidden_buf_);
+                cl_mem normed2 = (mlp_[i]->fuses_input_norm() ? decode_hidden_buf_ : post_attention_layernorm_[i]->forward_decode(record_queue_, decode_hidden_buf_));
                 if (!normed2) { rec_ok = false; break; }
                 if (!mlp_[i]->forward_decode_into_residual(record_queue_, normed2, decode_hidden_buf_)) { rec_ok = false; break; }
             }
@@ -286,6 +287,15 @@ bool Model::initialize() {
         NNOPT_LAYER_INIT_FMT("block%d_sub_mlp", i);
     }
 
+    {   // PowerVR team GEMVs: fold the per-layer RMSNorms into QKV / gate_up.
+        int fused = 0;
+        for (int i = 0; i < MODEL_CONFIG::NUM_HIDDEN_LAYERS; ++i) {
+            fused += self_attn_[i]->enable_fused_input_norm(input_layernorm_[i]->gamma());
+            fused += mlp_[i]->enable_fused_input_norm(post_attention_layernorm_[i]->gamma());
+        }
+        if (fused) fprintf(stderr, "NNOPT_TEAM: %d RMSNorms fused into QKV/gate_up GEMVs\n", fused);
+        team_gemv::Ctx::get(cl_ctx_).prebuild();   // compile now, not on the first token
+    }
     if (!final_norm_->initialize()) { NNOPT_ERROR_FMT("final_norm_.initialize() FAILED"); return false; }
     NNOPT_LAYER_INIT("final_norm");
 
@@ -424,12 +434,24 @@ std::vector<float> Model::forward(const std::vector<int32_t>& input_ids, int sta
     // so we route prefill through the decode kernels token-by-token. Slower
     // (O(seq_len) decode steps instead of one batched GEMM) but correctness-correct
     // for the int8 weight path. Only the decode tok/s metric matters for tuning.
-    if (const char* q = std::getenv("NNOPT_QUANT"); q && std::string(q) == "int8") {
+    // Same route when the PowerVR team GEMVs are on: there the batched prefill
+    // (CLBlast HGemm) runs ~1 token/s on a GE8320, while a decode step is
+    // ~0.2 s -- and prompt tokens before the last skip lm_head entirely.
+    const char* q = std::getenv("NNOPT_QUANT");
+    if ((q && std::string(q) == "int8") || team_gemv::Ctx::get(cl_ctx_).enabled()) {
+        const auto t_pf = std::chrono::steady_clock::now();
         std::vector<float> last_logits;
         for (int i = 0; i < seq_len; ++i) {
-            last_logits = forward_decode(input_ids[i], start_pos + i);
+            last_logits = forward_decode(input_ids[i], start_pos + i, i + 1 == seq_len);
             if (last_logits.empty()) return {};
+            // Prompt tokens skip the logits readback, so nothing would ever wait:
+            // the host would queue the whole prompt (~180 kernels + 2 buffer
+            // allocations per token) ahead of the GPU. On PowerVR GE8320 that
+            // ran ~6x slower than paced decode steps (255 tokens > 300 s).
+            clFinish(cl_ctx_.queue());
         }
+        fprintf(stderr, "NNOPT_PREFILL: %d tokens (per-token) in %.2f s\n", seq_len,
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t_pf).count());
         return last_logits;
     }
 
@@ -604,10 +626,60 @@ std::vector<float> Model::forward(const std::vector<int32_t>& input_ids, int sta
 // CORRECTNESS INVARIANT: prefill+decode must match prefill-only ID-for-ID
 // at greedy decode (--temperature 0). Any drift is a bug in this function
 // or in a forward_decode_into_residual.
-std::vector<float> Model::forward_decode(int32_t token_id, int start_pos) {
+std::vector<float> Model::forward_decode(int32_t token_id, int start_pos, bool want_logits) {
     NNOPT_CHECKPOINT("forward_decode() started");
 
     cl_command_queue queue = cl_ctx_.queue();
+    static const bool team_step = [] {
+        const char* e = std::getenv("NNOPT_TEAM_STEP");   // =0: generic decode step
+        return !(e && e[0] == '0');
+    }();
+    if (team_step && team_gemv::Ctx::get(cl_ctx_).enabled() && team_gemv::Ctx::get(cl_ctx_).embed_kernel() &&
+        team_gemv::Ctx::get(cl_ctx_).fuse_norm() && self_attn_[0]->fuses_input_norm()) {
+        // PowerVR team path: persistent buffers (no per-token clCreateBuffer)
+        // and the final RMSNorm fused into lm_head (one launch fewer).
+        auto& tg = team_gemv::Ctx::get(cl_ctx_);
+        const int H = MODEL_CONFIG::HIDDEN_SIZE, V = MODEL_CONFIG::VOCAB_SIZE;
+        static cl_mem ids = nullptr, hid = nullptr, logit = nullptr;
+        static std::vector<nnopt_storage_t> raw;
+        if (!ids) {
+            cl_int e;
+            ids = clCreateBuffer(cl_ctx_.context(), CL_MEM_READ_WRITE, 4, nullptr, &e);
+            hid = clCreateBuffer(cl_ctx_.context(), CL_MEM_READ_WRITE, (size_t)H * 2, nullptr, &e);
+            logit = clCreateBuffer(cl_ctx_.context(), CL_MEM_READ_WRITE, (size_t)V * 2, nullptr, &e);
+            raw.resize((size_t)V);
+        }
+        clEnqueueWriteBuffer(queue, ids, CL_FALSE, 0, 4, &token_id, 0, nullptr, nullptr);
+        {
+            cl_kernel ke = tg.embed_kernel();
+            const int n = 1;
+            clSetKernelArg(ke, 0, sizeof(cl_mem), &ids);
+            clSetKernelArg(ke, 1, sizeof(cl_mem), embed_tokens_->weight_ptr());
+            clSetKernelArg(ke, 2, sizeof(cl_mem), &hid);
+            clSetKernelArg(ke, 3, sizeof(int), &H);
+            clSetKernelArg(ke, 4, sizeof(int), &n);
+            size_t gws = (size_t)(H + 63) / 64 * 64, lws = 64;
+            if (nnopt_prof::enqueue(queue, ke, 1, nullptr, &gws, &lws, 0, nullptr, nullptr) != CL_SUCCESS)
+                return {};
+        }
+        for (int i = 0; i < MODEL_CONFIG::NUM_HIDDEN_LAYERS; i++) {
+            cl_mem x1 = self_attn_[i]->fuses_input_norm() ? hid : input_layernorm_[i]->forward_decode(queue, hid);
+            if (!x1 || !self_attn_[i]->forward_decode_into_residual(queue, x1, start_pos, hid)) return {};
+            cl_mem x2 = mlp_[i]->fuses_input_norm() ? hid : post_attention_layernorm_[i]->forward_decode(queue, hid);
+            if (!x2 || !mlp_[i]->forward_decode_into_residual(queue, x2, hid)) return {};
+        }
+        if (!want_logits) return std::vector<float>(1, 0.0f);
+        // Final RMSNorm as its own 1-WG launch: fused into lm_head, each of its
+        // ~1500 work-groups redid it (24.1 vs 19.7 ms on the GE8320).
+        cl_mem xn = final_norm_->forward_decode(queue, hid);
+        if (!xn || !tg.gemv(queue, team_gemv::LMHEAD, xn, lm_head_->weight(), logit, V, H, false))
+            return {};
+        if (clEnqueueReadBuffer(queue, logit, CL_TRUE, 0, (size_t)V * 2, raw.data(), 0, nullptr,
+                                nullptr) != CL_SUCCESS) return {};
+        std::vector<float> out((size_t)V);
+        for (int j = 0; j < V; ++j) out[(size_t)j] = nnopt_f16_to_f32(raw[(size_t)j]);
+        return out;
+    }
     cl_context ctx = cl_ctx_.context();
     cl_int err = CL_SUCCESS;
 
@@ -630,7 +702,7 @@ std::vector<float> Model::forward_decode(int32_t token_id, int start_pos) {
     // call clReleaseMemObject on it. Ownership stays with the LayerNorm.
     for (int i = 0; i < MODEL_CONFIG::NUM_HIDDEN_LAYERS; i++) {
         // Pre-attention RMSNorm: normed = norm(hidden) — non-owned persistent buffer
-        cl_mem normed = input_layernorm_[i]->forward_decode(queue, hidden);
+        cl_mem normed = (self_attn_[i]->fuses_input_norm() ? hidden : input_layernorm_[i]->forward_decode(queue, hidden));
         if (!normed) {
             clReleaseMemObject(hidden);
             NNOPT_ERROR_FMT("forward_decode: input_layernorm[%d] failed", i);
@@ -646,7 +718,7 @@ std::vector<float> Model::forward_decode(int32_t token_id, int start_pos) {
         // normed is non-owned — do NOT release.
 
         // Post-attention RMSNorm — non-owned persistent buffer
-        cl_mem normed2 = post_attention_layernorm_[i]->forward_decode(queue, hidden);
+        cl_mem normed2 = (mlp_[i]->fuses_input_norm() ? hidden : post_attention_layernorm_[i]->forward_decode(queue, hidden));
         if (!normed2) {
             clReleaseMemObject(hidden);
             NNOPT_ERROR_FMT("forward_decode: post_attention_layernorm[%d] failed", i);
@@ -660,6 +732,11 @@ std::vector<float> Model::forward_decode(int32_t token_id, int start_pos) {
             return {};
         }
         // normed2 is non-owned — do NOT release.
+    }
+
+    if (!want_logits) {   // prompt token: only the KV-cache writes matter
+        clReleaseMemObject(hidden);
+        return std::vector<float>(1, 0.0f);
     }
 
     // 3. Final RMSNorm + lm_head.

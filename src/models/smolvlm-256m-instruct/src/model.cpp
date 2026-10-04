@@ -17,6 +17,9 @@
 //   multi-tile vision preprocessing (tiling, pixel_shuffle scale=4). When
 //   the vision pipeline is finished, drop the reference-load branch.
 
+#include <algorithm>
+#include <cstdlib>
+#include "team_gemv.h"
 #include "model.h"
 #include "model_config.h"
 #include "debug_utils.h"
@@ -161,6 +164,16 @@ Model::~Model() = default;
 
 bool Model::initialize() {
   NNOPT_CHECKPOINT("Model::initialize() — graph mode");
+  // PowerVR team path: compile its programs at load, not on the first token.
+  {
+    auto& tg = team_gemv::Ctx::get(cl_ctx_.queue());
+    if (tg.enabled()) {
+      using namespace MODEL_CONFIG;
+      tg.maybe_sweep(cl_ctx_.queue(), HIDDEN_SIZE, INTERMEDIATE_SIZE, NUM_ATTENTION_HEADS * HEAD_DIM,
+                     NUM_KEY_VALUE_HEADS * HEAD_DIM, TEXT_CONFIG_VOCAB_SIZE);
+      tg.prebuild();
+    }
+  }
   return true;
 }
 
@@ -177,5 +190,24 @@ void Model::reset_conversation() {
 
 std::vector<float> Model::forward(const std::vector<int32_t>& input_ids, int start_pos) {
   NNOPT_CHECKPOINT("Model::forward() — graph mode (delegating to model_forward_graph)");
+  // PowerVR team-GEMV devices: a text-only prompt runs as M=1 decode steps.
+  // There the batched prefill (CLBlast HGemm + prefill attention) manages ~1
+  // token/s on a GE8320, while a decode step is a fraction of a second. Image
+  // prompts keep the batched path (the placeholder splice is prefill-only).
+  static const bool per_token = [] {
+    const char* e = std::getenv("NNOPT_TEAM_PREFILL");   // =0: keep batched prefill
+    return !(e && e[0] == '0');
+  }();
+  if (per_token && input_ids.size() > 1 && team_gemv::Ctx::get(cl_ctx_.queue()).enabled() &&
+      std::find(input_ids.begin(), input_ids.end(), MODEL_CONFIG::IMAGE_TOKEN_ID) ==
+          input_ids.end()) {
+    std::vector<float> logits;
+    for (size_t i = 0; i < input_ids.size(); ++i) {
+      logits = model_forward_graph(cl_ctx_, weights_, std::vector<int32_t>{input_ids[i]},
+                                   start_pos + (int)i);
+      if (logits.empty()) return {};
+    }
+    return logits;
+  }
   return model_forward_graph(cl_ctx_, weights_, input_ids, start_pos);
 }
