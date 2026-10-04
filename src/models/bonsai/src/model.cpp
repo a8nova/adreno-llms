@@ -216,6 +216,13 @@ void DeviceModel::build_programs(const std::string& kdir) {
     kopts += " -DUSE_FP16=1";
 #endif
     kopts += " -DMB=8";
+    // Opt-in GEMV experiments (v2/v6/v7/lx1) declare 16KB of __local; a GPU
+    // with less (PowerVR GE8320: 4KB) rejects the whole program, so leave
+    // them out there. The default q1_gemv4 path does not use them.
+    cl_ulong lmem = 0;
+    clGetDeviceInfo(ocl_.device(), CL_DEVICE_LOCAL_MEM_SIZE, sizeof(lmem), &lmem, nullptr);
+    small_lmem_ = (lmem > 0 && lmem < 32 * 1024) || getenv("BONSAI_SMALL_LMEM") != nullptr;
+    if (small_lmem_) kopts += " -DBONSAI_SMALL_LMEM=1";
     auto B = [&](const char* f) {
         cl_program p = ocl_.build_program_from_file(kdir + "/" + f, kopts);
         if (!p) { fprintf(stderr, "FATAL: build %s\n", f); exit(4); }
@@ -236,7 +243,7 @@ void DeviceModel::build_programs(const std::string& kdir) {
     use_img_ = getenv("BONSAI_IMG") != nullptr;
     no_xsum_ = getenv("BONSAI_XOR") != nullptr;
     if (no_xsum_) k_gemv_ = K(pq, "q1_gemv4xor");
-    k_gemv7_ = K(pq, "q1_gemv7");
+    if (!small_lmem_) k_gemv7_ = K(pq, "q1_gemv7");
     k_gather_dev_ = K(pq, "q1_row_gather3_dev");
     k_gemv_b_ = K(pq, "q1_gemv_b");
     k_xsum_b_ = K(pq, "q1_xsum_b");
@@ -260,6 +267,10 @@ void DeviceModel::build_programs(const std::string& kdir) {
 }
 
 cl_mem DeviceModel::make_bits_image(cl_mem buf, size_t texels) {
+    // Only the opt-in image GEMV (BONSAI_IMG) reads this. Creating it
+    // unconditionally killed the engine on PowerVR GE8320, whose
+    // image1d_buffer limit is far below the embedding's texel count.
+    if (!use_img_) return nullptr;
     cl_image_format fmt{CL_RGBA, CL_UNSIGNED_INT32};   // uint4 = one unit
     cl_image_desc d{};
     d.image_type = CL_MEM_OBJECT_IMAGE1D_BUFFER;
@@ -268,7 +279,11 @@ cl_mem DeviceModel::make_bits_image(cl_mem buf, size_t texels) {
     cl_int err;
     cl_mem img = clCreateImage(ocl_.context(), CL_MEM_READ_ONLY, &fmt, &d,
                                nullptr, &err);
-    if (err != CL_SUCCESS) { fprintf(stderr, "FATAL: bits image err %d\n", err); exit(4); }
+    if (err != CL_SUCCESS) {
+        fprintf(stderr, "WARN: bits image err %d (%zu texels); image GEMV disabled\n", err, texels);
+        use_img_ = false;
+        return nullptr;
+    }
     return img;
 }
 

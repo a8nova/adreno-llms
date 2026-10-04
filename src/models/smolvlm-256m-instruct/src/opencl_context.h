@@ -21,6 +21,15 @@ cl_program nnopt_build_program_cached(cl_context ctx, cl_device_id dev,
                                       const std::string& source,
                                       const std::string& options);
 
+// Number of OpenCL programs that failed to build this run, and a loud one-shot
+// report of same. A failed build leaves its kernels missing; this port then skips
+// those dispatches and keeps whatever was already in the output buffers, so the
+// model emits confident garbage instead of failing. Call the reporter once the
+// graph is built so a broken device is obvious in the log instead of looking like
+// a working model with bad weights.
+int  nnopt_build_failure_count();
+void nnopt_report_build_failures();
+
 class OpenCLContext {
 public:
     OpenCLContext();

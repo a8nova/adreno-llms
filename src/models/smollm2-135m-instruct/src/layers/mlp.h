@@ -20,6 +20,11 @@ public:
     // Decode fast path (M=1). Updates residual in-place.
     bool forward_decode_into_residual(cl_command_queue queue, cl_mem x, cl_mem residual);
 
+    // As Attention::enable_fused_input_norm, for the post-attention RMSNorm
+    // folded into the gate_up GEMV.
+    bool enable_fused_input_norm(cl_mem gamma);
+    bool fuses_input_norm() const { return fused_norm_gamma_ != nullptr; }
+
 private:
     OpenCLContext& cl_ctx_;
     Weights& weights_;
@@ -54,6 +59,7 @@ private:
     // ── int8 quantized path (NNOPT_QUANT=int8 + weights/model.int8.bin)
     //   Per-row symmetric int8: image2d (CL_SIGNED_INT8 RGBA) + fp16 scale buffer.
     bool      quantized_ = false;
+    cl_mem    fused_norm_gamma_ = nullptr;   // non-owned; set by enable_fused_input_norm
     cl_program block_fused_int8_prog_ = nullptr;
     cl_kernel fused_gate_up_silu_m1_v4_img_int8_ = nullptr;
     cl_kernel fused_down_no4_img_int8_           = nullptr;

@@ -21,6 +21,7 @@ public:
     // input_ids: device buffer int32 [seq_len]
     // returns: device buffer storage_t [seq_len, hidden]
     cl_mem forward(cl_command_queue queue, cl_mem input_ids, int seq_len);
+    cl_mem* weight_ptr() { return &wte_; }
 
 private:
     OpenCLContext& cl_ctx_;

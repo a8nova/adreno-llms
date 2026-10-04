@@ -13,6 +13,13 @@
 #include <sys/stat.h>   // mkdir / stat — kernel-binary cache directory
 #include <unistd.h>     // fsync — durably flush the cache write to disk before process exit
 
+// True only when this device can BOTH compile the cl_khr_subgroups builtins AND
+// guarantee one subgroup spans the whole work-group (the qcom "full" attribute).
+// Both are required: without the builtins the program does not build at all;
+// without the attribute the reduction silently covers one native wave instead of
+// the row. Anything less and the kernels compile their __local tree-reduce.
+static bool s_subgroup_reduce_ok = false;
+
 // Qualcomm extension tokens (cl_qcom_perf_hint + cl_qcom_priority_hint).
 // Defined inline because vanilla OpenCL headers don't ship the Adreno ext tokens.
 // Values from the Qualcomm OpenCL SDK header `cl_ext_qcom.h`.
@@ -130,17 +137,33 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
         const bool has_dotp8   = std::strstr(ext_buf, "cl_qcom_dot_product8") != nullptr;
         // Adreno 619 (SM6375) ADVERTISES cl_qcom_reqd_sub_group_size in CL_DEVICE_EXTENSIONS but its
         // compiler rejects the pragma (clBuildProgram -11). Advertisement != usability — so compile-probe it.
-        auto ext_compiles = [&](const char* src) -> bool {
+        auto ext_compiles = [&](const char* src, const char* opts = "") -> bool {
             cl_int e; const char* s = src;
             cl_program p = clCreateProgramWithSource(context_, 1, &s, nullptr, &e);
             if (e != CL_SUCCESS || !p) return false;
-            e = clBuildProgram(p, 1, &device_, "", nullptr, nullptr);
+            e = clBuildProgram(p, 1, &device_, opts, nullptr, nullptr);
             clReleaseProgram(p);
             return e == CL_SUCCESS;
         };
         const bool has_reqdsg  = (std::strstr(ext_buf, "cl_qcom_reqd_sub_group_size") != nullptr) && ext_compiles(
             "#pragma OPENCL EXTENSION cl_qcom_reqd_sub_group_size : enable\n"
             "__attribute__((qcom_reqd_sub_group_size(\"full\"))) __kernel void p(){}\n");
+        // Probe the BUILTIN too, with the same -cl-std the real builds use. This is
+        // the check that actually matters on PowerVR Rogue GE8320, whose driver has
+        // no cl_khr_subgroups at all: clBuildProgram there reports
+        //   "candidate unavailable as it requires OpenCL extension 'cl_khr_subgroups'"
+        const bool has_sg_builtin = ext_compiles(
+            "#pragma OPENCL EXTENSION cl_khr_subgroups : enable\n"
+            "__kernel void p(__global float* o){ o[get_global_id(0)] = sub_group_reduce_add(1.0f); }\n",
+            "-cl-std=CL2.0");
+        s_subgroup_reduce_ok = has_reqdsg && has_sg_builtin;
+        // Escape hatch: force the portable path on a device that supports the fast
+        // one, so the fallback can be exercised on Adreno hardware instead of only
+        // on a device we cannot debug on.
+        if (const char* no_sg = std::getenv("NNOPT_NO_SUBGROUP");
+            no_sg && no_sg[0] != '0' && no_sg[0] != '\0') {
+            s_subgroup_reduce_ok = false;
+        }
         fprintf(stderr, "── OpenCL device ────────────────────────────────────────────\n");
         fprintf(stderr, "  platform        %s\n", platform_name);
         fprintf(stderr, "  device          %s\n", device_name);
@@ -156,6 +179,10 @@ bool OpenCLContext::initialize(int platform_idx, int device_idx) {
         fprintf(stderr, "  qcom_recordable_queues %s\n", has_record  ? "yes" : "no");
         fprintf(stderr, "  qcom_dot_product8      %s\n", has_dotp8   ? "yes" : "no");
         fprintf(stderr, "  qcom_reqd_sub_group_size %s\n", has_reqdsg ? "yes" : "no");
+        fprintf(stderr, "  NNOPT_SUBGROUPS: builtin %s, full-wave attr %s -> %s\n",
+                has_sg_builtin ? "yes" : "no", has_reqdsg ? "yes" : "no",
+                s_subgroup_reduce_ok ? "subgroup reduce"
+                                     : "__local tree-reduce fallback");
         fprintf(stderr, "─────────────────────────────────────────────────────────────\n");
         fprintf(stderr, "  cl_device_extensions   %s\n", ext_buf);
         fflush(stderr);
@@ -218,6 +245,25 @@ static inline bool nnopt_kcache_log() {
     return s == 1;
 }
 
+// Count of programs that failed to build this run. A non-zero value means some
+// kernels do not exist, their dispatches are skipped, and every buffer they were
+// supposed to write keeps whatever was already in it — i.e. the model will emit
+// confident garbage rather than fail. Surfaced loudly by nnopt_report_build_failures().
+static int s_build_failures = 0;
+
+
+int nnopt_build_failure_count() { return s_build_failures; }
+
+void nnopt_report_build_failures() {
+    if (s_build_failures == 0) return;
+    fprintf(stderr,
+            "NNOPT_FATAL: %d OpenCL program(s) failed to build on this device.\n"
+            "NNOPT_FATAL: Their kernels are missing, so those ops were SKIPPED and the\n"
+            "NNOPT_FATAL: output is meaningless. Search this log for NNOPT_BUILDLOG.\n",
+            s_build_failures);
+    fflush(stderr);
+}
+
 cl_program nnopt_build_program_cached(cl_context ctx, cl_device_id dev,
                                       const std::string& source,
                                       const std::string& options) {
@@ -229,7 +275,17 @@ cl_program nnopt_build_program_cached(cl_context ctx, cl_device_id dev,
         std::memset(b, 0, sizeof(b));
         clGetDeviceInfo(dev, CL_DRIVER_VERSION, sizeof(b), b, nullptr); s_drv_ver = b;
     }
-    const std::string key_str = source + "|" + options + "|" + s_dev_name + "|" + s_drv_ver;
+    // Inject the subgroup gate HERE rather than in OpenCLContext::build_program:
+    // utils.cpp calls this function directly at nine sites with its own hardcoded
+    // option strings, so a gate applied in build_program would miss them — which is
+    // exactly how the inline rmsnorm kernels kept failing to build after the .cl
+    // files were fixed. Must happen before the cache key is computed so the key
+    // reflects the flag.
+    std::string opts = options;
+    if (s_subgroup_reduce_ok && opts.find("NNOPT_SUBGROUP_REDUCE") == std::string::npos) {
+        opts += " -D NNOPT_SUBGROUP_REDUCE=1";
+    }
+    const std::string key_str = source + "|" + opts + "|" + s_dev_name + "|" + s_drv_ver;
     const uint64_t key = nnopt_fnv1a64(key_str);
     const std::string cache_path = nnopt_cache_path_for(key);
 
@@ -268,7 +324,7 @@ cl_program nnopt_build_program_cached(cl_context ctx, cl_device_id dev,
                     program = clCreateProgramWithBinary(ctx, 1, &dev, &sz, &bp,
                                                         &binary_status, &err);
                     if (err == CL_SUCCESS && binary_status == CL_SUCCESS && program) {
-                        err = clBuildProgram(program, 1, &dev, options.c_str(),
+                        err = clBuildProgram(program, 1, &dev, opts.c_str(),
                                              nullptr, nullptr);
                         if (err == CL_SUCCESS) {
                             if (nnopt_kcache_log()) {
@@ -277,7 +333,7 @@ cl_program nnopt_build_program_cached(cl_context ctx, cl_device_id dev,
                             }
                             return program;
                         }
-                        fprintf(stderr, "[kernel_cache] HIT-but-rebuild-failed "
+                        fprintf(stderr, "NNOPT_KCACHE: HIT-but-rebuild-failed "
                                         "(err=%d); falling back to source: %s\n",
                                 (int)err, cache_path.c_str());
                         clReleaseProgram(program);
@@ -304,16 +360,32 @@ cl_program nnopt_build_program_cached(cl_context ctx, cl_device_id dev,
         return nullptr;
     }
 
-    err = clBuildProgram(program, 1, &dev, options.c_str(), nullptr, nullptr);
+    err = clBuildProgram(program, 1, &dev, opts.c_str(), nullptr, nullptr);
     if (err != CL_SUCCESS) {
-        NNOPT_ERROR_FMT("clBuildProgram FAILED (err=%d)", (int)err);
+        s_build_failures++;
+        // Report the OPTIONS too: a build that dies on "-cl-std=CL2.0" against a
+        // 1.2-only device, or on a vendor pragma, is indistinguishable from a
+        // source bug without them.
+        NNOPT_ERROR_FMT("clBuildProgram FAILED (err=%d) [failure #%d] opts='%s'",
+                        (int)err, s_build_failures, opts.c_str());
         size_t log_size = 0;
         clGetProgramBuildInfo(program, dev, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
         if (log_size > 0) {
             std::vector<char> log(log_size + 1, 0);
             clGetProgramBuildInfo(program, dev, CL_PROGRAM_BUILD_LOG, log_size,
                                   log.data(), nullptr);
-            fprintf(stderr, "OpenCL Build Log: %s\n", log.data());
+            // The driver's build log is the ONLY thing that says why. It has to be
+            // NNOPT_-prefixed and emitted one line at a time: ProcessEngine mirrors
+            // engine stderr into logcat only for lines starting NNOPT_ / BENCHMARK /
+            // ERROR, so the old unprefixed multi-line blob reached the on-disk diag
+            // file and nothing else. On a remote device that made it invisible —
+            // which is exactly why a SmolVLM build failure on PowerVR Rogue GE8320
+            // went undiagnosed while the model appeared to "run" and emit garbage.
+            char* saveptr = nullptr;
+            for (char* line = strtok_r(log.data(), "\n", &saveptr); line;
+                 line = strtok_r(nullptr, "\n", &saveptr)) {
+                if (*line) { fprintf(stderr, "NNOPT_BUILDLOG: %s\n", line); }
+            }
             fflush(stderr);
         }
         clReleaseProgram(program);
@@ -424,7 +496,8 @@ cl_program OpenCLContext::build_program_from_file(const std::string& path, const
     buffer << file.rdbuf();
     cl_program prog = build_program(buffer.str(), options);
     if (!prog) {
-        NNOPT_ERROR_FMT("OpenCL kernel compilation FAILED for: %s (file opened OK, but clBuildProgram returned error)", path.c_str());
+        NNOPT_ERROR_FMT("OpenCL kernel compilation FAILED for: %s (opts='%s') "
+                        "- kernels from this file will be MISSING", path.c_str(), options.c_str());
     }
     return prog;
 }

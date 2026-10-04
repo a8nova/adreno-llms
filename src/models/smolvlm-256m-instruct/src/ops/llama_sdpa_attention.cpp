@@ -12,6 +12,8 @@
 #include "weights.h"
 #include "debug_utils.h"
 #include "utils.h"
+#include "texture_policy.h"
+#include "forward_dispatch.h"
 #include "model_config.h"
 #include "rotary_tables.h"
 #include "profile.h"
@@ -107,7 +109,7 @@ bool ensure_kv_cache(OpenCLContext& cl_ctx, int layer_idx, int kv_dim) {
   // are not duplicated by the device side — these are independent allocations,
   // but the cost (~768KB × 30 = 23MB per side) is tolerable on a 4GB phone for
   // the bandwidth win on attn_out / attn_scores reads.
-  if ((kv_dim & 3) == 0) {
+  if ((kv_dim & 3) == 0 && nnopt_textures_allowed(cl_ctx.device())) {
     cl_image_format fmt = {CL_RGBA, CL_HALF_FLOAT};
     cl_image_desc desc{};
     desc.image_type = CL_MEM_OBJECT_IMAGE2D;
@@ -271,8 +273,8 @@ __kernel void apply_rope_inplace(
     const float y0 = x0 * c - x1 * s;
     const float y1 = x0 * s + x1 * c;
 
-    STORE(x, i0, (storage_t)y0);
-    STORE(x, i1, (storage_t)y1);
+    STORE(x, i0, y0);
+    STORE(x, i1, y1);
   }
 }
 
@@ -324,8 +326,8 @@ __kernel void apply_rope_qk_inplace(
     const float x1 = (float)LOAD(x, i1);
     const float y0 = x0 * c - x1 * s;
     const float y1 = x0 * s + x1 * c;
-    STORE(x, i0, (storage_t)y0);
-    STORE(x, i1, (storage_t)y1);
+    STORE(x, i0, y0);
+    STORE(x, i1, y1);
   }
 }
 )CLC";
@@ -369,6 +371,17 @@ static cl_kernel rope_qk_kernel(OpenCLContext& cl_ctx) {
 }
 
 }  // namespace
+
+// KV cache of one text layer ([KV_CACHE_MAX_LEN, kv_dim] each), allocated on
+// first use; shared with the PowerVR team decode step (backbone.cpp).
+bool nnopt_text_kv_cache(OpenCLContext& cl_ctx, int layer_idx, int kv_dim,
+                         cl_mem* K, cl_mem* V, int* max_len) {
+  if (!ensure_kv_cache(cl_ctx, layer_idx, kv_dim)) return false;
+  *K = kv_caches()[(size_t)layer_idx].K;
+  *V = kv_caches()[(size_t)layer_idx].V;
+  *max_len = KV_CACHE_MAX_LEN;
+  return true;
+}
 
 extern "C" cl_mem op_LlamaSdpaAttention(OpenCLContext& cl_ctx,
                                          Weights& weights,
@@ -468,6 +481,7 @@ extern "C" cl_mem op_LlamaSdpaAttention(OpenCLContext& cl_ctx,
     // R6.4: when caller passes fused_in_norm_w, prefer the rmsnorm+QKV fused
     // image GEMV — folds the per-layer rmsnorm dispatch into this kernel.
     bool qkv_done = false;
+    cl_mem normed_in = nullptr;  // owned; set only when the fused rmsnorm could not run
     if (seq_q == 1) {
       cl_mem Wq_img = get_or_create_weight_image(ctx, queue, Wq, q_dim,  hidden_size);
       cl_mem Wk_img = get_or_create_weight_image(ctx, queue, Wk, kv_dim, hidden_size);
@@ -479,6 +493,29 @@ extern "C" cl_mem op_LlamaSdpaAttention(OpenCLContext& cl_ctx,
               queue, q_dim, kv_dim, hidden_size, rms_eps,
               hidden_states, gamma_in, Wq_img, Wk_img, Wv_img, Q, K, V);
         }
+      }
+      // The caller skipped its input rmsnorm because it handed us fused_in_norm_w
+      // (llama_decoder_layer passes RAW hidden_states on decode). If the fused
+      // rmsnorm+QKV kernel did not run (textures denied, e.g. PowerVR Rogue, or
+      // image creation failed) every path below would project UN-normalized
+      // activations: the model emits one plausible token, then garbage. Normalize
+      // here so the unfused paths see what the caller would have given them.
+      if (!qkv_done && fused_in_norm_w) {
+        // PowerVR team path: norm folded into the QKV GEMV itself.
+        cl_mem gamma_in = weights.get_buffer(std::string(fused_in_norm_w));
+        qkv_done = gemv_m1_rmsnorm_qkv_team_dispatch(queue, q_dim, kv_dim, hidden_size, rms_eps,
+                                                     hidden_states, gamma_in, Wq, Wk, Wv, Q, K, V);
+      }
+      if (!qkv_done && fused_in_norm_w) {
+        normed_in = op_LlamaRMSNorm(cl_ctx, weights, queue, hidden_states, seq_q,
+                                    hidden_size, rms_eps, fused_in_norm_w);
+        if (!normed_in) {
+          NNOPT_PROFILE_END(queue, "23a_qkv_proj");
+          NNOPT_ERROR("op_LlamaSdpaAttention: fallback input rmsnorm failed");
+          clReleaseMemObject(Q); clReleaseMemObject(K); clReleaseMemObject(V);
+          return nullptr;
+        }
+        hidden_states = normed_in;
       }
       if (!qkv_done && Wq_img && Wk_img && Wv_img) {
         qkv_done = gemv_m1_qkv_image_fp16_dispatch(queue, q_dim, kv_dim, hidden_size,
@@ -514,6 +551,9 @@ extern "C" cl_mem op_LlamaSdpaAttention(OpenCLContext& cl_ctx,
       }
       NNOPT_PROFILE_END(queue, "23a_qkv_proj");
     }
+#ifdef NNOPT_USE_FP16
+    if (normed_in) clReleaseMemObject(normed_in);  // projections are enqueued; CL keeps it alive
+#endif
   }
 
   // Reshape to [seq, heads, head_dim] already matches our flat layout if we interpret dims.

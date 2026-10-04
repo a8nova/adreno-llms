@@ -1,6 +1,7 @@
 // Reference: model_info/transformers_src/modeling_llama.py:375-428 LlamaModel.forward (embed_tokens)
 
 #include "layers/embedding.h"
+#include "team_gemv.h"
 #include "opencl_context.h"
 #include "weights.h"
 #include "debug_utils.h"
@@ -87,8 +88,23 @@ cl_mem Embedding::forward(cl_command_queue queue, cl_mem input_ids, int seq_len)
     if (!set_arg_checked(kernel_, 4, sizeof(int), &hidden, "hidden_size")) { clReleaseMemObject(out); return nullptr; }
     if (!set_arg_checked(kernel_, 5, sizeof(int), &start_pos, "start_pos")) { clReleaseMemObject(out); return nullptr; }
 
+    if (cl_kernel ke = team_gemv::Ctx::get(cl_ctx_).enabled()
+                           ? team_gemv::Ctx::get(cl_ctx_).embed_kernel() : nullptr) {
+        // PowerVR team path: one lane per element (embedding_forward copies a
+        // whole 576-element row on a single lane).
+        clSetKernelArg(ke, 0, sizeof(cl_mem), &input_ids);
+        clSetKernelArg(ke, 1, sizeof(cl_mem), &wte_);
+        clSetKernelArg(ke, 2, sizeof(cl_mem), &out);
+        clSetKernelArg(ke, 3, sizeof(int), &hidden);
+        clSetKernelArg(ke, 4, sizeof(int), &seq_len);
+        size_t gws_e = (size_t)seq_len * (size_t)hidden;
+        gws_e = (gws_e + 63) / 64 * 64;
+        size_t lws_e = 64;
+        err = nnopt_prof::enqueue(queue, ke, 1, nullptr, &gws_e, &lws_e, 0, nullptr, nullptr);
+    } else {
     size_t gws[1] = { (size_t)seq_len };
     err = nnopt_prof::enqueue(queue, kernel_, 1, nullptr, gws, nullptr, 0, nullptr, nullptr);
+    }
     if (err != CL_SUCCESS) {
         NNOPT_ERROR_FMT("Embedding: dispatch failed: %d", err);
         clReleaseMemObject(out);

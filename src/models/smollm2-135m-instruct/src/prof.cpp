@@ -23,7 +23,13 @@ State& state() {
     static State s;
     if (!s.initialized) {
         const char* e = std::getenv("NNOPT_PROFILE");
+#ifdef NNOPT_PROFILE_DEFAULT_ON
+        // Compile-time door for devices where the engine's env cannot be set
+        // (the Edgi app on BrowserStack). NNOPT_PROFILE=0 still turns it off.
+        s.on = !(e && e[0] == '0');
+#else
         s.on = (e && e[0] == '1');
+#endif
         s.initialized = true;
     }
     return s;

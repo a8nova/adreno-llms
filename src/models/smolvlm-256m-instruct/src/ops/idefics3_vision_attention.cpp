@@ -337,7 +337,7 @@ __kernel void bthd_to_bhtd(
   const long in_idx  = (((long)b * (long)T + (long)t) * (long)H + (long)h) * (long)D + (long)d;
   const long out_idx = (((long)b * (long)H + (long)h) * (long)T + (long)t) * (long)D + (long)d;
   const float v = (float)LOAD(in, in_idx);
-  STORE(out, out_idx, (storage_t)v);
+  STORE(out, out_idx, v);
 }
 )CLC";
       tr_qkv_prog = cl_ctx.build_program(std::string(tr_src));  // PROGRAM-INIT-OK
@@ -610,7 +610,7 @@ __kernel void bhwd_to_bthd(
   const long in_idx = (((long)b * (long)H + (long)h) * (long)T + (long)t) * (long)D + (long)d;
   const long out_idx = (((long)b * (long)T + (long)t) * (long)(H*D)) + (long)hd;
   const float v = (float)LOAD(in, in_idx);
-  STORE(out, out_idx, (storage_t)v);
+  STORE(out, out_idx, v);
 }
 )CLC";
     tr_prog = cl_ctx.build_program(std::string(tr_src));  // PROGRAM-INIT-OK

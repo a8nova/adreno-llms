@@ -157,7 +157,7 @@ __kernel void nchw_flatten2_transpose12(
   const long in_idx = (((long)b * (long)C + (long)c) * (long)H + (long)y) * (long)W + (long)x;
   const long out_idx = ((long)b * (long)(H*W) + (long)hw) * (long)C + (long)c;
   const float v = (float)LOAD(input, in_idx);
-  STORE(output, out_idx, (storage_t)v);
+  STORE(output, out_idx, v);
 }
 )CLC";
 

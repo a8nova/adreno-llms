@@ -12,9 +12,55 @@
   #define STORE(p, i, v) ((p)[(i)] = (v))
 #endif
 
+
+// ── Work-group reduction: subgroup fast path + portable fallback ────────────
+// sub_group_reduce_* needs cl_khr_subgroups, and it is only CORRECT when one
+// subgroup spans the whole work-group — which only qcom_reqd_sub_group_size
+// ("full") guarantees. MEASURED on PowerVR Rogue GE8320 (Vivo Y21), whose driver
+// has neither: every program using these builtins failed to build with
+//   "candidate unavailable as it requires OpenCL extension 'cl_khr_subgroups'"
+// their kernels were therefore absent, the dispatches were skipped, and the model
+// emitted confident garbage at an impossible 11 tok/s. The host compile-probes
+// BOTH the builtin and the attribute and defines NNOPT_SUBGROUP_REDUCE=1 only
+// when both genuinely work (see opencl_context.cpp).
+#if NNOPT_SUBGROUP_REDUCE
 #pragma OPENCL EXTENSION cl_khr_subgroups : enable
 #pragma OPENCL EXTENSION cl_qcom_reqd_sub_group_size : enable
-
+#define NNOPT_WAVE_ATTR __attribute__((qcom_reqd_sub_group_size("full")))
+#define NNOPT_DECL_SCRATCH(name, n)
+#define NNOPT_REDUCE_ADD(name, lid, n, v) sub_group_reduce_add(v)
+#define NNOPT_REDUCE_MAX(name, lid, n, v) sub_group_reduce_max(v)
+#else
+#define NNOPT_WAVE_ATTR
+#define NNOPT_DECL_SCRATCH(name, n) __local float name[n]
+// Barrier tree reduce over the whole work-group. Safe at every call site here:
+// they are all lane-uniform (early-outs branch on get_group_id(), which is
+// uniform), so every lane reaches every barrier.
+static inline float nnopt_wg_reduce_add(__local float* s, int lid, int n, float v) {
+  s[lid] = v;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int off = n >> 1; off > 0; off >>= 1) {
+    if (lid < off) s[lid] += s[lid + off];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  const float r = s[0];
+  barrier(CLK_LOCAL_MEM_FENCE);   // scratch reusable after this point
+  return r;
+}
+static inline float nnopt_wg_reduce_max(__local float* s, int lid, int n, float v) {
+  s[lid] = v;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int off = n >> 1; off > 0; off >>= 1) {
+    if (lid < off) s[lid] = fmax(s[lid], s[lid + off]);
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  const float r = s[0];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  return r;
+}
+#define NNOPT_REDUCE_ADD(name, lid, n, v) nnopt_wg_reduce_add(name, lid, n, v)
+#define NNOPT_REDUCE_MAX(name, lid, n, v) nnopt_wg_reduce_max(name, lid, n, v)
+#endif
 #define WG_SIZE 64
 
 // Fused residual-add + RMSNorm. Reads x[row, :] and residual[row, :], writes
@@ -23,7 +69,7 @@
 // per row.
 __kernel
 __attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
-__attribute__((qcom_reqd_sub_group_size("full")))
+NNOPT_WAVE_ATTR
 void rms_norm_residual_forward(
     __global storage_t* x,             // [rows, cols] — mutated to x + residual
     __global const storage_t* residual,
@@ -32,6 +78,9 @@ void rms_norm_residual_forward(
     const int rows,
     const int cols,
     const float eps) {
+  // Scratch for the non-subgroup reduction fallback; expands to
+  // nothing when NNOPT_SUBGROUP_REDUCE is on.
+  NNOPT_DECL_SCRATCH(nnopt_red, WG_SIZE);
   const int row = (int)get_group_id(0);
   const int lid = (int)get_local_id(0);
   if (row >= rows) return;
@@ -63,8 +112,7 @@ void rms_norm_residual_forward(
   }
 #endif
 
-  // Opt #6: subgroup reduce replaces __local + barrier tree reduce.
-  const float total_ss = sub_group_reduce_add(ss);
+  const float total_ss = NNOPT_REDUCE_ADD(nnopt_red, lid, WG_SIZE, ss);
   const float mean_ss = total_ss / (float)cols;
   const float inv_rms = rsqrt(mean_ss + eps);
 
@@ -92,7 +140,7 @@ void rms_norm_residual_forward(
 
 __kernel
 __attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
-__attribute__((qcom_reqd_sub_group_size("full")))
+NNOPT_WAVE_ATTR
 void rms_norm_forward(
     __global const storage_t* x,
     __global const storage_t* weight,
@@ -100,6 +148,9 @@ void rms_norm_forward(
     const int rows,
     const int cols,
     const float eps) {
+  // Scratch for the non-subgroup reduction fallback; expands to
+  // nothing when NNOPT_SUBGROUP_REDUCE is on.
+  NNOPT_DECL_SCRATCH(nnopt_red, WG_SIZE);
   const int row = (int)get_group_id(0);
   const int lid = (int)get_local_id(0);
   if (row >= rows) return;
@@ -126,8 +177,7 @@ void rms_norm_forward(
   }
 #endif
 
-  // Opt #6: subgroup reduce replaces __local + barrier tree reduce.
-  const float total_ss = sub_group_reduce_add(ss);
+  const float total_ss = NNOPT_REDUCE_ADD(nnopt_red, lid, WG_SIZE, ss);
   const float mean_ss = total_ss / (float)cols;
   const float inv_rms = rsqrt(mean_ss + eps);
 

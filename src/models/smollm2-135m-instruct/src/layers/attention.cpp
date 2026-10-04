@@ -10,6 +10,8 @@
 //   PROG-01 — programs built once in initialize()
 
 #include "layers/attention.h"
+#include "texture_policy.h"
+#include "team_gemv.h"
 #include "opencl_context.h"
 #include "weights.h"
 #include "debug_utils.h"
@@ -42,6 +44,8 @@ Attention::~Attention() {
     if (decode_scores_buf_)   clReleaseMemObject(decode_scores_buf_);
     if (decode_attn_out_buf_) clReleaseMemObject(decode_attn_out_buf_);
     if (fused_qkv_m1_)            clReleaseKernel(fused_qkv_m1_);
+    if (decode_attn_online_)      clReleaseKernel(decode_attn_online_);
+    if (attn_online_prog_)        clReleaseProgram(attn_online_prog_);
     if (fused_rope_kvwrite_m1_)   clReleaseKernel(fused_rope_kvwrite_m1_);
     if (fused_decode_attn_m1_)    clReleaseKernel(fused_decode_attn_m1_);
     if (fused_oproj_res_m1_)      clReleaseKernel(fused_oproj_res_m1_);
@@ -256,8 +260,10 @@ bool Attention::initialize() {
     fused_qkv_no4_img_   = nullptr;  // deprecated — fused-3-image variant regressed (branchy code).
     gemv_k576_no4_img_   = clCreateKernel(block_fused_prog_, "gemv_m1_k576_no4_img", &err);
     if (err != CL_SUCCESS) gemv_k576_no4_img_ = nullptr;
+    if (!nnopt_textures_allowed(cl_ctx_.device())) { if (gemv_k576_no4_img_) clReleaseKernel(gemv_k576_no4_img_); gemv_k576_no4_img_ = nullptr; }
     fused_oproj_no4_img_ = clCreateKernel(block_fused_prog_, "fused_oproj_residual_m1_no4_img", &err);
     if (err != CL_SUCCESS) fused_oproj_no4_img_ = nullptr;
+    if (!nnopt_textures_allowed(cl_ctx_.device())) { if (fused_oproj_no4_img_) clReleaseKernel(fused_oproj_no4_img_); fused_oproj_no4_img_ = nullptr; }
 
     if (gemv_k576_no4_img_ || fused_oproj_no4_img_) {
         const int H = MODEL_CONFIG::HIDDEN_SIZE;
@@ -627,6 +633,14 @@ cl_mem Attention::forward(cl_command_queue queue,
 // ── Decode fast path (M=1) ───────────────────────────────────────────────────
 // Replaces 3 CLBlast QKV GEMMs + rope + KV copy + CLBlast o_proj + element_add
 // with 5 custom GEMV kernel dispatches. Updates residual in-place.
+bool Attention::enable_fused_input_norm(cl_mem gamma) {
+    if (quantized_ || !gamma || !team_gemv::Ctx::get(cl_ctx_).fuse_norm() ||
+        nnopt_textures_allowed(cl_ctx_.device()))   // image paths would see un-normed x
+        return false;
+    fused_norm_gamma_ = gamma;
+    return true;
+}
+
 bool Attention::forward_decode_into_residual(cl_command_queue queue,
                                              cl_mem x, int start_pos,
                                              cl_mem residual) {
@@ -703,6 +717,11 @@ bool Attention::forward_decode_into_residual(cl_command_queue queue,
         if (!_set_arg_checked(gemv_k576_no4_img_, 3, sizeof(int),    &KV_DIM,   "N=KV_DIM")) return false;
         err = nnopt_prof::enqueue(queue, gemv_k576_no4_img_, 1, nullptr, &gws_k, &lws, 0, nullptr, nullptr);
         if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("gemv_m1_k576_no4_img(V) failed: %d", err); return false; }
+    } else if (!quantized_ && team_gemv::Ctx::get(cl_ctx_).enabled()) {
+        if (!team_gemv::Ctx::get(cl_ctx_).qkv(queue, x, wq_, wk_, wv_, q, k, v, Q_DIM, KV_DIM, H,
+                                              nullptr, fused_norm_gamma_,
+                                              (float)MODEL_CONFIG::RMS_NORM_EPS))
+            return false;
     } else {
         if (!_set_arg_checked(fused_qkv_m1_, 0, sizeof(cl_mem), &x,      "x"))      return false;
         if (!_set_arg_checked(fused_qkv_m1_, 1, sizeof(cl_mem), &wq_,    "w_q"))    return false;
@@ -721,6 +740,64 @@ bool Attention::forward_decode_into_residual(cl_command_queue queue,
         if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("fused_qkv_gemv_m1 failed: %d", err); return false; }
     }
 
+    // 2+3 on the PowerVR team path: RoPE + KV append + attention in ONE launch
+    // (kernels/decode_team.cl attn_rope_gqa), one work-group per KV head.
+    const int GRP_ = QH / KVH;
+    bool team_attn_done = false;
+    if (!quantized_ && D == 64 && GRP_ <= 4 && team_gemv::Ctx::get(cl_ctx_).enabled()) {
+        auto& tg = team_gemv::Ctx::get(cl_ctx_);
+        cl_kernel ka = tg.attn_rope_kernel();
+        const int S = tg.attn_splits;
+        if (S > 1 && start_pos + 1 >= tg.split_min_ctx && tg.split_kernel() && tg.merge_kernel()) {
+            cl_mem part = tg.split_scratch((size_t)KVH * S * GRP_ * (2 + 64) * sizeof(float));
+            cl_kernel ks = tg.split_kernel(), km = tg.merge_kernel();
+            cl_mem out_b = decode_attn_out_buf_;
+            clSetKernelArg(ks, 0, sizeof(cl_mem), &q);
+            clSetKernelArg(ks, 1, sizeof(cl_mem), &k);
+            clSetKernelArg(ks, 2, sizeof(cl_mem), &v);
+            clSetKernelArg(ks, 3, sizeof(cl_mem), &k_cache_);
+            clSetKernelArg(ks, 4, sizeof(cl_mem), &v_cache_);
+            clSetKernelArg(ks, 5, sizeof(cl_mem), &cos_);
+            clSetKernelArg(ks, 6, sizeof(cl_mem), &sin_);
+            clSetKernelArg(ks, 7, sizeof(cl_mem), &part);
+            clSetKernelArg(ks, 8, sizeof(int), &GRP_);
+            clSetKernelArg(ks, 9, sizeof(int), &KVH);
+            clSetKernelArg(ks, 10, sizeof(int), &start_pos);
+            clSetKernelArg(ks, 11, sizeof(float), &scale);
+            clSetKernelArg(ks, 12, sizeof(int), &S);
+            size_t gws = (size_t)KVH * S * 64, lws = 64;
+            err = nnopt_prof::enqueue(queue, ks, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+            if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("attn_split failed: %d", err); return false; }
+            clSetKernelArg(km, 0, sizeof(cl_mem), &part);
+            clSetKernelArg(km, 1, sizeof(cl_mem), &out_b);
+            clSetKernelArg(km, 2, sizeof(int), &GRP_);
+            clSetKernelArg(km, 3, sizeof(int), &KVH);
+            clSetKernelArg(km, 4, sizeof(int), &S);
+            gws = (size_t)KVH * 64;
+            err = nnopt_prof::enqueue(queue, km, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+            if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("attn_merge failed: %d", err); return false; }
+            team_attn_done = true;
+        } else if (ka) {
+            cl_mem out_b = decode_attn_out_buf_;
+            clSetKernelArg(ka, 0, sizeof(cl_mem), &q);
+            clSetKernelArg(ka, 1, sizeof(cl_mem), &k);
+            clSetKernelArg(ka, 2, sizeof(cl_mem), &v);
+            clSetKernelArg(ka, 3, sizeof(cl_mem), &k_cache_);
+            clSetKernelArg(ka, 4, sizeof(cl_mem), &v_cache_);
+            clSetKernelArg(ka, 5, sizeof(cl_mem), &cos_);
+            clSetKernelArg(ka, 6, sizeof(cl_mem), &sin_);
+            clSetKernelArg(ka, 7, sizeof(cl_mem), &out_b);
+            clSetKernelArg(ka, 8, sizeof(int), &GRP_);
+            clSetKernelArg(ka, 9, sizeof(int), &KVH);
+            clSetKernelArg(ka, 10, sizeof(int), &start_pos);
+            clSetKernelArg(ka, 11, sizeof(float), &scale);
+            size_t gws = (size_t)KVH * 64, lws = 64;
+            err = nnopt_prof::enqueue(queue, ka, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+            if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("attn_rope_gqa failed: %d", err); return false; }
+            team_attn_done = true;
+        }
+    }
+    if (!team_attn_done) {
     // 2. fused_rope_kvwrite_m1: rotate Q in-place, write K+V into cache.
     const int half_dim = D / 2;
     const int q_pairs  = QH  * half_dim;
@@ -747,6 +824,35 @@ bool Attention::forward_decode_into_residual(cl_command_queue queue,
     //    One WG per Q head; dynamic local mem = (seq_k + 64) * sizeof(float).
     const int GRP = QH / KVH;
     const size_t local_mem_bytes = (size_t)(seq_k + 64) * sizeof(float);
+    if (!dev_local_mem_)
+        clGetDeviceInfo(cl_ctx_.device(), CL_DEVICE_LOCAL_MEM_SIZE, sizeof(dev_local_mem_),
+                        &dev_local_mem_, nullptr);
+    static const bool force_online = [] {
+        const char* e = std::getenv("NNOPT_ATTN_ONLINE");   // test hook
+        return e && e[0] == '1';
+    }();
+    if ((force_online || local_mem_bytes + 256 > dev_local_mem_) && D == 64) {
+        // Long context on a small-local-memory GPU: online-softmax kernel.
+        if (!decode_attn_online_) {
+            attn_online_prog_ = cl_ctx_.build_program_from_file("kernels/attn_online.cl", "");
+            if (attn_online_prog_)
+                decode_attn_online_ = clCreateKernel(attn_online_prog_, "decode_attn_online", &err);
+            if (!decode_attn_online_) { NNOPT_ERROR("decode_attn_online unavailable"); return false; }
+        }
+        cl_kernel ka = decode_attn_online_;
+        if (!_set_arg_checked(ka, 0, sizeof(cl_mem), &q,                    "q"))       return false;
+        if (!_set_arg_checked(ka, 1, sizeof(cl_mem), &k_cache_,             "k_cache")) return false;
+        if (!_set_arg_checked(ka, 2, sizeof(cl_mem), &v_cache_,             "v_cache")) return false;
+        if (!_set_arg_checked(ka, 3, sizeof(cl_mem), &decode_attn_out_buf_, "attn_out")) return false;
+        if (!_set_arg_checked(ka, 4, sizeof(int),    &KV_DIM,               "KV_DIM"))  return false;
+        if (!_set_arg_checked(ka, 5, sizeof(int),    &D,                    "D"))       return false;
+        if (!_set_arg_checked(ka, 6, sizeof(int),    &GRP,                  "GRP"))     return false;
+        if (!_set_arg_checked(ka, 7, sizeof(int),    &seq_k,                "seq_k"))   return false;
+        if (!_set_arg_checked(ka, 8, sizeof(float),  &scale,                "scale"))   return false;
+        size_t gws = (size_t)QH * 64, lws = 64;
+        err = nnopt_prof::enqueue(queue, ka, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("decode_attn_online failed: %d", err); return false; }
+    } else {
     if (!_set_arg_checked(fused_decode_attn_m1_, 0, sizeof(cl_mem), &q,              "q"))       return false;
     if (!_set_arg_checked(fused_decode_attn_m1_, 1, sizeof(cl_mem), &k_cache_,       "k_cache")) return false;
     if (!_set_arg_checked(fused_decode_attn_m1_, 2, sizeof(cl_mem), &v_cache_,       "v_cache")) return false;
@@ -767,6 +873,8 @@ bool Attention::forward_decode_into_residual(cl_command_queue queue,
         err = nnopt_prof::enqueue(queue, fused_decode_attn_m1_, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
         if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("fused_decode_attn_m1 failed: %d", err); return false; }
     }
+    }
+    }  // !team_attn_done
 
     // 4. o_proj + residual add: int8 image > fp16 image > buffer.
     cl_mem attn_out = decode_attn_out_buf_;
@@ -792,6 +900,10 @@ bool Attention::forward_decode_into_residual(cl_command_queue queue,
         size_t lws = WG;
         err = nnopt_prof::enqueue(queue, fused_oproj_no4_img_, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
         if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("fused_oproj_residual_m1_no4_img failed: %d", err); return false; }
+    } else if (!quantized_ && team_gemv::Ctx::get(cl_ctx_).enabled()) {
+        if (!team_gemv::Ctx::get(cl_ctx_).gemv(queue, team_gemv::OPROJ, attn_out, wo_, residual,
+                                               H, Q_DIM, /*res=*/true))
+            return false;
     } else {
         if (!_set_arg_checked(fused_oproj_res_m1_, 0, sizeof(cl_mem), &attn_out, "attn_out")) return false;
         if (!_set_arg_checked(fused_oproj_res_m1_, 1, sizeof(cl_mem), &wo_,      "w_o"))      return false;

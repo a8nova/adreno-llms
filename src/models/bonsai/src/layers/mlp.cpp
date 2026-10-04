@@ -108,7 +108,7 @@ void DeviceModel::run_gemv(QW& W, cl_mem x, cl_mem out, int N, int K, int out_of
         run1(k_gemv_img_, ((size_t)n_dispatch + 255) / 256 * 64, 64, "gemv_img");
         return;
     }
-    const bool fat = N >= 16384 && getenv("BONSAI_LUT") != nullptr;
+    const bool fat = N >= 16384 && k_gemv7_ && getenv("BONSAI_LUT") != nullptr;
     cl_kernel k = fat ? k_gemv7_ : k_gemv_;
     int a = 0;
     arg(k, a++, sizeof(cl_mem), &W.bits, "gv.Wb");

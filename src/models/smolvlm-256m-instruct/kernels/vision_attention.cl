@@ -128,13 +128,59 @@ void mha_scores_tiled(
 // Win over mha_scores_par (which has 64 lanes reading 64 DIFFERENT K rows
 // simultaneously — strided across 64 cachelines): 64× fewer memory
 // transactions, near-perfect L2 reuse of K across query rows.
-#ifdef USE_FP16
+// ── Work-group reduction: subgroup fast path + portable fallback ────────────
+// sub_group_reduce_* needs cl_khr_subgroups, and it is only CORRECT when one
+// subgroup spans the whole work-group — which only qcom_reqd_sub_group_size
+// ("full") guarantees. MEASURED on PowerVR Rogue GE8320 (Vivo Y21), whose driver
+// has neither: every program using these builtins failed to build with
+//   "candidate unavailable as it requires OpenCL extension 'cl_khr_subgroups'"
+// their kernels were therefore absent, the dispatches were skipped, and the model
+// emitted confident garbage at an impossible 11 tok/s. The host compile-probes
+// BOTH the builtin and the attribute and defines NNOPT_SUBGROUP_REDUCE=1 only
+// when both genuinely work (see opencl_context.cpp).
+#if NNOPT_SUBGROUP_REDUCE
 #pragma OPENCL EXTENSION cl_khr_subgroups : enable
 #pragma OPENCL EXTENSION cl_qcom_reqd_sub_group_size : enable
+#define NNOPT_WAVE_ATTR __attribute__((qcom_reqd_sub_group_size("full")))
+#define NNOPT_DECL_SCRATCH(name, n)
+#define NNOPT_REDUCE_ADD(name, lid, n, v) sub_group_reduce_add(v)
+#define NNOPT_REDUCE_MAX(name, lid, n, v) sub_group_reduce_max(v)
+#else
+#define NNOPT_WAVE_ATTR
+#define NNOPT_DECL_SCRATCH(name, n) __local float name[n]
+// Barrier tree reduce over the whole work-group. Safe at every call site here:
+// they are all lane-uniform (early-outs branch on get_group_id(), which is
+// uniform), so every lane reaches every barrier.
+static inline float nnopt_wg_reduce_add(__local float* s, int lid, int n, float v) {
+  s[lid] = v;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int off = n >> 1; off > 0; off >>= 1) {
+    if (lid < off) s[lid] += s[lid + off];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  const float r = s[0];
+  barrier(CLK_LOCAL_MEM_FENCE);   // scratch reusable after this point
+  return r;
+}
+static inline float nnopt_wg_reduce_max(__local float* s, int lid, int n, float v) {
+  s[lid] = v;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int off = n >> 1; off > 0; off >>= 1) {
+    if (lid < off) s[lid] = fmax(s[lid], s[lid + off]);
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  const float r = s[0];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  return r;
+}
+#define NNOPT_REDUCE_ADD(name, lid, n, v) nnopt_wg_reduce_add(name, lid, n, v)
+#define NNOPT_REDUCE_MAX(name, lid, n, v) nnopt_wg_reduce_max(name, lid, n, v)
+#endif
+#ifdef USE_FP16
 #define VIS_SC_WG_CO 64
 __kernel
 __attribute__((reqd_work_group_size(VIS_SC_WG_CO, 1, 1)))
-__attribute__((qcom_reqd_sub_group_size("full")))
+NNOPT_WAVE_ATTR
 void mha_scores_coalesced(
     __global const half* Q,
     __global const half* K,
@@ -144,6 +190,9 @@ void mha_scores_coalesced(
     const int T,
     const int D,
     const float scale) {
+  // Scratch for the non-subgroup reduction fallback; expands to
+  // nothing when NNOPT_SUBGROUP_REDUCE is on.
+  NNOPT_DECL_SCRATCH(nnopt_red, VIS_SC_WG_CO);
   const int lid = (int)get_local_id(0);
   const int b   = (int)get_group_id(0);
   const int h   = (int)get_group_id(1);
@@ -166,7 +215,7 @@ void mha_scores_coalesced(
   for (int tk = 0; tk < T; ++tk) {
     const float k_elt = (float)K[bh_off + (long)tk * (long)D + lid];
     const float prod = q_elt * k_elt;
-    const float dot_v = sub_group_reduce_add(prod);
+    const float dot_v = NNOPT_REDUCE_ADD(nnopt_red, lid, VIS_SC_WG_CO, prod);
     if (lid == 0) {
       scores[s_base + tk] = (half)(dot_v * scale);
     }
@@ -185,7 +234,7 @@ void mha_scores_coalesced(
 #define VIS_OUT_WG_CO 64
 __kernel
 __attribute__((reqd_work_group_size(VIS_OUT_WG_CO, 1, 1)))
-__attribute__((qcom_reqd_sub_group_size("full")))
+NNOPT_WAVE_ATTR
 void mha_out_coalesced(
     __global const half* probs,
     __global const half* V,
@@ -332,17 +381,18 @@ __kernel void mha_add_mask(
 // kernel (3 sequential passes of length T per WI). Subgroup reduce gives us
 // max/sum in O(log64) instead of O(T).
 #ifdef USE_FP16
-#pragma OPENCL EXTENSION cl_khr_subgroups : enable
-#pragma OPENCL EXTENSION cl_qcom_reqd_sub_group_size : enable
 #define VIS_SM_WG 64
 __kernel
 __attribute__((reqd_work_group_size(VIS_SM_WG, 1, 1)))
-__attribute__((qcom_reqd_sub_group_size("full")))
+NNOPT_WAVE_ATTR
 void mha_softmax_parallel(
     __global half* scores,
     const int B,
     const int H,
     const int T) {
+  // Scratch for the non-subgroup reduction fallback; expands to
+  // nothing when NNOPT_SUBGROUP_REDUCE is on.
+  NNOPT_DECL_SCRATCH(nnopt_red, VIS_SM_WG);
   const int lid = (int)get_local_id(0);
   const int b   = (int)get_group_id(0);
   const int h   = (int)get_group_id(1);
@@ -357,7 +407,7 @@ void mha_softmax_parallel(
     float v = (float)scores[base + tk];
     if (v > local_max) local_max = v;
   }
-  const float row_max = sub_group_reduce_max(local_max);
+  const float row_max = NNOPT_REDUCE_MAX(nnopt_red, lid, VIS_SM_WG, local_max);
 
   // Pass 2: exp(v - max) and accumulate sum.
   float local_sum = 0.0f;
@@ -366,7 +416,7 @@ void mha_softmax_parallel(
     scores[base + tk] = (half)e;
     local_sum += e;
   }
-  const float row_sum = sub_group_reduce_add(local_sum);
+  const float row_sum = NNOPT_REDUCE_ADD(nnopt_red, lid, VIS_SM_WG, local_sum);
   const float inv = 1.0f / (row_sum + 1e-20f);
 
   // Pass 3: normalize.
@@ -538,15 +588,13 @@ __kernel void mha_out(
 // Local memory: 128 (Q) + 8192 (K_tile) + 8192 (V_tile) + 256 (scores) +
 //               4096 (pv_partials) ≈ 21 KB. Adreno 620 has 32 KB local.
 #ifdef USE_FP16
-#pragma OPENCL EXTENSION cl_khr_subgroups : enable
-#pragma OPENCL EXTENSION cl_qcom_reqd_sub_group_size : enable
 
 #define FA_WG 64
 #define FA_BC 64
 
 __kernel
 __attribute__((reqd_work_group_size(FA_WG, 1, 1)))
-__attribute__((qcom_reqd_sub_group_size("full")))
+NNOPT_WAVE_ATTR
 void mha_flash_attn(
     __global const half* Q,
     __global const half* K,
@@ -557,6 +605,9 @@ void mha_flash_attn(
     const int T,
     const int D,
     const float scale) {
+  // Scratch for the non-subgroup reduction fallback; expands to
+  // nothing when NNOPT_SUBGROUP_REDUCE is on.
+  NNOPT_DECL_SCRATCH(nnopt_red, FA_WG);
   const int lid = (int)get_local_id(0);
   const int b   = (int)get_group_id(0);
   const int h   = (int)get_group_id(1);
@@ -620,7 +671,7 @@ void mha_flash_attn(
         my_score = s * scale;
       }
     }
-    const float block_max = sub_group_reduce_max(my_score);
+    const float block_max = NNOPT_REDUCE_MAX(nnopt_red, lid, FA_WG, my_score);
     const float m_new = fmax(m_run, block_max);
     const float alpha = native_exp(m_run - m_new);
 
@@ -629,7 +680,7 @@ void mha_flash_attn(
       my_p = native_exp(my_score - m_new);
       scores_tile[lid] = my_p;
     }
-    const float block_sum = sub_group_reduce_add(my_p);
+    const float block_sum = NNOPT_REDUCE_ADD(nnopt_red, lid, FA_WG, my_p);
     barrier(CLK_LOCAL_MEM_FENCE);
 
     // P·V accumulation — all 64 lanes participate.

@@ -184,12 +184,13 @@ class DeviceModel {
     cl_mem x_, xb_, xb2_, qkv_, qv_, kv_, vv_, att_, scores_, gu_, gate_, up_, logits_, xsum_;
     cl_mem xp_, xbp_, xb2p_, qp_, kp_, vp_, attp_, gatep_, upp_, xsump_, tokbuf_;
     std::vector<cl_mem> kcache_, vcache_;
-    cl_kernel k_xsum_, k_gemv_, k_gemv7_, k_gather_, k_gather_dev_,
+    cl_kernel k_xsum_, k_gemv_, k_gemv7_ = nullptr, k_gather_, k_gather_dev_,
               k_gemv_b_, k_xsum_b_, k_gather_b_, k_argmax_, k_rms_, k_rope_,
               k_scores_, k_softmax_, k_attnout_, k_swiglu_, k_add_;
     cl_kernel k_kvq4_ = nullptr, k_scores4_ = nullptr, k_attnout4_ = nullptr;
     cl_kernel k_gemv_img_ = nullptr;
     bool use_img_ = false;
+    bool small_lmem_ = false;   // device __local < 32KB: v2/v6/v7/lx1 compiled out
     bool no_xsum_ = false;
     bool kv4_ = false;
 };

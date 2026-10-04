@@ -1,6 +1,8 @@
 // Reference: model_info/transformers_src/modeling_llama.py:171-186 LlamaMLP.forward
 
 #include "layers/mlp.h"
+#include "texture_policy.h"
+#include "team_gemv.h"
 #include "opencl_context.h"
 #include "weights.h"
 #include "debug_utils.h"
@@ -87,6 +89,7 @@ bool Mlp::initialize() {
     if (err != CL_SUCCESS) fused_gate_up_silu_m1_v4_ = nullptr;
     fused_gate_up_silu_m1_v4_img_ = clCreateKernel(block_fused_prog_, "fused_gate_up_silu_m1_v4_img", &err);
     if (err != CL_SUCCESS) fused_gate_up_silu_m1_v4_img_ = nullptr;
+    if (!nnopt_textures_allowed(cl_ctx_.device())) { if (fused_gate_up_silu_m1_v4_img_) clReleaseKernel(fused_gate_up_silu_m1_v4_img_); fused_gate_up_silu_m1_v4_img_ = nullptr; }
 #endif
     fused_down_res_m1_ = clCreateKernel(block_fused_prog_, "fused_down_residual_m1", &err);
     if (err != CL_SUCCESS || !fused_down_res_m1_) {
@@ -102,6 +105,7 @@ bool Mlp::initialize() {
     // Both well under image2d limits.
     fused_down_no4_img_ = clCreateKernel(block_fused_prog_, "fused_down_residual_m1_no4_img", &err);
     if (err != CL_SUCCESS) fused_down_no4_img_ = nullptr;
+    if (!nnopt_textures_allowed(cl_ctx_.device())) { if (fused_down_no4_img_) clReleaseKernel(fused_down_no4_img_); fused_down_no4_img_ = nullptr; }
 
     {
         const int H     = MODEL_CONFIG::HIDDEN_SIZE;
@@ -284,6 +288,14 @@ cl_mem Mlp::forward(cl_command_queue queue, cl_mem input, int seq_len) {
 // ── Decode fast path (M=1) ───────────────────────────────────────────────────
 // Replaces 2 CLBlast gate/up GEMMs + silu_mul + CLBlast down GEMM + element_add
 // with 2 custom GEMV kernel dispatches. Updates residual in-place.
+bool Mlp::enable_fused_input_norm(cl_mem gamma) {
+    if (quantized_ || !gamma || !team_gemv::Ctx::get(cl_ctx_).fuse_norm() ||
+        nnopt_textures_allowed(cl_ctx_.device()))   // image paths would see un-normed x
+        return false;
+    fused_norm_gamma_ = gamma;
+    return true;
+}
+
 bool Mlp::forward_decode_into_residual(cl_command_queue queue, cl_mem x, cl_mem residual) {
     const int H = MODEL_CONFIG::HIDDEN_SIZE;
     const int I = MODEL_CONFIG::INTERMEDIATE_SIZE;
@@ -321,6 +333,11 @@ bool Mlp::forward_decode_into_residual(cl_command_queue queue, cl_mem x, cl_mem 
         size_t lws = WG;
         err = nnopt_prof::enqueue(queue, gu, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
         if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("fused_gate_up_silu_m1_v4_img failed: %d", err); return false; }
+    } else if (!quantized_ && team_gemv::Ctx::get(cl_ctx_).enabled()) {
+        if (!team_gemv::Ctx::get(cl_ctx_).swiglu(queue, x, w_gate_, w_up_, act, I, H, nullptr,
+                                                 fused_norm_gamma_,
+                                                 (float)MODEL_CONFIG::RMS_NORM_EPS))
+            return false;
     } else {
         cl_kernel gu_kernel = fused_gate_up_silu_m1_v4_ ? fused_gate_up_silu_m1_v4_ : fused_gate_up_silu_m1_;
         if (!set_arg_checked(gu_kernel, 0, sizeof(cl_mem), &x,      "x"))     return false;
@@ -359,6 +376,10 @@ bool Mlp::forward_decode_into_residual(cl_command_queue queue, cl_mem x, cl_mem 
         size_t lws = WG;
         err = nnopt_prof::enqueue(queue, fused_down_no4_img_, 1, nullptr, &gws, &lws, 0, nullptr, nullptr);
         if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("fused_down_residual_m1_no4_img failed: %d", err); return false; }
+    } else if (!quantized_ && team_gemv::Ctx::get(cl_ctx_).enabled()) {
+        if (!team_gemv::Ctx::get(cl_ctx_).gemv(queue, team_gemv::DOWN, act, w_down_, residual,
+                                               H, I, /*res=*/true))
+            return false;
     } else {
         if (!set_arg_checked(fused_down_res_m1_, 0, sizeof(cl_mem), &act,      "mlp_in"))  return false;
         if (!set_arg_checked(fused_down_res_m1_, 1, sizeof(cl_mem), &w_down_,  "w_down"))  return false;

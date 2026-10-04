@@ -48,6 +48,12 @@ public:
                                       cl_mem x, int start_pos,
                                       cl_mem residual);
 
+    // Fold the layer's input RMSNorm into the decode QKV GEMV (team_gemv,
+    // PowerVR). Returns true if enabled; forward_decode_into_residual then
+    // takes the RAW residual stream as x and the caller skips the norm.
+    bool enable_fused_input_norm(cl_mem gamma);
+    bool fuses_input_norm() const { return fused_norm_gamma_ != nullptr; }
+
     // Kernel-handle accessors for the recordable-queue path: Model::initialize
     // collects these so it can issue arg updates between replays.
     //   fused_rope_kvwrite_m1: arg 10 is start_pos.
@@ -137,6 +143,13 @@ private:
     //   Per-row symmetric int8: image2d (CL_SIGNED_INT8 RGBA) + fp16 scale buffer.
     //   Selected when weights_.get_dtype(prefix+"q_proj.weight")=="int8".
     bool      quantized_ = false;
+    cl_mem    fused_norm_gamma_ = nullptr;   // non-owned; set by enable_fused_input_norm
+    // Constant-__local decode attention (kernels/attn_online.cl), built on first
+    // use: only when fused_decode_attn_m1's (seq_k+64)*4-byte scratch exceeds the
+    // device's local memory (4 KB on PowerVR GE8320 -> ~960 positions).
+    cl_program attn_online_prog_ = nullptr;
+    cl_kernel  decode_attn_online_ = nullptr;
+    cl_ulong   dev_local_mem_ = 0;
     cl_program block_fused_int8_prog_ = nullptr;
     cl_kernel gemv_k576_no4_img_int8_      = nullptr;
     cl_kernel fused_oproj_no4_img_int8_    = nullptr;

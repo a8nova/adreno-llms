@@ -2,6 +2,8 @@
 // Implements lm_head projection (tied to embed_tokens weight).
 
 #include "layers/lm_head.h"
+#include "texture_policy.h"
+#include "team_gemv.h"
 #include "opencl_context.h"
 #include "weights.h"
 #include "debug_utils.h"
@@ -89,6 +91,7 @@ bool LmHead::initialize() {
     // clCreateKernel on a missing kernel returns CL_INVALID_KERNEL_NAME — log and continue.
     gemv_k576_no4_img_ = clCreateKernel(block_fused_prog_, "gemv_m1_k576_no4_img", &err);
     if (err != CL_SUCCESS) gemv_k576_no4_img_ = nullptr;
+    if (!nnopt_textures_allowed(cl_ctx_.device())) { if (gemv_k576_no4_img_) clReleaseKernel(gemv_k576_no4_img_); gemv_k576_no4_img_ = nullptr; }
 
     // Try to wrap W (shape [V, H] = [49152, 576] fp16) as an image2d. The
     // standard layout requires height ≤ CL_DEVICE_IMAGE2D_MAX_HEIGHT
@@ -412,7 +415,13 @@ cl_mem LmHead::forward(cl_command_queue queue, cl_mem hidden, int M) {
         // Fall through to buffer fast path or CLBlast.
     }
 
-    if (M == 1 && fused_lm_head_m1_) {
+    if (M == 1 && !quantized_ && team_gemv::Ctx::get(cl_ctx_).enabled()) {
+        if (!team_gemv::Ctx::get(cl_ctx_).gemv(queue, team_gemv::LMHEAD, hidden, w_, out, V, H,
+                                               /*res=*/false)) {
+            clReleaseMemObject(out);
+            return nullptr;
+        }
+    } else if (M == 1 && fused_lm_head_m1_) {
         // Decode fast path: GEMV — one workgroup per output token, 64 threads cooperative.
         auto sa = [&](cl_uint idx, size_t sz, const void* v, const char* n) -> bool {
             cl_int e = clSetKernelArg(fused_lm_head_m1_, idx, sz, v);

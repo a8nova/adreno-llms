@@ -10,6 +10,8 @@
 #include "debug_utils.h"
 #include "benchmark.h"
 #include "prof.h"
+#include "team_gemv.h"
+#include "model_config.h"
 #include <iostream>
 #include <string>
 #include <cstring>
@@ -333,6 +335,70 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     NNOPT_CHECKPOINT("model created");
+    {
+        auto& tg = team_gemv::Ctx::get(cl_ctx);
+        if (tg.enabled() && tg.sweep_requested()) {
+            using namespace MODEL_CONFIG;
+            tg.sweep(cl_ctx.queue(), HIDDEN_SIZE, INTERMEDIATE_SIZE, NUM_ATTENTION_HEADS * HEAD_DIM,
+                     NUM_KEY_VALUE_HEADS * HEAD_DIM, VOCAB_SIZE);
+        }
+    }
+#ifdef NNOPT_TEAM_BENCH
+    // Diagnostic build only: per-token decode budget, printed as NNOPT_BENCH
+    // lines. Uses the real decode step; the KV cache it writes is overwritten
+    // by the first request (which starts at position 0).
+    {
+        using clk = std::chrono::steady_clock;
+        auto ms = [](clk::time_point a) {
+            return std::chrono::duration<double, std::milli>(clk::now() - a).count(); };
+        cl_command_queue q = cl_ctx.queue();
+        auto step = [&](int pos, bool logits) { return model.forward_decode(1780, pos, logits); };
+        step(0, true); clFinish(q);                       // warm (first-use compiles)
+        auto& tgb = team_gemv::Ctx::get(cl_ctx);
+        // A/B, interleaved so thermal drift hits every variant alike:
+        // v0 = tree kernel, v1 = 3-barrier kernel, v2 = v1 with 2 context splits.
+        for (int p = 0; p < 300; ++p) step(p, false);
+        clFinish(q);
+        double tot[3] = {0, 0, 0};
+        for (int rep = 0; rep < 4; ++rep)
+            for (int v = 0; v < 3; ++v) {
+                tgb.attn_tree = (v == 0);   // restored to the default below
+                tgb.attn_splits = (v == 2) ? 2 : 0;
+                step(300, false); clFinish(q);
+                auto t1 = clk::now();
+                for (int i = 0; i < 6; ++i) step(300, false);   // same position: cache row rewritten
+                clFinish(q);
+                tot[v] += ms(t1) / 6;
+            }
+        std::fprintf(stderr, "NNOPT_BENCH: ctx=300 layers-only  tree %.1f | 3-barrier %.1f | 3-barrier+split2 %.1f ms\n",
+                     tot[0] / 4, tot[1] / 4, tot[2] / 4);
+        tgb.attn_tree = true;
+        tgb.attn_splits = 0;
+        for (int ctx : {32, 300}) {
+            for (int p = 0; p < ctx; ++p) step(p, false);
+            clFinish(q);
+            auto t0 = clk::now();
+            for (int i = 0; i < 12; ++i) step(ctx + i, false);
+            clFinish(q);
+            const double body = ms(t0) / 12;
+            t0 = clk::now();
+            std::vector<float> lg;
+            for (int i = 0; i < 12; ++i) lg = step(ctx + i, true);
+            const double full = ms(t0) / 12;
+            SamplerConfig sc;
+            sc.temperature = 0.4f; sc.top_k = 40; sc.top_p = 0.9f; sc.repetition_penalty = 1.15f;
+            Sampler smp(sc);
+            std::vector<int32_t> gen(64, 1780);
+            t0 = clk::now();
+            for (int i = 0; i < 12; ++i) { std::vector<float> c = lg; smp.sample(c, gen); }
+            const double samp = ms(t0) / 12;
+            std::fprintf(stderr, "NNOPT_BENCH: ctx=%d layers-only %.1f ms | +lm_head+readback %.1f ms"
+                                 " | sample(cpu) %.2f ms | => %.2f tok/s\n",
+                         ctx, body, full, samp, 1000.0 / (full + samp));
+        }
+        std::fflush(stderr);
+    }
+#endif
 
     // ── Persistent serve mode (warm model) — port of the qwen --serve REPL ──────
     // OpenCL init + weight upload + kernel compile (all above) run ONCE; in --serve we
@@ -397,8 +463,10 @@ int main(int argc, char* argv[]) {
                     streamed_chars = text.size();
                 }
             };
+            nnopt_prof::reset();
             model.generate(ids, rq_max, sc, on_token);
             const auto t_end = std::chrono::steady_clock::now();
+            nnopt_prof::dump(cl_ctx.queue());  // no-op unless profiling is on
             // Per-reply BENCHMARK lines on stderr (parsed by the host) BEFORE the 0x1E sentinel, so warm
             // replies report the same prefill/ttft/decode metrics as the one-shot path.
             auto secs = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b){

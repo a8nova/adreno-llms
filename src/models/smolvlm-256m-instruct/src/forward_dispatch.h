@@ -211,6 +211,13 @@ extern "C" cl_mem op_PytorchGELUTanh(OpenCLContext& cl_ctx,
 // non-null AND rows==1 AND fp16 build, `hidden_states` is treated as the RAW
 // (pre-norm) input; the kernel computes inv_rms inside each WG and applies
 // `* inv_rms * gamma` before the matmul. nullptr → caller already normalized.
+// Whether single-token forwards must return full logits (sampling) or may
+// return the GPU-argmax one-hot (greedy). Honoured by the PowerVR team path.
+void nnopt_set_decode_needs_logits(bool needs);
+
+bool nnopt_text_kv_cache(OpenCLContext& cl_ctx, int layer_idx, int kv_dim,
+                         cl_mem* K, cl_mem* V, int* max_len);
+
 extern "C" cl_mem op_LlamaSdpaAttention(OpenCLContext& cl_ctx,
                                         Weights& weights,
                                         cl_command_queue queue,

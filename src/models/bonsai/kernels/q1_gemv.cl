@@ -154,6 +154,7 @@ void q1_argmax(__global const storage_t* logits, __global int* out, const int N)
 // accumulates from __local-staged x. No converts, no dots, no byte loads.
 #define XCHUNK 4096
 
+#ifndef BONSAI_SMALL_LMEM  // q1_gemv2: 16KB __local, over small-local-memory GPUs (PowerVR 4KB)
 __kernel
 __attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
 void q1_gemv2(__global const uint2* bits,     // [N][K/64]
@@ -220,6 +221,7 @@ void q1_gemv2(__global const uint2* bits,     // [N][K/64]
     }
     if (tid == 0) STORE1(partial[0], out, out_off + n);
 }
+#endif  // BONSAI_SMALL_LMEM
 
 // split-stream embedding gather
 __kernel
@@ -434,6 +436,7 @@ void q1_gemv5(__global const uint4* bits_t,
 // At WG-per-row (v2) local staging lost: 12288 stages of 16KB. At v4's
 // 256-rows-per-WG it wins: gu = 96 WGs x 16KB staged vs ~100MB of L2 x
 // re-reads. K chunked at 4096 floats (16KB local); 2 barriers per chunk.
+#ifndef BONSAI_SMALL_LMEM  // q1_gemv6/q1_gemv7: 16KB __local, over small-local-memory GPUs (PowerVR 4KB)
 __kernel
 __attribute__((reqd_work_group_size(WG_SIZE, 1, 1)))
 void q1_gemv6(__global const uint4* bits_t,
@@ -588,6 +591,7 @@ void q1_gemv7(__global const uint4* bits_t,   // [U][N]
         if (n < N) STORE1(acc[j], out, out_off + n);
     }
 }
+#endif  // BONSAI_SMALL_LMEM
 
 // gather with the token id read from a device buffer (the argmax output) —
 // removes the per-token blocking readback; host reads tokens 1 step behind.
@@ -994,6 +998,7 @@ void q1_gemv4xor(__global const uint4* bits_t,
 // units streamed once (coalesced across the wave, K-major layout).
 #define LXWG 64
 #define LXCHUNK 4096         // x floats per local chunk (16KB fp32) — fits 32KB
+#ifndef BONSAI_SMALL_LMEM  // q1_gemv_lx1: 16KB __local, over small-local-memory GPUs (PowerVR 4KB)
 __kernel __attribute__((reqd_work_group_size(LXWG, 1, 1)))
 void q1_gemv_lx1(__global const uint4* bits_t,
                  __global const half* scales_t,
@@ -1042,6 +1047,7 @@ void q1_gemv_lx1(__global const uint4* bits_t,
     }
     if (n < N) STORE1(acc, out, out_off + n);
 }
+#endif  // BONSAI_SMALL_LMEM
 
 // ── vPF: v4 quad-row + SOFTWARE PREFETCH (latency-bound fix) ──────────────
 // Bound test: latency-bound — the GPU stalls waiting for each weight load
