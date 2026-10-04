@@ -1,0 +1,90 @@
+# EDGI_POWERVR_GETINFO_PATCH — local patch to CLBlast 1.6.3 (NOT upstream).
+#
+# Fixes: every CLBlast routine returns -30 on PowerVR Rogue GE8320 because
+# CLBlast size-probes clGetDeviceInfo for parameters whose size it already
+# knows, and that driver rejects the probe for CL_DEVICE_MAX_CLOCK_FREQUENCY
+# and CL_DEVICE_MAX_WORK_ITEM_SIZES. MaxWorkItemSizes() is called from
+# RunKernel() on every launch, so all 26 ports were dead on that GPU.
+#
+# Applied by CMakeLists.txt via FetchContent PATCH_COMMAND. Re-verify if the
+# CLBlast GIT_TAG is bumped (still needed as of upstream 1.7.0).
+#
+--- a/src/clpp11.hpp	2026-09-08 19:47:44
++++ b/src/clpp11.hpp	2026-09-08 19:47:26
+@@ -33,6 +33,41 @@
+ //
+ // =================================================================================================
+ 
++
++// ===========================================================================
++// ###  EDGI LOCAL PATCH — NOT UPSTREAM CLBLAST  ###########################
++// ===========================================================================
++// GREP FOR: EDGI_POWERVR_GETINFO_PATCH
++//
++// This file is vendored via FetchContent (CLBlast 1.6.3) into build/, which is
++// NOT tracked in git. The tracked copy of this change lives at:
++//     src/models/lfm2-5-350m/third_party/clblast-powervr-getinfo.patch
++// and is applied automatically by the PATCH_COMMAND in CMakeLists.txt.
++// If you wipe build/ and rebuild, CMake re-applies it. If you bump the CLBlast
++// GIT_TAG, re-check that the patch still applies (verified against 1.6.3 and
++// confirmed still needed in 1.7.0 — upstream has not fixed this).
++//
++// WHY:
++//   clGetDeviceInfo has two legal call forms:
++//     (1) size probe:  clGetDeviceInfo(dev, param, 0, NULL, &bytes)
++//     (2) direct:      clGetDeviceInfo(dev, param, sizeof(v), &v, NULL)
++//   CLBlast always does (1) then (2). The OpenCL 1.2 spec only permits
++//   CL_INVALID_VALUE for an undersized buffer when param_value != NULL, so (1)
++//   must work for every parameter. PowerVR Rogue GE8320 (Vivo Y21, Helio P35)
++//   violates this for exactly two parameters, measured on device:
++//       CL_DEVICE_MAX_CLOCK_FREQUENCY   size-probe = -30, direct = OK
++//       CL_DEVICE_MAX_WORK_ITEM_SIZES   size-probe = -30, direct = OK
++//   All 17 other parameters probe fine. Adreno/Mali probe fine on all of them.
++//
++//   MaxWorkItemSizes() is called from routines/common.cpp RunKernel(), i.e. on
++//   EVERY kernel launch of EVERY routine, and CheckError throws — so every GEMM
++//   returned -30 and all 26 Edgi ports were dead on PowerVR.
++//
++// THE FIX: don't ask a question we already know the answer to. For fixed-size
++// parameters the size IS sizeof(T) at compile time, so the probe is pure
++// ceremony and a gratuitous failure point. This is strictly better on every
++// vendor and is worth sending upstream.
++// ===========================================================================
+ #ifndef CLBLAST_CLPP11_H_
+ #define CLBLAST_CLPP11_H_
+ 
+@@ -388,16 +423,30 @@
+   // Private helper functions
+   template <typename T>
+   T GetInfo(const cl_device_info info) const {
+-    auto bytes = size_t{0};
+-    CheckError(clGetDeviceInfo(device_, info, 0, nullptr, &bytes));
++    // EDGI_POWERVR_GETINFO_PATCH: the size of a fixed-size parameter is sizeof(T)
++    // by construction, so the size probe asked a question whose answer we already
++    // had — and PowerVR answers it with CL_INVALID_VALUE for MAX_CLOCK_FREQUENCY.
+     auto result = T(0);
+-    CheckError(clGetDeviceInfo(device_, info, bytes, &result, nullptr));
++    CheckError(clGetDeviceInfo(device_, info, sizeof(T), &result, nullptr));
+     return result;
+   }
+   template <typename T>
+   std::vector<T> GetInfoVector(const cl_device_info info) const {
++    // EDGI_POWERVR_GETINFO_PATCH: variable-length parameters genuinely need the
++    // size probe, so keep it — but tolerate a driver that refuses it. PowerVR
++    // rejects the probe for CL_DEVICE_MAX_WORK_ITEM_SIZES while serving the
++    // direct form correctly. Fall back to a generous fixed buffer and use the
++    // driver-reported actual size.
+     auto bytes = size_t{0};
+-    CheckError(clGetDeviceInfo(device_, info, 0, nullptr, &bytes));
++    if (clGetDeviceInfo(device_, info, 0, nullptr, &bytes) != CL_SUCCESS || bytes == 0) {
++      T scratch[64] = {};
++      auto actual = size_t{0};
++      CheckError(clGetDeviceInfo(device_, info, sizeof(scratch), scratch, &actual));
++      if (actual == 0 || actual > sizeof(scratch)) { actual = sizeof(scratch); }
++      auto fallback = std::vector<T>(actual / sizeof(T));
++      for (auto i = size_t{0}; i < fallback.size(); ++i) { fallback[i] = scratch[i]; }
++      return fallback;
++    }
+     auto result = std::vector<T>(bytes/sizeof(T));
+     CheckError(clGetDeviceInfo(device_, info, bytes, result.data(), nullptr));
+     return result;
