@@ -151,12 +151,19 @@ else()
     # every routine returned -30 and all ports were dead on that GPU. The patched
     # source lives under build/ which is NOT in git — this PATCH_COMMAND is what
     # makes the fix survive a clean build. Re-verify if GIT_TAG is bumped.
+    # A missing or non-applying patch is a hard error: silently shipping
+    # unpatched CLBlast breaks every port on PowerVR Rogue. An already-patched
+    # tree (re-run of the patch step) is detected by apply-clblast-patch.sh.
+    set(_CLBLAST_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/clblast-powervr-getinfo.patch")
+    if(NOT EXISTS "${_CLBLAST_PATCH}")
+        message(FATAL_ERROR "CLBlast patch missing: ${_CLBLAST_PATCH}")
+    endif()
     FetchContent_Declare(
         clblast
         GIT_REPOSITORY https://github.com/CNugteren/CLBlast.git
         GIT_TAG 1.6.3
         GIT_SHALLOW TRUE
-        PATCH_COMMAND patch -p1 -N -r - < "${CMAKE_CURRENT_SOURCE_DIR}/third_party/clblast-powervr-getinfo.patch" || true
+        PATCH_COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/third_party/apply-clblast-patch.sh" "${_CLBLAST_PATCH}"
     )
     if(ANDROID)
         set(BUILD_SHARED_LIBS ON CACHE BOOL "Android: build CLBlast shared (deployed via Deploy)" FORCE)
