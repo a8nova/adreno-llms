@@ -27,6 +27,7 @@
 #include "profiler.h"
 #include "model_config.h"
 #include "utils.h"
+#include "device_quirks.h"
 
 #include <CL/cl.h>
 #include <algorithm>
@@ -1526,6 +1527,17 @@ static int conv1d_wn(OpenCLContext& cl_ctx, Weights& weights, cl_command_queue q
         return 0;
     }
     bool use_fast = (w_total <= 4096) && (groups == 1 || C_in % groups == 0);
+    // The LDS-cached kernels need 8 KB (fast) / 32 KB (fast_c4) of __local; skip
+    // them on a device with less (PowerVR GE8320: 4 KB) instead of failing.
+    if (use_fast) {
+        static int fast_fits = -1, fast_c4_fits = -1;
+        if (fast_fits == -1) {
+            fast_fits    = nnopt_kernel_local_fits(g_k_conv1d_fast, cl_ctx.device()) ? 1 : 0;
+            fast_c4_fits = nnopt_kernel_local_fits(g_k_conv1d_fast_c4, cl_ctx.device()) ? 1 : 0;
+        }
+        const bool c4_shape = (C_out % 4 == 0) && (4 * w_total <= 16384);
+        use_fast = c4_shape ? (fast_c4_fits == 1) : (fast_fits == 1);
+    }
     if (use_fast) {
         const int LOCAL_T = 384;
         const int OUT_PER_GROUP = LOCAL_T;
@@ -2148,8 +2160,10 @@ extern "C" int dec_conv1d_plain(OpenCLContext& cl_ctx, Weights& weights, cl_comm
         size_t gws[2] = {(size_t)(C_out / 4), tiles_l_padded};
         size_t lws[2] = {1, (size_t)local_t};
         nnopt_enqueue_profiled(queue, g_k_conv1d_c4x4, 2, nullptr, gws, lws, 0, nullptr, nullptr);
-    } else if ((C_out % 4) == 0 && 4 * w_total <= 16384 && (groups == 1 || C_in % groups == 0)) {
-        // Strided convs (noise_convs.0) — LDS-cached c4 kernel.
+    } else if ((C_out % 4) == 0 && 4 * w_total <= 16384 && (groups == 1 || C_in % groups == 0) &&
+               nnopt_kernel_local_fits(g_k_conv1d_fast_c4, cl_ctx.device())) {
+        // Strided convs (noise_convs.0) — LDS-cached c4 kernel (32 KB __local;
+        // devices with less take the generic kernel below).
         clSetKernelArg(g_k_conv1d_fast_c4, 0, sizeof(cl_mem), &in);
         clSetKernelArg(g_k_conv1d_fast_c4, 1, sizeof(cl_mem), &W);
         clSetKernelArg(g_k_conv1d_fast_c4, 2, sizeof(cl_mem), &out);
