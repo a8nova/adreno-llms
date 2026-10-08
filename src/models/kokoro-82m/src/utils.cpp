@@ -893,8 +893,12 @@ static bool nnopt_skinny_linear_i8(cl_command_queue queue, int M, int N, int K,
     static cl_context built_ctx = nullptr;
     static std::map<cl_mem, I8GemmW> wcache;   // weight buffer -> packed int8
     static int sk_lanes = 0;
+    // Context whose build failed (no qcom_dot8_acc, e.g. PowerVR Rogue / Mali). Without this every
+    // GEMM call re-ran clBuildProgram and logged the error, before falling back to fp16.
+    static cl_context failed_ctx = nullptr;
     cl_context ctx = nullptr;
     if (clGetCommandQueueInfo(queue, CL_QUEUE_CONTEXT, sizeof(ctx), &ctx, nullptr) != CL_SUCCESS) return false;
+    if (ctx == failed_ctx) return false;
     if (sk_lanes == 0) {
         const char* e = std::getenv("NNOPT_SK_LT");
         int v = e ? atoi(e) : 64;
@@ -907,11 +911,11 @@ static bool nnopt_skinny_linear_i8(cl_command_queue queue, int M, int N, int K,
         if (sk_lanes != 64) opts += " -DSK_LANES=" + std::to_string(sk_lanes);
         cl_int err = CL_SUCCESS;
         prog = nnopt_build_program_cached(ctx, dev, k_skinny_i8_src, opts.c_str(), "skinny_gemm_i8", &err);
-        if (!prog) return false;
+        if (!prog) { failed_ctx = ctx; return false; }
         k_aq   = clCreateKernel(prog, "gemm_i8_aquant", &err);
         k_wp   = clCreateKernel(prog, "gemm_i8_wpack", &err);
         k_gemm = clCreateKernel(prog, "linear_skinny_i8", &err);
-        if (!k_aq || !k_wp || !k_gemm) { prog = nullptr; return false; }
+        if (!k_aq || !k_wp || !k_gemm) { prog = nullptr; failed_ctx = ctx; return false; }
         built_ctx = ctx;
     }
     const int KQ = K >> 2;   // caller guarantees K % 4 == 0

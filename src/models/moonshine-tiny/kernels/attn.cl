@@ -37,7 +37,9 @@ __kernel void attention(
     // ONCE into local memory (the old kernel used one work-item per row and
     // recomputed every QK dot 3x — 96.6% of all GPU time). local size = LWS.
     #define ATTN_LWS 64
+    #ifndef ATTN_MAX_TK
     #define ATTN_MAX_TK 1024  // >= enc_T (16000/384 rows/s => ~25s audio) and KV_CAP=194
+    #endif                    // host lowers it via -D on small-local-mem GPUs (PowerVR Rogue: 4 KB)
     __local float scores[ATTN_MAX_TK];
     __local float red[ATTN_LWS];
     __local float q_row[64];  // D<=64 (D=36 here); fp32 copy of the query row

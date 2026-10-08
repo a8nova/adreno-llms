@@ -30,6 +30,7 @@
 #include <string>
 
 cl_kernel moonshine_kernel(OpenCLContext& cl_ctx, const char* name);
+int moonshine_attn_max_tk(OpenCLContext& cl_ctx);
 bool moonshine_rope_tables(OpenCLContext& cl_ctx, int max_pos, int head_dim,
                            float theta_base, cl_mem& cos_out, cl_mem& sin_out);
 extern "C" cl_mem Linear_forward(OpenCLContext&, Weights&, cl_command_queue,
@@ -157,7 +158,8 @@ static cl_mem attention_core(OpenCLContext& cl_ctx, cl_command_queue q,
     set_arg_checked(k, 11, sizeof(int), &kv_stride, "kv_stride");
     // OPT-2: one 64-lane workgroup per (h, i) query row (kernel stages scores
     // in local memory; ATTN_MAX_TK=1024 rows ≈ 25s of audio for cross-attn).
-    if (Tk > 1024) { NNOPT_ERROR_FMT("attention Tk=%d exceeds ATTN_MAX_TK=1024 (~25s audio) — refusing (online-softmax kernel needed for longer clips)", Tk); clReleaseMemObject(out); return nullptr; }
+    const int max_tk = moonshine_attn_max_tk(cl_ctx);
+    if (Tk > max_tk) { NNOPT_ERROR_FMT("attention Tk=%d exceeds ATTN_MAX_TK=%d (~%ds audio) — refusing (online-softmax kernel needed for longer clips)", Tk, max_tk, max_tk / 41); clReleaseMemObject(out); return nullptr; }
     size_t lws = 64;
     size_t gws = (size_t)H * Tq * lws;
     err = clEnqueueNDRangeKernel(q, k, 1, nullptr, &gws, &lws, 0, nullptr,

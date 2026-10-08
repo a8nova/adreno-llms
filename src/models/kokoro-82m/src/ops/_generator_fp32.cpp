@@ -9,6 +9,7 @@
 //   gen_avg_three_fp32 — average 3 fp32 buffers
 
 #include "opencl_context.h"
+#include "device_quirks.h"
 #include "weights.h"
 #include "debug_utils.h"
 #include "profiler.h"
@@ -2826,10 +2827,13 @@ static int conv1d_wn_hh(OpenCLContext& cl_ctx, Weights& weights, cl_command_queu
                 // Defaults from the 2026-06-06 sweep: (4,32)+full wave = 1068 ms
                 // vs 1556 ms at the old (1,128)+default — a full-wave WG needs
                 // >=128 work items or the wave starves ((2,32) regressed 1.7x).
+                // PowerVR Rogue (GE8320) sweep 2026-10-07: (1,64) 23.8 s vs (4,32) 28.1 s
+                // for the same 3.6 s clip; (2,64)/(1,128) ~24.1, (4,16)/(8,32) worse.
+                const bool rogue = nnopt_is_powervr_rogue(cl_ctx.device());
                 const char* e = std::getenv("NNOPT_HT_LT");
-                s_ht_lt = (e && atoi(e) > 0) ? atoi(e) : 32;
+                s_ht_lt = (e && atoi(e) > 0) ? atoi(e) : (rogue ? 64 : 32);
                 const char* e0 = std::getenv("NNOPT_HT_L0");
-                s_ht_l0 = (e0 && atoi(e0) > 0) ? atoi(e0) : 4;
+                s_ht_l0 = (e0 && atoi(e0) > 0) ? atoi(e0) : (rogue ? 1 : 4);
             }
             const int local_t = s_ht_lt;
             size_t tiles_l = (size_t)((L_out + 3) / 4);

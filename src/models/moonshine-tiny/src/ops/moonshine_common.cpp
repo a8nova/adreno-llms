@@ -17,6 +17,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 
@@ -54,6 +55,20 @@ static const char* moonshine_kernel_file(const char* name) {
     return it != table.end() ? it->second : nullptr;
 }
 
+// Rows of attention scores the attention kernel can stage in local memory.
+// 1024 (~25s of audio) needs 4.5 KB with the kernel's other local arrays;
+// PowerVR Rogue (GE8320) has 4 KB, and overflowing it silently corrupts the
+// softmax (runaway decode to the token cap), so size it to the device.
+int moonshine_attn_max_tk(OpenCLContext& cl_ctx) {
+    static const int max_tk = [&] {
+        const size_t other = (64 + 64) * sizeof(float) + 64;  // red[], q_row[], slack
+        const size_t local = cl_ctx.local_mem_size();
+        const size_t fit = local > other ? (local - other) / sizeof(float) : 0;
+        return (int)std::min<size_t>(1024, fit / 64 * 64);
+    }();
+    return max_tk;
+}
+
 // Build (once per file) and return a kernel file's program.
 static cl_program moonshine_program_for(OpenCLContext& cl_ctx, const char* path) {
     static std::unordered_map<std::string, cl_program> cache;
@@ -62,9 +77,12 @@ static cl_program moonshine_program_for(OpenCLContext& cl_ctx, const char* path)
     // OPT-10 (r8): -cl-mad-enable + -cl-fast-relaxed-math. Gated on the
     // 3-clip token-exact check; NNOPT_FAST_MATH=0 reverts at runtime.
     const char* fm = std::getenv("NNOPT_FAST_MATH");
-    const std::string opts = (fm && fm[0] == '0')
+    std::string opts = (fm && fm[0] == '0')
         ? std::string()
         : std::string("-cl-mad-enable -cl-fast-relaxed-math");
+    const int max_tk = moonshine_attn_max_tk(cl_ctx);
+    if (max_tk < 1024 && std::string(path) == "kernels/attn.cl")
+        opts += " -D ATTN_MAX_TK=" + std::to_string(max_tk);
     cl_program prog = cl_ctx.build_program_from_file(path, opts);  // PROGRAM-INIT-OK
     if (!prog) { NNOPT_ERROR_FMT("moonshine_program_for: build failed for %s", path); return nullptr; }
     cache.emplace(path, prog);
