@@ -20,6 +20,7 @@
 
 #include <sys/stat.h>
 #include <dirent.h>
+#include <poll.h>
 #include <chrono>
 
 static bool file_exists(const char* p) {
@@ -103,15 +104,27 @@ static void emit_bench(double prefill_s, int n_prompt, double decode_s, int prod
 // Wrap a chat template around history + the current user turn. Bonsai is a
 // reasoning model: greedy output starts with a <think>…</think> block, which
 // the app filters — we keep it raw so nothing is silently dropped here.
+// BONSAI_THINK unset = reasoning off: the assistant turn opens with a pre-closed
+// empty think block (Qwen3's enable_thinking=False form), so it answers directly.
+// Past assistant turns get that same block back when their text has none, so the
+// history renders to exactly the tokens the engine fed — which is what lets the
+// warm REPL reuse its KV cache across turns (see run_reply).
+static const char* kEmptyThink = "<think>\n\n</think>\n\n";
+static bool thinking() { return getenv("BONSAI_THINK") != nullptr; }
+
 static std::string chat_template(const std::string& system,
                                  const std::vector<std::pair<char, std::string>>& hist,
                                  const std::string& user) {
     std::string s;
     if (!system.empty()) s += "<|im_start|>system\n" + system + "<|im_end|>\n";
-    for (auto& t : hist)
-        s += std::string("<|im_start|>") + (t.first == 'U' ? "user" : "assistant") +
-             "\n" + t.second + "<|im_end|>\n";
+    for (auto& t : hist) {
+        const bool a = t.first == 'A';
+        s += std::string("<|im_start|>") + (a ? "assistant" : "user") + "\n";
+        if (a && !thinking() && t.second.rfind("<think>", 0) != 0) s += kEmptyThink;
+        s += t.second + "<|im_end|>\n";
+    }
     s += "<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n";
+    if (!thinking()) s += kEmptyThink;
     return s;
 }
 
@@ -130,19 +143,84 @@ static std::vector<std::pair<char, std::string>> read_history() {
     return h;
 }
 
-// Prefill ids, greedy-decode up to n_gen tokens, stream decoded text to
-// stdout. Each call resets to pos 0 (independent turn; history is in the
-// prompt). Returns nothing; emits BENCHMARK on stderr.
+// Template + tokenize, dropping the OLDEST history turns until prompt + reply fit the context.
+// Without this a long enough conversation prefills past CTX_CAP and forward() exits(3) — the app
+// sees the engine die. The reply keeps up to half the context; a single prompt longer than the
+// rest keeps its tail, which is the part the user just wrote.
+static std::vector<int> fit_prompt(Tokenizer& tok, const std::string& system,
+                                   std::vector<std::pair<char, std::string>> hist,
+                                   const std::string& user, int n_gen) {
+    const int room = DeviceModel::CTX_CAP - std::min(n_gen, DeviceModel::CTX_CAP / 2);
+    std::vector<int> ids = tok.encode(chat_template(system, hist, user));
+    while ((int)ids.size() > room && !hist.empty()) {
+        hist.erase(hist.begin());
+        ids = tok.encode(chat_template(system, hist, user));
+    }
+    if ((int)ids.size() > room) ids.erase(ids.begin(), ids.end() - room);
+    return ids;
+}
+
+// Warm REPL Stop: the app writes kStopByte to stdin while a reply runs. Any other byte that
+// arrives mid-reply can only be the next request (the app sends one after Stop without waiting),
+// so it also ends the reply and is pushed back for the request loop to parse. Checked between
+// tokens with a zero-timeout poll — one syscall, nothing next to a forward pass. Ending the reply
+// here, instead of the app killing the process, keeps the KV cache for the next turn.
+static constexpr int kStopByte = 0x18;
+static bool stop_requested() {
+    pollfd p{0, POLLIN, 0};
+    if (poll(&p, 1, 0) <= 0) return false;
+    int c = getchar();
+    if (c != kStopByte && c != EOF) ungetc(c, stdin);
+    return true;
+}
+
+// Prefill ids, greedy-decode up to n_gen tokens, stream decoded text to stdout.
+// The whole conversation is in ids (history rides the prompt), so every turn is
+// self-contained. `cached` (warm REPL only) is the token at each KV position the
+// previous turns left behind: the prompt skips its longest common prefix with
+// it and only the rest is fed. That is exact, not approximate — a position's
+// K/V depends only on the tokens at and before it, attention reads rows
+// 0..pos, and each forward overwrites its own row. Any divergence (edited or
+// trimmed history, a cancelled reply) just means feeding from that point.
+// Without it a follow-up re-read the entire chat one token at a time, as slow
+// as writing it, silently — past the app's 180 s watchdog on a long reply.
 static void run_reply(DeviceModel& model, Tokenizer& tok, const Nnb& nnb,
-                      const std::vector<int>& ids, int n_gen) {
+                      const std::vector<int>& ids, int n_gen,
+                      std::vector<int>* cached = nullptr) {
+    const bool can_stop = cached != nullptr;   // only the warm REPL reads stdin
+    bool stopped = false;
     using clk = std::chrono::steady_clock;
     auto t0 = clk::now();
-    int pos = 0, cur = ids.back();
-    for (size_t i = 0; i + 1 < ids.size(); ++i) model.forward(ids[i], pos++, false);
+    size_t keep = 0;
+    if (cached) {
+        const size_t lim = std::min(cached->size(), ids.size() - 1);   // always feed the last token
+        while (keep < lim && (*cached)[keep] == ids[keep]) ++keep;
+        cached->resize(keep);
+    }
+    const int feed = (int)(ids.size() - 1 - keep);
+    fprintf(stderr, "[kv] prompt %zu tokens: reused %zu, reading %d\n", ids.size(), keep, feed + 1);
+    fflush(stderr);
+    int pos = (int)keep, cur = ids.back();
+    // Progress while reading, so a long read is never mistaken for a hang: the app kills an engine
+    // that prints nothing for 180 s, and one token here costs as much as one decode step.
+    auto last = t0;
+    for (size_t i = keep; i + 1 < ids.size(); ++i) {
+        if (can_stop && stop_requested()) { stopped = true; break; }
+        model.forward(ids[i], pos++, false);
+        if (cached) cached->push_back(ids[i]);
+        auto now = clk::now();
+        if (now - last > std::chrono::seconds(5)) {
+            fprintf(stderr, "[prefill] %d/%d\n", (int)(i + 1 - keep), feed);
+            fflush(stderr);
+            last = now;
+        }
+    }
     auto t1 = clk::now();
     int produced = 0;
-    for (int i = 0; i < n_gen && pos < DeviceModel::CTX_CAP; ++i) {
+    for (int i = 0; !stopped && i < n_gen && pos < DeviceModel::CTX_CAP; ++i) {
+        if (can_stop && stop_requested()) { stopped = true; break; }
         model.forward(cur, pos++, true);
+        if (cached) cached->push_back(cur);
         cur = model.read_token();
         if (cur == nnb.meta.eos) break;
         std::string piece = tok.decode({cur});
@@ -151,8 +229,62 @@ static void run_reply(DeviceModel& model, Tokenizer& tok, const Nnb& nnb,
         ++produced;
     }
     auto t2 = clk::now();
-    emit_bench(std::chrono::duration<double>(t1 - t0).count(), (int)ids.size(),
+    if (stopped) { fprintf(stderr, "[stop] reply ended after %d tokens\n", produced); fflush(stderr); }
+    emit_bench(std::chrono::duration<double>(t1 - t0).count(), feed + 1,
                std::chrono::duration<double>(t2 - t1).count(), produced);
+}
+
+// BONSAI_DEPTH_BENCH="0,1024,2048,...": decode speed as a function of context length, without
+// spending the time to actually generate up to each depth. For each depth it jumps the position
+// there (the KV rows below it are whatever the cache holds, which costs the same to read as real
+// ones), times BONSAI_DEPTH_BENCH_N single-token forwards (the prompt path) and then the same
+// number of decode steps, exactly as run_reply issues them. Needs BONSAI_CTX above the deepest
+// depth. With BONSAI_KPROF=1 it also prints per-kernel GPU time at each depth (long_ctx_diag.h).
+static int depth_bench(DeviceModel& model, OpenCLContext& ocl, Tokenizer& tok, const ModelMeta& mm,
+                       const char* spec) {
+    using clk = std::chrono::steady_clock;
+    lcd::bw_bench(ocl.context(), ocl.device(), ocl.queue());
+    const char* ne = getenv("BONSAI_DEPTH_BENCH_N");
+    const int n = ne ? std::max(8, atoi(ne)) : 64;
+    const int warm = 4;
+    const int seed = tok.encode("The").back();
+    std::string s = spec;
+    for (size_t at = 0; at < s.size();) {
+        size_t comma = s.find(',', at);
+        if (comma == std::string::npos) comma = s.size();
+        const int d = atoi(s.substr(at, comma - at).c_str());
+        at = comma + 1;
+        if (d < 0 || d + 2 * (warm + n) + 1 >= DeviceModel::CTX_CAP) {
+            fprintf(stderr, "DEPTHBENCH depth=%d skipped (ctx %d)\n", d, DeviceModel::CTX_CAP);
+            continue;
+        }
+        int pos = d;
+        for (int i = 0; i < warm; ++i) model.forward(seed, pos++, false);
+        clFinish(ocl.queue());
+        const auto tp = clk::now();
+        for (int i = 0; i < n; ++i) model.forward(seed, pos++, false);
+        clFinish(ocl.queue());
+        const double dp = std::chrono::duration<double>(clk::now() - tp).count();
+        fprintf(stderr, "DEPTHBENCH depth=%d prefill_tokens=%d sec=%.3f prefill_tok_s=%.3f\n",
+                d, n, dp, n / dp);
+        int cur = seed;
+        clk::time_point t0;
+        for (int i = 0; i < warm + n; ++i) {
+            if (i == warm) { model.kprof_.reset(); t0 = clk::now(); }
+            model.forward(cur, pos++, true);
+            cur = model.read_token();
+        }
+        const double dt = std::chrono::duration<double>(clk::now() - t0).count();
+        fprintf(stderr, "DEPTHBENCH depth=%d tokens=%d sec=%.3f tok_s=%.3f ms_per_tok=%.1f\n",
+                d, n, dt, n / dt, dt * 1000.0 / n);
+        clFinish(ocl.queue());
+        char label[32];
+        snprintf(label, sizeof(label), "depth=%d", d);
+        model.kprof_.dump(label, n, dt);
+        lcd::print_bytes(d + warm + n, mm.layers, mm.heads, mm.kv_heads, mm.head_dim, DeviceModel::ES);
+        fflush(stderr);
+    }
+    return 0;
 }
 
 static int edgi_main(int argc, char** argv) {
@@ -179,6 +311,7 @@ static int edgi_main(int argc, char** argv) {
     print_ocl_banner(ocl);
     const char* kd = getenv("BONSAI_KERNEL_DIR");
     DeviceModel model(nnb, ocl, kd ? kd : "kernels");
+    if (const char* db = getenv("BONSAI_DEPTH_BENCH")) return depth_bench(model, ocl, tok, nnb.meta, db);
 
     if (serve) {
         // Warm REPL (ProcessEngine tryGenerateWarm): stay resident across
@@ -186,11 +319,21 @@ static int edgi_main(int argc, char** argv) {
         //   header: "GEN <maxTok> <temp> <topK> <topP> <repPen> <sysBytes> <prBytes> <useHist>\n"
         //   then raw system bytes, then raw prompt bytes.
         // Reply: stream tokens to stdout, terminate with the 0x1E sentinel.
-        fprintf(stderr, "SERVE_READY\n"); fflush(stderr);
+        // "stop" advertises kStopByte support; the app only sends it to engines that say so.
+        // Unbuffered, so poll() on fd 0 sees every byte: a buffered stdin could swallow a Stop
+        // into its read-ahead where stop_requested() never looks.
+        setvbuf(stdin, nullptr, _IONBF, 0);
+        fprintf(stderr, "SERVE_READY stop\n"); fflush(stderr);
+        std::vector<int> cached;   // token at each KV position, carried across turns
         for (;;) {
             int maxTok, topK, useHist, sysN, prN;
             float temp, topP, rep;
             char verb[16];
+            // A Stop that arrived after the reply had already ended is still in the pipe.
+            int c;
+            while ((c = getchar()) == kStopByte || c == '\n' || c == ' ') {}
+            if (c == EOF) return 0;
+            ungetc(c, stdin);
             int m = scanf("%15s %d %f %d %f %f %d %d %d", verb, &maxTok, &temp,
                           &topK, &topP, &rep, &sysN, &prN, &useHist);
             if (m != 9 || strcmp(verb, "GEN") != 0) return 0;   // EOF / bad frame → exit
@@ -200,16 +343,15 @@ static int edgi_main(int argc, char** argv) {
             if (prN && fread(&pr[0], 1, prN, stdin) != (size_t)prN) return 0;
             auto hist = useHist ? read_history()
                                 : std::vector<std::pair<char, std::string>>{};
-            std::vector<int> ids = tok.encode(chat_template(sys, hist, pr));
-            run_reply(model, tok, nnb, ids, maxTok > 0 ? maxTok : n_gen);
+            const int gen = maxTok > 0 ? maxTok : n_gen;
+            run_reply(model, tok, nnb, fit_prompt(tok, sys, hist, pr, gen), gen, &cached);
             fputc(0x1E, stdout); fflush(stdout);   // reply-complete sentinel
         }
     }
 
     // One-shot path.
     auto hist = read_history();
-    std::string full = chat ? chat_template(system, hist, prompt) : prompt;
-    std::vector<int> ids = tok.encode(full);
+    std::vector<int> ids = chat ? fit_prompt(tok, system, hist, prompt, n_gen) : tok.encode(prompt);
     run_reply(model, tok, nnb, ids, n_gen);
     return 0;
 }

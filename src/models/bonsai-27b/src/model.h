@@ -32,6 +32,7 @@
 #include "nnb.h"
 #include "q1.h"
 #include "opencl_context.h"
+#include "long_ctx_diag.h"
 
 struct OpProf {
     bool on = false;
@@ -75,8 +76,17 @@ struct OpProf {
 
 class DeviceModel {
   public:
-    // Resident device has room for 2048 context.
-    static constexpr int CTX_CAP = 2048;
+    // Context length, fixed for the life of the process. 2048 unless BONSAI_CTX asks for more, and
+    // never more than the device can hold: the constructor clamps it to what fits beside the
+    // weights in CL_DEVICE_GLOBAL_MEM_SIZE. The KV cache is allocated for all of it up front, so
+    // memory does not grow while generating — a context that loads is a context that can be used.
+    static constexpr int CTX_DEFAULT = 2048;
+    static inline int CTX_CAP = CTX_DEFAULT;
+
+    // Long-context diagnostics (BONSAI_KPROF / BONSAI_ATTN2), off unless their env var is set.
+    lcd::KProf kprof_;
+    lcd::Attn2 attn2_;
+    int attn_seq_k_ = 0;   // seq_k of the latest run_scores, for the split attn-out candidate
 
     /**
      * Named tunable presets, reachable as "/bench N" from the chat box.
@@ -397,7 +407,7 @@ class DeviceModel {
     }
     void run1(cl_kernel k, size_t gws, size_t lws, const char* what) {
         CLCHECK(clEnqueueNDRangeKernel(ocl_.queue(), k, 1, nullptr, &gws,
-                                       lws ? &lws : nullptr, 0, nullptr, nullptr),
+                                       lws ? &lws : nullptr, 0, nullptr, kprof_.next(k)),
                 what);
     }
 
@@ -414,7 +424,7 @@ class DeviceModel {
      *  does not have to recover it with an integer divide+modulo (guide 8.12). */
     void run2(cl_kernel k, size_t gx, size_t gy, size_t lx, const char* what) {
         const size_t gws[2] = {gx, gy}, lws[2] = {lx, 1};
-        CLCHECK(clEnqueueNDRangeKernel(ocl_.queue(), k, 2, nullptr, gws, lws, 0, nullptr, nullptr), what);
+        CLCHECK(clEnqueueNDRangeKernel(ocl_.queue(), k, 2, nullptr, gws, lws, 0, nullptr, kprof_.next(k)), what);
     }
     long disp_n_ = 0;
     std::map<std::string, long> disp_by_;

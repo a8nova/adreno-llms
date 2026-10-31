@@ -93,6 +93,26 @@ DeviceModel::DeviceModel(const Nnb& nnb, OpenCLContext& ocl, const std::string& 
                 want / 1048576.0, want / (double)gmem);
         // ~1.2 GB headroom for KV + recurrent state + activations + logits.
         const double need = want + 1200.0 * 1048576.0;
+        // That 1.2 GB was sized with the KV cache at 2048 tokens. Each token past it costs a K and a
+        // V row in every 'F' block, a score per head and a rope row, so a longer context is only
+        // granted while weights + fixed headroom + per-token state still fit in global memory.
+        int n_full = 0;
+        for (char c : m_.layer_types) n_full += (c == 'F');
+        const int rot = m_.rope_dim_count > 0 ? m_.rope_dim_count : m_.head_dim;
+        const double per_tok = (double)n_full * 2 * m_.kv_heads * m_.head_dim * ES +
+                               (double)m_.heads * ES + (double)rot * 4;
+        const char* want_ctx = getenv("BONSAI_CTX");
+        int ctx = want_ctx ? atoi(want_ctx) : CTX_DEFAULT;
+        if (ctx < CTX_DEFAULT) ctx = CTX_DEFAULT;
+        const double spare = (double)gmem - need;
+        const int fit = CTX_DEFAULT + (spare > 0 ? (int)(spare / per_tok) : 0);
+        if (ctx > fit) ctx = fit & ~255;
+        if (ctx < CTX_DEFAULT) ctx = CTX_DEFAULT;
+        CTX_CAP = ctx;
+        fprintf(stderr, "[mem] context %d tokens (asked %s, fits %d) — KV %.0f KB/token, %.0f MB total\n",
+                CTX_CAP, want_ctx ? want_ctx : "default", fit, per_tok / 1024.0,
+                per_tok * CTX_CAP / 1048576.0);
+        fprintf(stderr, "CTX %d\n", CTX_CAP);
         if (need > (double)gmem) {
             fprintf(stderr,
                     "FATAL: model needs ~%.0f MB but device global is %llu MB. "
@@ -136,6 +156,7 @@ DeviceModel::DeviceModel(const Nnb& nnb, OpenCLContext& ocl, const std::string& 
     tune_prefill_path();
     prof_.on = getenv("BONSAI_PROF") != nullptr;
     prof_.q = ocl_.queue();
+    attn2_.init(ocl_.context(), ocl_.device(), ES, m_.heads, m_.head_dim, CTX_CAP);
 }
 
 DeviceModel::~DeviceModel() { prof_.dump(); }

@@ -161,7 +161,9 @@ if(BONSAI_VISION)
     include(FetchContent)
     FetchContent_Declare(stb
         GIT_REPOSITORY https://github.com/nothings/stb.git
-        GIT_TAG master GIT_SHALLOW TRUE)
+        # Pinned: upstream master later moved stb_image_resize2.h under deprecated/, which broke
+        # this build. Fetch the exact commit (shallow fetch of a bare hash is not portable).
+        GIT_TAG 31c1ad37456438565541f4919958214b6e762fb4)
     FetchContent_MakeAvailable(stb)
     include_directories(${stb_SOURCE_DIR})
 endif()

@@ -287,6 +287,7 @@ int main(int argc, char** argv) {
     Sampler sampler(sampler_config);
 
     Model model(cl_ctx, weights);
+    model.decode_reserve = (max_new_tokens > 0 ? max_new_tokens : 128) + 1;
     if (!model.initialize()) {
         NNOPT_ERROR("Model::initialize() failed — see prior NNOPT_ERROR for the layer that failed");
         return 1;

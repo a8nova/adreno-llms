@@ -35,10 +35,12 @@ DeviceModel::DeviceModel(const Nnb& nnb, OpenCLContext& ocl, const std::string& 
     }
     build_programs(kdir);
     upload_weights();
+    choose_context();
     make_scratch();
     make_rope_tables();
     prof_.on = getenv("BONSAI_PROF") != nullptr;
     prof_.q = ocl_.queue();
+    attn2_.init(ocl_.context(), ocl_.device(), ES, m_.heads, m_.head_dim, CTX_CAP);
     hybrid_ = getenv("BONSAI_HYBRID") != nullptr && ES == 4;  // fp32 out only
     hybrid_readonly_ = getenv("BONSAI_HYBRID_READONLY") != nullptr;
     if (const char* f = getenv("BONSAI_HYBRID_FRAC")) hybrid_frac_ = atof(f);
@@ -53,6 +55,30 @@ DeviceModel::DeviceModel(const Nnb& nnb, OpenCLContext& ocl, const std::string& 
 }
 
 DeviceModel::~DeviceModel() { prof_.dump(); }
+
+// Grant BONSAI_CTX only while weights + scratch + the whole KV cache still fit in global memory.
+// Each token costs a K and a V row in every layer, M_MAX scores per head and a rope row. Never
+// below 2048: that is what every device ran before this existed, so it is not a new failure mode.
+void DeviceModel::choose_context() {
+    cl_ulong gmem = 0;
+    clGetDeviceInfo(ocl_.device(), CL_DEVICE_GLOBAL_MEM_SIZE, sizeof(gmem), &gmem, nullptr);
+    const double weights = (double)nnb_.bytes();
+    const bool kv4 = getenv("BONSAI_KV4") != nullptr;
+    const double grp = kv4 ? (2.0 + m_.head_dim / 2.0) : (double)m_.head_dim * ES;
+    const double per_tok = (double)m_.layers * 2 * m_.kv_heads * grp +
+                           (double)m_.heads * M_MAX * ES + (double)m_.head_dim * 2 * 4;
+    const double margin = 512.0 * 1048576.0;   // scratch, logits, prefill buffers, driver
+    const double spare = (double)gmem - weights - margin;
+    const int fit = spare > 0 ? (int)(spare / per_tok) & ~255 : 0;
+    const char* want = getenv("BONSAI_CTX");
+    int ctx = want ? atoi(want) : CTX_DEFAULT;
+    if (ctx > fit) ctx = fit;
+    if (ctx < CTX_DEFAULT) ctx = CTX_DEFAULT;
+    CTX_CAP = ctx;
+    fprintf(stderr, "[mem] context %d tokens (asked %s, fits %d) — KV %.0f KB/token, %.0f MB total\n",
+            CTX_CAP, want ? want : "default", fit, per_tok / 1024.0, per_tok * CTX_CAP / 1048576.0);
+    fprintf(stderr, "CTX %d\n", CTX_CAP);
+}
 
 int DeviceModel::forward(int token, int pos, bool want_logits) {
     if (pos >= CTX_CAP) {

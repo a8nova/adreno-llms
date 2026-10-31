@@ -118,6 +118,8 @@ void DeviceModel::run_rope(cl_mem qb, cl_mem kb, int NH, int KH, int D) {
 }
 
 void DeviceModel::run_scores(cl_mem qb, cl_mem kc, int NH, int KH, int D, int seq_k) {
+    attn_seq_k_ = seq_k;
+    if (attn2_.scores(ocl_.queue(), kprof_, qb, kc, scores_, counter_, NH, KH, D, seq_k)) return;
     int a = 0, seq_q = 1;
     float scale = 1.0f / sqrtf((float)D);
     arg(k_scores_, a++, sizeof(cl_mem), &qb, "sc.q");
@@ -131,11 +133,12 @@ void DeviceModel::run_scores(cl_mem qb, cl_mem kc, int NH, int KH, int D, int se
     arg(k_scores_, a++, sizeof(float), &scale, "sc.sc");
     size_t g[3] = {(size_t)NH, 1, (size_t)seq_k};
     CLCHECK(clEnqueueNDRangeKernel(ocl_.queue(), k_scores_, 3, nullptr, g,
-                                   nullptr, 0, nullptr, nullptr), "scores");
+                                   nullptr, 0, nullptr, kprof_.next(k_scores_)), "scores");
 }
 
 void DeviceModel::run_softmax(int NH, int seq_k) {
     (void)seq_k;
+    if (attn2_.softmax(ocl_.queue(), kprof_, scores_, counter_, NH)) return;
     int a = 0, seq_q = 1, rows = NH;
     arg(k_softmax_, a++, sizeof(cl_mem), &scores_, "sm.s");
     arg(k_softmax_, a++, sizeof(int), &seq_q, "sm.sq");
@@ -145,6 +148,7 @@ void DeviceModel::run_softmax(int NH, int seq_k) {
 }
 
 void DeviceModel::run_attnout(cl_mem vc, int NH, int KH, int D) {
+    if (attn2_.attn_out(ocl_.queue(), kprof_, scores_, vc, att_, counter_, NH, KH, D, attn_seq_k_)) return;
     int a = 0, seq_q = 1;
     arg(k_attnout_, a++, sizeof(cl_mem), &scores_, "ao.s");
     arg(k_attnout_, a++, sizeof(cl_mem), &vc, "ao.v");
@@ -156,5 +160,5 @@ void DeviceModel::run_attnout(cl_mem vc, int NH, int KH, int D) {
     arg(k_attnout_, a++, sizeof(int), &D, "ao.d");
     size_t g[3] = {(size_t)NH, 1, (size_t)(D / 4)};
     CLCHECK(clEnqueueNDRangeKernel(ocl_.queue(), k_attnout_, 3, nullptr, g,
-                                   nullptr, 0, nullptr, nullptr), "attnout");
+                                   nullptr, 0, nullptr, kprof_.next(k_attnout_)), "attnout");
 }

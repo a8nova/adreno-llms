@@ -68,6 +68,10 @@ public:
     // if a longer prompt is needed). conv_L_cache=3 → 2 pad rows cached per
     // conv layer.
     bool ensure_caches(int max_seq_len);
+    // Decode slots a prefill reserves past the prompt. Must cover the whole reply: growing the
+    // caches mid-reply reallocates them EMPTY, which silently drops the prompt and every token so
+    // far (the old fixed 256 did this to any reply longer than 256 tokens). Set from --max-tokens.
+    int decode_reserve = 256;
     cl_mem kv_K_cache(int layer_idx) const;
     cl_mem kv_V_cache(int layer_idx) const;
     cl_mem conv_bx_cache(int layer_idx) const;
