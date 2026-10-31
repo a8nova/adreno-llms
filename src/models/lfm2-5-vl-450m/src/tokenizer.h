@@ -42,6 +42,20 @@ public:
     //   tile_tokens: tokens per tile = (tile_size/patch/downsample)^2 = 256
     //   use_thumbnail: true if thumbnail is present
     //   add_generation_prompt: append "<|im_start|>assistant\n" trailer
+    // One message in a conversation. role: 'S' system, 'U' user, 'A' assistant.
+    struct ChatMsg { char role; std::string content; };
+
+    // Full multi-turn chat template. Verified against the model's own
+    // chat_template.jinja, which renders:
+    //   <|startoftext|><|im_start|>system\n{sys}<|im_end|>\n
+    //                  <|im_start|>user\n{msg}<|im_end|>\n
+    //                  <|im_start|>assistant\n{msg}<|im_end|>\n ...
+    //                  <|im_start|>assistant\n      (generation prompt)
+    // Content goes through the SAME ByteLevel path encode_with_image uses --
+    // the public encode() is the simple greedy tokenizer and diverges from HF.
+    std::vector<int32_t> encode_chat(const std::vector<ChatMsg>& msgs,
+                                     bool add_generation_prompt) const;
+
     std::vector<int32_t> encode_with_image(
         const std::string& prompt,
         int grid_h, int grid_w,

@@ -1080,13 +1080,25 @@ void lfm2_flash_attn_prefill(
         barrier(CLK_LOCAL_MEM_FENCE);
 
         // Online softmax (16 WIs per Q row, 4 rows in parallel)
-        if (my_row < bq) {
-            const int qi = my_row;
-            const int rbase = qi * FA_WI_PER_ROW;
+        // EVERY work item must reach EVERY barrier below. This block used to be
+        // wrapped in `if (my_row < bq)`, which is NOT uniform across the workgroup
+        // whenever q_rows is not a multiple of 4 (the tail block has bq < 4),
+        // so rows >= bq skipped nine barriers the other rows waited on. That is
+        // undefined behaviour; on Mali-G57 it produced NaN logits for the whole
+        // prefill. It hid for so long because every prompt tested happened to
+        // tokenize to a multiple of 4 -- 16 tokens works, 38 does not.
+        // `active` now gates the memory effects; the barriers are unconditional.
+        // Inactive rows still write their OWN red[] slots (distinct rbase), so no
+        // active row ever reads a stale value.
+        {
+            const bool active = (my_row < bq);
+            const int qi = active ? my_row : 0;
+            const int rbase = my_row * FA_WI_PER_ROW;
 
             float lmax = -INFINITY;
-            for (int j = lane; j < bk; j += FA_WI_PER_ROW)
-                lmax = fmax(lmax, S_loc[qi * FA_BK + j]);
+            if (active)
+                for (int j = lane; j < bk; j += FA_WI_PER_ROW)
+                    lmax = fmax(lmax, S_loc[qi * FA_BK + j]);
             red[lid] = lmax;
             barrier(CLK_LOCAL_MEM_FENCE);
             if (lane < 8) red[rbase + lane] = fmax(red[rbase + lane], red[rbase + lane + 8]);
@@ -1099,19 +1111,22 @@ void lfm2_flash_attn_prefill(
             barrier(CLK_LOCAL_MEM_FENCE);
 
             float new_m = red[rbase];
-            float old_m = m_loc[qi];
+            float old_m = active ? m_loc[qi] : -INFINITY;
             float comb_m = fmax(old_m, new_m);
-            float alpha = native_exp(old_m - comb_m);
+            // A fully-masked row makes comb_m == -INF; exp(-INF - -INF) is NaN.
+            float alpha = isinf(comb_m) ? 0.0f : native_exp(old_m - comb_m);
 
-            for (int d = lane; d < FA_HD; d += FA_WI_PER_ROW)
-                O_loc[qi * FA_HD + d] *= alpha;
+            if (active)
+                for (int d = lane; d < FA_HD; d += FA_WI_PER_ROW)
+                    O_loc[qi * FA_HD + d] *= alpha;
 
             float pl = 0.0f;
-            for (int j = lane; j < bk; j += FA_WI_PER_ROW) {
-                float ev = native_exp(S_loc[qi * FA_BK + j] - comb_m);
-                S_loc[qi * FA_BK + j] = ev;
-                pl += ev;
-            }
+            if (active)
+                for (int j = lane; j < bk; j += FA_WI_PER_ROW) {
+                    float ev = isinf(comb_m) ? 0.0f : native_exp(S_loc[qi * FA_BK + j] - comb_m);
+                    S_loc[qi * FA_BK + j] = ev;
+                    pl += ev;
+                }
             red[lid] = pl;
             barrier(CLK_LOCAL_MEM_FENCE);
             if (lane < 8) red[rbase + lane] += red[rbase + lane + 8];
@@ -1123,7 +1138,7 @@ void lfm2_flash_attn_prefill(
             if (lane < 1) red[rbase + lane] += red[rbase + lane + 1];
             barrier(CLK_LOCAL_MEM_FENCE);
 
-            if (lane == 0) {
+            if (active && lane == 0) {
                 m_loc[qi] = comb_m;
                 l_loc[qi] = l_loc[qi] * alpha + red[rbase];
             }
@@ -1356,12 +1371,24 @@ void siglip_flash_attn_prefill(
         }
         barrier(CLK_LOCAL_MEM_FENCE);
 
-        if (my_row < bq) {
-            const int qi = my_row;
-            const int rbase = qi * SFA_WI_PER_ROW;
+        // EVERY work item must reach EVERY barrier below. This block used to be
+        // wrapped in `if (my_row < bq)`, which is NOT uniform across the workgroup
+        // whenever q_rows is not a multiple of 4 (the tail block has bq < 4),
+        // so rows >= bq skipped nine barriers the other rows waited on. That is
+        // undefined behaviour; on Mali-G57 it produced NaN logits for the whole
+        // prefill. It hid for so long because every prompt tested happened to
+        // tokenize to a multiple of 4 -- 16 tokens works, 38 does not.
+        // `active` now gates the memory effects; the barriers are unconditional.
+        // Inactive rows still write their OWN red[] slots (distinct rbase), so no
+        // active row ever reads a stale value.
+        {
+            const bool active = (my_row < bq);
+            const int qi = active ? my_row : 0;
+            const int rbase = my_row * SFA_WI_PER_ROW;
             float lmax = -INFINITY;
-            for (int j = lane; j < bk; j += SFA_WI_PER_ROW)
-                lmax = fmax(lmax, S_loc[qi * SFA_BK + j]);
+            if (active)
+                for (int j = lane; j < bk; j += SFA_WI_PER_ROW)
+                    lmax = fmax(lmax, S_loc[qi * SFA_BK + j]);
             red[lid] = lmax;
             barrier(CLK_LOCAL_MEM_FENCE);
             if (lane < 8) red[rbase + lane] = fmax(red[rbase + lane], red[rbase + lane + 8]);
@@ -1374,14 +1401,15 @@ void siglip_flash_attn_prefill(
             barrier(CLK_LOCAL_MEM_FENCE);
 
             float new_m = red[rbase];
-            float old_m = m_loc[qi];
+            float old_m = active ? m_loc[qi] : -INFINITY;
             float comb_m = fmax(old_m, new_m);
             // Guard for all-masked tile (new_m == -INFINITY): alpha = 1, no
             // updates this iteration.
             float alpha = (comb_m == -INFINITY) ? 1.0f : native_exp(old_m - comb_m);
 
-            for (int d = lane; d < SFA_HD; d += SFA_WI_PER_ROW)
-                O_loc[qi * SFA_HD + d] *= alpha;
+            if (active)
+                for (int d = lane; d < SFA_HD; d += SFA_WI_PER_ROW)
+                    O_loc[qi * SFA_HD + d] *= alpha;
 
             float pl = 0.0f;
             for (int j = lane; j < bk; j += SFA_WI_PER_ROW) {
@@ -1401,7 +1429,7 @@ void siglip_flash_attn_prefill(
             if (lane < 1) red[rbase + lane] += red[rbase + lane + 1];
             barrier(CLK_LOCAL_MEM_FENCE);
 
-            if (lane == 0) {
+            if (active && lane == 0) {
                 m_loc[qi] = comb_m;
                 l_loc[qi] = l_loc[qi] * alpha + red[rbase];
             }
