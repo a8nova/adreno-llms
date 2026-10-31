@@ -90,7 +90,16 @@ extern "C" cl_mem op_Embedding(OpenCLContext& cl_ctx,
     cl_kernel k = nullptr;
     bool ok = false;
     if (table_is_int8 && scales) {
-        k = clCreateKernel(p, "gather_embedding_int8", &err);
+        // Cached for the process lifetime. This used to clCreateKernel here and
+        // clReleaseKernel right after the enqueue below -- with NNOPT_DEBUG_SYNC
+        // compiled to a no-op in release, the kernel object was released while
+        // its dispatch was still only QUEUED. Debug builds inserted a clFinish
+        // and were correct; release builds produced garbage on both Adreno and
+        // Mali. Caching removes the lifetime hazard and the per-token
+        // clCreateKernel cost at the same time.
+        static cl_kernel k_i8 = nullptr;
+        if (!k_i8) k_i8 = clCreateKernel(p, "gather_embedding_int8", &err);
+        k = k_i8;
         if (err != CL_SUCCESS || !k) {
             NNOPT_ERROR_FMT("op_Embedding: clCreateKernel(gather_embedding_int8) failed (%d)", (int)err);
             clReleaseMemObject(out);
@@ -104,7 +113,9 @@ extern "C" cl_mem op_Embedding(OpenCLContext& cl_ctx,
              set_arg_local(k, 5, sizeof(int), &hidden_size, "hidden") &&
              lfm2_kernel1(queue, k, out_elems, "op_embedding_int8");
     } else {
-        k = clCreateKernel(p, "gather_embedding", &err);
+        static cl_kernel k_f16 = nullptr;
+        if (!k_f16) k_f16 = clCreateKernel(p, "gather_embedding", &err);
+        k = k_f16;
         if (err != CL_SUCCESS || !k) {
             NNOPT_ERROR_FMT("op_Embedding: clCreateKernel(gather_embedding) failed (%d)", (int)err);
             clReleaseMemObject(out);
@@ -117,7 +128,7 @@ extern "C" cl_mem op_Embedding(OpenCLContext& cl_ctx,
              set_arg_local(k, 4, sizeof(int), &hidden_size, "hidden") &&
              lfm2_kernel1(queue, k, out_elems, "op_embedding");
     }
-    clReleaseKernel(k);
+    // NOT released: k is a cached static (see above).
     if (!ok) {
         clReleaseMemObject(out);
         return nullptr;

@@ -161,6 +161,27 @@ bool Model::ensure_caches(int max_seq_len) {
 
     NNOPT_CHECKPOINT_FMT("Model::ensure_caches: allocated KV cache (max_seq=%d, kv_dim=%d) + conv bx cache (pad=%d, hidden=%d)",
                          max_seq_len, kv_heads * head_dim, pad, hidden);
+    // clCreateBuffer does not promise zeroed contents.
+    if (!reset_recurrent_state(cl_ctx_.queue())) return false;
+    return true;
+}
+
+bool Model::reset_recurrent_state(cl_command_queue queue) {
+    if (!queue) return false;
+    const size_t bytes = (size_t)conv_pad_ * (size_t)MODEL_CONFIG::HIDDEN_SIZE
+                         * sizeof(nnopt_storage_t);
+    if (bytes == 0) return true;
+    const unsigned char zero = 0;
+    for (size_t i = 0; i < conv_bx_cache_.size(); ++i) {
+        cl_mem b = conv_bx_cache_[i];
+        if (!b) continue;
+        cl_int err = clEnqueueFillBuffer(queue, b, &zero, sizeof(zero), 0, bytes,
+                                         0, nullptr, nullptr);
+        if (err != CL_SUCCESS) {
+            NNOPT_ERROR_FMT("Model::reset_recurrent_state: fill conv_bx[%zu] failed (%d)", i, (int)err);
+            return false;
+        }
+    }
     return true;
 }
 
@@ -170,7 +191,18 @@ bool Model::update_counter(cl_command_queue queue, int start_pos, int k_rows) {
         return false;
     }
     int data[4] = { start_pos, k_rows, 0, 0 };
-    cl_int err = clEnqueueWriteBuffer(queue, counter_buf_, CL_FALSE, 0,
+    // BLOCKING on purpose. `data` is a stack local, and a non-blocking write only
+    // promises to have consumed the host pointer once the command completes --
+    // the caller must keep it alive until then. With CL_FALSE this function
+    // returned immediately and the stack slot was reused, so the driver was free
+    // to DMA whatever happened to be there. Adreno copies a 16-byte write into
+    // the command buffer inline and never noticed; Mali defers it and read the
+    // dead frame, which left rope / kv_write / flash_attn_decode /
+    // depthwise_conv3 reading a stale position for every decode step. Every step
+    // then recomputed the same thing, so the logits never changed and the
+    // sampler drew word soup from one frozen distribution.
+    // 16 bytes once per token -- the sync is not measurable.
+    cl_int err = clEnqueueWriteBuffer(queue, counter_buf_, CL_TRUE, 0,
                                       sizeof(data), data, 0, nullptr, nullptr);
     if (err != CL_SUCCESS) {
         NNOPT_ERROR_FMT("Model::update_counter: clEnqueueWriteBuffer failed (%d)", (int)err);
@@ -468,12 +500,35 @@ bool Model::init_argmax() {
     if (err != CL_SUCCESS) return false;
     err = clBuildProgram(argmax_prog_, 1, &dev, "-cl-fast-relaxed-math", nullptr, nullptr);
     if (err != CL_SUCCESS) {
+        size_t log_sz = 0;
+        clGetProgramBuildInfo(argmax_prog_, dev, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_sz);
+        if (log_sz > 0) {
+            std::vector<char> blog(log_sz + 1, 0);
+            clGetProgramBuildInfo(argmax_prog_, dev, CL_PROGRAM_BUILD_LOG, log_sz, blog.data(), nullptr);
+            NNOPT_ERROR_FMT("argmax.cl clBuildProgram failed (%d): %s", (int)err, blog.data());
+        } else {
+            NNOPT_ERROR_FMT("argmax.cl clBuildProgram failed (%d), no build log", (int)err);
+        }
         clReleaseProgram(argmax_prog_); argmax_prog_ = nullptr; return false;
     }
     argmax_block_k_ = clCreateKernel(argmax_prog_, "argmax_block", &err);
     if (err != CL_SUCCESS) { argmax_block_k_ = nullptr; return false; }
     argmax_final_k_ = clCreateKernel(argmax_prog_, "argmax_final", &err);
     if (err != CL_SUCCESS) { argmax_final_k_ = nullptr; return false; }
+
+    // Every dispatch in this port hardcodes its local size. If the device caps a
+    // kernel below that, clEnqueueNDRangeKernel fails and (before the checks
+    // above) did so silently. Report the real limits once.
+    {
+        size_t wg_block = 0, wg_final = 0;
+        cl_ulong pm_block = 0, pm_final = 0;
+        clGetKernelWorkGroupInfo(argmax_block_k_, dev, CL_KERNEL_WORK_GROUP_SIZE, sizeof(wg_block), &wg_block, nullptr);
+        clGetKernelWorkGroupInfo(argmax_final_k_, dev, CL_KERNEL_WORK_GROUP_SIZE, sizeof(wg_final), &wg_final, nullptr);
+        clGetKernelWorkGroupInfo(argmax_block_k_, dev, CL_KERNEL_PRIVATE_MEM_SIZE, sizeof(pm_block), &pm_block, nullptr);
+        clGetKernelWorkGroupInfo(argmax_final_k_, dev, CL_KERNEL_PRIVATE_MEM_SIZE, sizeof(pm_final), &pm_final, nullptr);
+        NNOPT_ERROR_FMT("CAPS: argmax_block max_wg=%zu priv=%llu | argmax_final max_wg=%zu priv=%llu | dispatched lws=64",
+                        wg_block, (unsigned long long)pm_block, wg_final, (unsigned long long)pm_final);
+    }
 
     const int V = MODEL_CONFIG::VOCAB_SIZE;
     const int CHUNK = 1024;
@@ -506,7 +561,19 @@ bool Model::forward_greedy(const std::vector<int32_t>& input_ids, int start_pos)
     clSetKernelArg(argmax_block_k_, 3, sizeof(int), &V);
     size_t gws1 = (size_t)num_wg * 64;
     size_t lws1 = 64;
-    clEnqueueNDRangeKernel(queue, argmax_block_k_, 1, nullptr, &gws1, &lws1, 0, nullptr, nullptr);
+    // These two dispatches CHOOSE THE OUTPUT TOKEN. If either fails, the readback
+    // below returns whatever stale value argmax_result_ happens to hold and the
+    // model emits an arbitrary token -- silently, and at no cost in time. That is
+    // indistinguishable from "the port is fast but incoherent", so check them.
+    {
+        cl_int ae = clEnqueueNDRangeKernel(queue, argmax_block_k_, 1, nullptr, &gws1, &lws1, 0, nullptr, nullptr);
+        if (ae != CL_SUCCESS) {
+            NNOPT_ERROR_FMT("argmax_block dispatch failed (%d) gws=%zu lws=%zu num_wg=%d V=%d -- TOKEN IS GARBAGE",
+                            (int)ae, gws1, lws1, num_wg, V);
+            clReleaseMemObject(logits_buf);
+            return false;
+        }
+    }
 
     clSetKernelArg(argmax_final_k_, 0, sizeof(cl_mem), &argmax_partials_val_);
     clSetKernelArg(argmax_final_k_, 1, sizeof(cl_mem), &argmax_partials_idx_);
@@ -514,7 +581,15 @@ bool Model::forward_greedy(const std::vector<int32_t>& input_ids, int start_pos)
     clSetKernelArg(argmax_final_k_, 3, sizeof(int), &num_wg);
     size_t gws2 = 64;
     size_t lws2 = 64;
-    clEnqueueNDRangeKernel(queue, argmax_final_k_, 1, nullptr, &gws2, &lws2, 0, nullptr, nullptr);
+    {
+        cl_int ae = clEnqueueNDRangeKernel(queue, argmax_final_k_, 1, nullptr, &gws2, &lws2, 0, nullptr, nullptr);
+        if (ae != CL_SUCCESS) {
+            NNOPT_ERROR_FMT("argmax_final dispatch failed (%d) gws=%zu lws=%zu num_wg=%d -- TOKEN IS GARBAGE",
+                            (int)ae, gws2, lws2, num_wg);
+            clReleaseMemObject(logits_buf);
+            return false;
+        }
+    }
 
     if (argmax_readback_evt_) { clReleaseEvent(argmax_readback_evt_); argmax_readback_evt_ = nullptr; }
     clEnqueueReadBuffer(queue, argmax_result_, CL_FALSE, 0, sizeof(int),

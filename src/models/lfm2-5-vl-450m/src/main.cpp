@@ -90,6 +90,30 @@ static bool read_input_ids_bin(const std::string& path, std::vector<int32_t>& ou
     return f.good() || f.eof();
 }
 
+// Prior conversation turns, written by the host. Same length-delimited format the
+// granite engine reads (see its main.cpp): one record per turn,
+//   <role 'U'|'A'> <byte-length>\n<content bytes>\n
+// so content needs no escaping. Empty/unreadable path => single-turn behaviour.
+static std::vector<Tokenizer::ChatMsg> load_history_msgs(const std::string& path) {
+    std::vector<Tokenizer::ChatMsg> turns;
+    if (path.empty()) return turns;
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return turns;
+    while (true) {
+        int role = fgetc(f);
+        while (role == '\n' || role == '\r' || role == ' ') role = fgetc(f);
+        if (role == EOF) break;
+        long len = -1;
+        if (fscanf(f, "%ld", &len) != 1 || len < 0) break;
+        fgetc(f);  // the single '\n' before the content bytes
+        std::string content((size_t)len, '\0');
+        if (len > 0 && fread(&content[0], 1, (size_t)len, f) != (size_t)len) break;
+        turns.push_back({ (char)(role == 'A' ? 'A' : 'U'), content });
+    }
+    fclose(f);
+    return turns;
+}
+
 int main(int argc, char** argv) {
     // (No version banner — debug_utils does not define one, and emitting an
     // undefined macro here was breaking every fresh-port build.)
@@ -100,6 +124,9 @@ int main(int argc, char** argv) {
     std::string token_ids_path;
 
     std::string image_path;  // --image <file.jpg|.png> for VLM inference
+    std::string system_prompt;   // --system "<text>"   (optional)
+    std::string history_file;    // --history <file>    (prior turns; empty = single turn)
+    bool chat_mode = false;      // --chat (bare flag)
     bool interactive_mode = false;  // --interactive: stdin REPL with /image, /reset (host-app describeImage contract)
 
     SamplerConfig sampler_config;
@@ -132,6 +159,16 @@ int main(int argc, char** argv) {
                 max_new_tokens = std::stoi(argv[++i]);
             } else if (a == "--image-size" && i + 1 < argc) {
                 ++i;  // accepted for app compatibility; LFM2-VL uses fixed TILE_SIZE (512)
+            } else if (a == "--system" && i + 1 < argc) {
+                // Host chat contract (same shape the granite engine implements):
+                //   bin <prompt> <maxTok> [--chat] [--system S] [--history F] ...
+                // These were previously swallowed by the unknown-flag skipper, so the
+                // system prompt AND the whole conversation were silently dropped.
+                system_prompt = argv[++i];
+            } else if (a == "--history" && i + 1 < argc) {
+                history_file = argv[++i];
+            } else if (a == "--chat") {
+                chat_mode = true;  // bare flag, takes no value
             } else if (a.rfind("--", 0) == 0) {
                 // Unknown flag — skip the value too if present.
                 if (i + 1 < argc && argv[i + 1][0] != '-') ++i;
@@ -374,8 +411,14 @@ int main(int argc, char** argv) {
                                                    tile_tokens_sq, use_thumbnail,
                                                    /*add_generation_prompt=*/true);
             } else {
-                const std::vector<int> enc = tok.encode(line);
-                prompt_ids.assign(enc.begin(), enc.end());
+                // Text-only turn: SAME chat template, just no <image> tokens.
+                // A raw encode() feeds the instruction-tuned model a bare
+                // sentence with no <|im_start|>user / assistant wrapper, so it
+                // continues the text instead of answering it.
+                std::vector<Tokenizer::ChatMsg> msgs;
+                if (!system_prompt.empty()) msgs.push_back({'S', system_prompt});
+                msgs.push_back({'U', line});
+                prompt_ids = tok.encode_chat(msgs, /*add_generation_prompt=*/true);
             }
             if (prompt_ids.empty()) { std::fprintf(stderr, "tokenize produced no ids\n"); continue; }
 
@@ -469,8 +512,18 @@ int main(int argc, char** argv) {
                   << " tokens (grid=" << grid_h << "x" << grid_w
                   << ", thumb=" << thumb_h << "x" << thumb_w << ")" << std::endl;
     } else {
-        const std::vector<int> encoded = tok.encode(prompt);
-        prompt_ids.assign(encoded.begin(), encoded.end());
+        // Text-only: the FULL conversation, not just this turn. Previously the
+        // system prompt and every prior turn were dropped, so a follow-up was
+        // sent as an isolated user message.
+        std::vector<Tokenizer::ChatMsg> msgs;
+        if (!system_prompt.empty()) msgs.push_back({'S', system_prompt});
+        for (const auto& t : load_history_msgs(history_file)) msgs.push_back(t);
+        msgs.push_back({'U', prompt});
+        prompt_ids = tok.encode_chat(msgs, /*add_generation_prompt=*/true);
+        std::cerr << "[main] chat=" << (chat_mode ? 1 : 0)
+                  << " system_bytes=" << system_prompt.size()
+                  << " history_turns=" << (msgs.size() - 1 - (system_prompt.empty() ? 0 : 1))
+                  << " -> " << prompt_ids.size() << " tokens" << std::endl;
     }
     const size_t prompt_len = prompt_ids.size();
     std::vector<float> wav_samples;
@@ -479,6 +532,7 @@ int main(int argc, char** argv) {
     // Single batched prefill, then per-token decode. GPU argmax for greedy
     // (temp=0): replaces 128KB host readback with 4-byte readback per step.
     const bool greedy = (sampler_config.temperature <= 0.0f);
+    const int32_t batch_im_end_id = tok.token_to_id("<|im_end|>");
     bench.mark_prefill_start();
     // Prefill always uses full logits path (needed for first sample + debug).
     std::vector<float> logits = model.forward(prompt_ids, /*start_pos=*/0);
@@ -496,7 +550,11 @@ int main(int argc, char** argv) {
         NNOPT_BENCH_FIRST_TOKEN();
         generated_so_far.push_back(next);
         prompt_ids.push_back(next);
-        if (sampler_config.eos_token_id >= 0 && next == sampler_config.eos_token_id) break;
+        // Stop on the chat turn terminator as well as eos. The REPL path has
+        // always checked both; this one did not, so a wrong eos id was enough
+        // to run past the end of the answer.
+        if ((sampler_config.eos_token_id >= 0 && next == sampler_config.eos_token_id) ||
+            (batch_im_end_id >= 0 && next == batch_im_end_id)) break;
         std::cout << tok.decode(std::vector<int32_t>{next}) << std::flush;
         if (step + 1 < max_new_tokens) {
             const int decode_start_pos = (int)prompt_len + step;
@@ -514,12 +572,17 @@ int main(int argc, char** argv) {
     // comparison apples-to-apples with reference_tokens.json::generated_text.
     if (prompt_ids.size() > prompt_len) {
         const std::vector<int32_t> generated_ids(prompt_ids.begin() + prompt_len, prompt_ids.end());
+        // stderr, NOT stdout. stdout is the token stream the host app renders
+        // straight into the chat bubble, so this eval-harness summary was being
+        // shown to users as part of the model's reply. BENCHMARK lines already
+        // go to stderr for the same reason, and `adb shell` merges both streams
+        // into the CI log, so scripts/ci/_cmp_*.py still parse it.
         if (tokenizer_ok) {
-            std::cout << "GENERATED_TEXT: " << tok.decode(generated_ids) << std::endl;
+            std::cerr << "GENERATED_TEXT: " << tok.decode(generated_ids) << std::endl;
         } else {
-            std::cout << "GENERATED_IDS:";
-            for (int32_t id : generated_ids) std::cout << " " << id;
-            std::cout << std::endl;
+            std::cerr << "GENERATED_IDS:";
+            for (int32_t id : generated_ids) std::cerr << " " << id;
+            std::cerr << std::endl;
         }
     }
     // Per-kernel GPU profile (env NNOPT_PROFILE=1). Dormant by default;

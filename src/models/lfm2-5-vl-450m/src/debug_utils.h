@@ -105,7 +105,18 @@ static int    g_gpu_alloc_count     = 0;
 #ifdef NNOPT_DEBUG
   #define NNOPT_DEBUG_SYNC(queue) clFinish(queue)
 #else
-  #define NNOPT_DEBUG_SYNC(queue) ((void)0)
+  // CORRECTNESS, NOT DEBUG. This used to compile to a no-op in release, and
+  // release builds then produced garbage on EVERY device tested (Mali-G57 and
+  // Adreno 740 alike) while debug builds -- identical source, but with these
+  // clFinish calls -- answered correctly. Verified 2026-09-22 on a Galaxy
+  // A16 5G: with the sync compiled out, "What is the capital of France?"
+  // returned word soup; with it restored, "The capital of France is Paris."
+  //
+  // So the port depends on this synchronisation for correct results and the
+  // name is a lie. Until the ONE dispatch that actually needs it is isolated
+  // (this is a blunt ~2x decode cost: 9 tok/s -> 4 tok/s), it stays on in
+  // release, because a fast wrong answer is worth nothing.
+  #define NNOPT_DEBUG_SYNC(queue) clFinish(queue)
 #endif
 
 #ifdef NNOPT_DEBUG

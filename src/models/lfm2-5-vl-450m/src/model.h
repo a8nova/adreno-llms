@@ -75,6 +75,15 @@ public:
     cl_mem kv_K_cache(int layer_idx) const;
     cl_mem kv_V_cache(int layer_idx) const;
     cl_mem conv_bx_cache(int layer_idx) const;
+
+    // Zero the depthwise-conv (recurrent) state. MUST run before every fresh
+    // sequence: start_pos=0 rewinds the KV cache implicitly, but the conv
+    // state is a rolling window that carries the PREVIOUS turn's tail, so
+    // turn 2 onwards decodes from poisoned state. The buffers are also
+    // allocated uninitialized, so turn 1 depends on whether the driver
+    // happens to hand back zeroed pages -- which Adreno tends to and Mali
+    // does not.
+    bool reset_recurrent_state(cl_command_queue queue);
     int max_kv_seq() const { return max_kv_seq_; }
     int conv_pad() const { return conv_pad_; }
     bool caches_ready() const { return max_kv_seq_ > 0; }

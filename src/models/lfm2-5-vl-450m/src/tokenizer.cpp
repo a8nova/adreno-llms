@@ -264,9 +264,21 @@ bool Tokenizer::load(const std::string& vocab_path) {
         merges_.emplace_back(std::move(a), std::move(b));
     }
 
-    bos_id_ = 2;
-    eos_id_ = 2;
-    pad_id_ = 2;
+    // Resolve the special ids from the vocab that was just loaded instead of
+    // hardcoding them. These were all pinned to 2, which is <|endoftext|> --
+    // a token this chat model never emits. eos_id_ feeds the one-shot decode
+    // loop's ONLY stop condition, so generation ran past the end of the turn
+    // every time: the model emitted <|im_end|> (7), nothing matched, and it
+    // kept sampling from a finished conversation. Per the model's own
+    // tokenizer_config.json: bos=<|startoftext|>=1, eos=<|im_end|>=7,
+    // pad=<|pad|>=0. Fall back to the old constant only if a lookup fails.
+    auto special_or = [this](const char* name, int32_t fallback) -> int32_t {
+        const int32_t id = token_to_id(name);
+        return (id >= 0) ? id : fallback;
+    };
+    bos_id_ = special_or("<|startoftext|>", 2);
+    eos_id_ = special_or("<|im_end|>", 2);
+    pad_id_ = special_or("<|pad|>", 2);
     return true;
 }
 
@@ -466,6 +478,35 @@ static std::vector<int32_t> bytelevel_greedy_encode(
         }
         out.push_back(best_id);
         i += best_len;
+    }
+    return out;
+}
+
+std::vector<int32_t> Tokenizer::encode_chat(const std::vector<ChatMsg>& msgs,
+                                            bool add_generation_prompt) const {
+    const int32_t bos      = token_to_id("<|startoftext|>");
+    const int32_t im_start = token_to_id("<|im_start|>");
+    const int32_t im_end   = token_to_id("<|im_end|>");
+    const std::vector<int32_t> nl = bytelevel_greedy_encode("\n", token_to_id_);
+
+    std::vector<int32_t> out;
+    if (bos >= 0) out.push_back(bos);
+    auto append = [&](const std::vector<int32_t>& v) { out.insert(out.end(), v.begin(), v.end()); };
+    auto role_name = [](char r) -> const char* {
+        return (r == 'S') ? "system" : ((r == 'A') ? "assistant" : "user");
+    };
+    for (const auto& m : msgs) {
+        if (im_start >= 0) out.push_back(im_start);
+        append(bytelevel_greedy_encode(role_name(m.role), token_to_id_));
+        append(nl);
+        append(bytelevel_greedy_encode(m.content, token_to_id_));
+        if (im_end >= 0) out.push_back(im_end);
+        append(nl);
+    }
+    if (add_generation_prompt) {
+        if (im_start >= 0) out.push_back(im_start);
+        append(bytelevel_greedy_encode("assistant", token_to_id_));
+        append(nl);
     }
     return out;
 }

@@ -160,6 +160,16 @@ std::vector<float> model_forward_graph(OpenCLContext& cl_ctx,
                 NNOPT_ERROR("model_forward_graph: Model::ensure_caches failed");
                 return std::vector<float>(MODEL_CONFIG::VOCAB_SIZE, 0.0f);
             }
+            // A prefill starts a NEW sequence. start_pos=0 rewinds the KV cache
+            // implicitly (nothing reads past k_rows), but the depthwise-conv
+            // state is a rolling window that still holds the previous turn's
+            // tail, so without this every turn after the first decodes from
+            // poisoned state and collapses into a repeated token.
+            if (start_pos == 0 && !m->reset_recurrent_state(queue)) {
+                clReleaseMemObject(ids_buf);
+                NNOPT_ERROR("model_forward_graph: reset_recurrent_state failed");
+                return std::vector<float>(MODEL_CONFIG::VOCAB_SIZE, 0.0f);
+            }
             // Track 5 — write {start_pos, k_rows} into the persistent counter
             // buffer that the rope / kv_write / flash_attn_decode /
             // depthwise_conv3 kernels now read from. CL_FALSE — in-order queue

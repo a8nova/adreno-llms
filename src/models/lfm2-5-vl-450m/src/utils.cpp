@@ -47,6 +47,12 @@ struct WImageEntry { cl_mem image = nullptr; std::vector<WImageTile> tiles; };
 static std::unordered_map<cl_mem, WImageEntry> s_w_image_cache;
 static std::unordered_map<cl_mem, char>        s_w_image_skip;
 static bool   s_img_limits_known = false;
+// Set when an image-backed dispatch fails at ENQUEUE time (e.g. Mali returns
+// CL_OUT_OF_RESOURCES for an image2d_t created over a buffer). Once set, every
+// image path is abandoned for the rest of the run and callers use the buffer
+// GEMV instead -- previously the same doomed dispatch was retried for every
+// layer of every token, forever.
+static bool   s_image_path_disabled = false;
 static size_t s_img_max_w = 0, s_img_max_h = 0;
 
 static bool ensure_gemv_m1_image_program(cl_command_queue queue) {
@@ -133,6 +139,7 @@ static bool ensure_gemv_fused_image_program(cl_command_queue queue) {
 // on Adreno 620 (max image height = 16384).
 static const WImageEntry* get_or_create_w_image(cl_command_queue queue, cl_mem W, int N, int K) {
     static const WImageEntry kEmpty;
+    if (s_image_path_disabled) return &kEmpty;
     auto it = s_w_image_cache.find(W);
     if (it != s_w_image_cache.end()) return &it->second;
     if (s_w_image_skip.count(W)) return &kEmpty;
@@ -147,6 +154,18 @@ static const WImageEntry* get_or_create_w_image(cl_command_queue queue, cl_mem W
         clGetDeviceInfo(dev, CL_DEVICE_IMAGE2D_MAX_WIDTH,  sizeof(s_img_max_w), &s_img_max_w, nullptr);
         clGetDeviceInfo(dev, CL_DEVICE_IMAGE2D_MAX_HEIGHT, sizeof(s_img_max_h), &s_img_max_h, nullptr);
         s_img_limits_known = true;
+        // image2d-from-buffer carries alignment requirements that Adreno satisfies
+        // trivially and other vendors do not. Report them once, loudly, so a single
+        // device log says whether the texture path can work here at all.
+        {
+            cl_uint pitch_align = 0, base_align = 0;
+            size_t  max_wg = 0;
+            clGetDeviceInfo(dev, CL_DEVICE_IMAGE_PITCH_ALIGNMENT, sizeof(pitch_align), &pitch_align, nullptr);
+            clGetDeviceInfo(dev, CL_DEVICE_IMAGE_BASE_ADDRESS_ALIGNMENT, sizeof(base_align), &base_align, nullptr);
+            clGetDeviceInfo(dev, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(max_wg), &max_wg, nullptr);
+            NNOPT_ERROR_FMT("CAPS: image2d max_w=%zu max_h=%zu pitch_align=%u base_align=%u max_wg=%zu",
+                            s_img_max_w, s_img_max_h, (unsigned)pitch_align, (unsigned)base_align, max_wg);
+        }
         if (const char* d = std::getenv("NNOPT_DEBUG_LAYERS"); d && d[0] != '0') {
             fprintf(stderr, "Adreno image2d limits: max_w=%zu max_h=%zu\n", s_img_max_w, s_img_max_h);
         }
@@ -240,7 +259,11 @@ static bool run_gemv_m1_image(cl_command_queue queue, int N, int K, cl_mem W, cl
         size_t lws = WG;
         cl_event* evt = KernelProfiler::event_for(lbl);
         err = clEnqueueNDRangeKernel(queue, k, 1, nullptr, &gws, &lws, 0, nullptr, evt);
-        if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("gemv_m1_image enqueue: %d (K=%d N=%d)", err, K, N); return false; }
+        if (err != CL_SUCCESS) {
+            NNOPT_ERROR_FMT("gemv_m1_image enqueue: %d (K=%d N=%d) -- DISABLING image path, falling back to buffer GEMV", err, K, N);
+            s_image_path_disabled = true;
+            return false;
+        }
         return true;
     }
 
@@ -264,7 +287,12 @@ static bool run_gemv_m1_image(cl_command_queue queue, int N, int K, cl_mem W, cl
         cl_event* evt = KernelProfiler::event_for(lbl);
         err = clEnqueueNDRangeKernel(queue, k, 1, nullptr, &gws, &lws, 0, nullptr, evt);
         clReleaseMemObject(out_sub);
-        if (err != CL_SUCCESS) { NNOPT_ERROR_FMT("tile dispatch: %d", err); return false; }
+        if (err != CL_SUCCESS) {
+            NNOPT_ERROR_FMT("gemv_m1_image tile dispatch: %d -- DISABLING image path", err);
+            s_image_path_disabled = true;
+            clReleaseMemObject(out_sub);
+            return false;
+        }
     }
     return true;
 }
@@ -444,6 +472,7 @@ static bool prepare_int8_entry(cl_command_queue queue, cl_mem W) {
     if (it == s_int8_aux.end()) return false;
     Int8Aux& a = it->second;
     if (a.image || !a.tiles.empty()) return true;  // already prepared
+    if (s_image_path_disabled) return false;
 
     cl_context   ctx = nullptr;
     cl_device_id dev = nullptr;
