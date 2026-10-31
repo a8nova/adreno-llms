@@ -287,7 +287,13 @@ static void run_turn(DeviceModel& model, Tokenizer& tok, const Nnb& nnb, VlmSess
     // Context is finite (CTX_CAP). When the transcript no longer fits, drop it and keep the CURRENT
     // question — answering the new question without history beats refusing, and silently letting pos
     // run past the cap would corrupt every later turn.
-    const int need = (int)pre.size() + n_img + (int)post.size() + n_gen;
+    //
+    // The reply is guaranteed at most half the context, not all of n_gen: the decode loop stops at
+    // CTX_CAP anyway. Reserving the whole cap meant that with Max tokens near the context size (the
+    // slider top) any history past a few hundred tokens was dropped, and the follow-up to a long
+    // reply forgot it.
+    const int reply_room = std::min(n_gen, DeviceModel::CTX_CAP / 2);
+    const int need = (int)pre.size() + n_img + (int)post.size() + reply_room;
     if (s.pos + need > DeviceModel::CTX_CAP) {
         fprintf(stderr, "[vlm] context full (%d used + %d needed > %d) — dropping history\n",
                 s.pos, need, DeviceModel::CTX_CAP);
@@ -315,7 +321,17 @@ static void run_turn(DeviceModel& model, Tokenizer& tok, const Nnb& nnb, VlmSess
     model.set_mrope(s.thw);
 
     auto t0 = clk::now();
-    for (int id : pre) model.forward(id, s.pos++, false);
+    // Progress while reading: replaying a long transcript after a respawn runs one token per forward
+    // and prints nothing else, and the app gives up on an engine that stays silent for 5 minutes.
+    auto last = t0;
+    for (size_t i = 0; i < pre.size(); ++i) {
+        model.forward(pre[i], s.pos++, false);
+        if (clk::now() - last > std::chrono::seconds(5)) {
+            fprintf(stderr, "[prefill] %zu/%zu\n", i + 1, pre.size());
+            fflush(stderr);
+            last = clk::now();
+        }
+    }
     const auto tp0 = clk::now();
     // Batched image prefill sweeps the weights once per chunk instead of once per token, but it is
     // OFF by default: it can only be judged on the target part, and on a 1-CU device the shipped
