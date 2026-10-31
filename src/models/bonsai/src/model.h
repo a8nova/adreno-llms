@@ -22,6 +22,7 @@
 #include "nnb.h"             // Nnb / Tensor / ModelMeta
 #include "q1.h"              // half_to_float / float_to_half
 #include "opencl_context.h"
+#include "long_ctx_diag.h"
 
 // BONSAI_PROF=1: clFinish-bracketed wall time per op family (the honest
 // profile — CL event times on CLBlast-style multi-kernel ops undercount).
@@ -63,7 +64,16 @@ struct OpProf {
 
 class DeviceModel {
   public:
-    static constexpr int CTX_CAP = 2048;
+    // Context length, fixed for the life of the process: 2048 unless BONSAI_CTX asks for more, and
+    // clamped in the constructor to what fits beside the weights in global memory. The KV cache is
+    // allocated for all of it up front, so memory does not grow while generating.
+    static constexpr int CTX_DEFAULT = 2048;
+    static inline int CTX_CAP = CTX_DEFAULT;
+
+    // Long-context diagnostics (BONSAI_KPROF / BONSAI_ATTN2), off unless their env var is set.
+    lcd::KProf kprof_;
+    lcd::Attn2 attn2_;
+    int attn_seq_k_ = 0;   // seq_k of the latest run_scores, for the split attn-out candidate
     static constexpr int M_MAX = 8;
 #ifdef BONSAI_FP16_STORAGE
     static constexpr size_t ES = 2;    // storage_t = half on device
@@ -114,6 +124,7 @@ class DeviceModel {
     QW upload_q1_fused(const std::vector<std::string>& names);
     QW upload_q1(const std::string& n);
     void upload_weights();
+    void choose_context();
     void make_scratch();
     void make_rope_tables();
 
@@ -123,13 +134,13 @@ class DeviceModel {
     }
     void run1(cl_kernel k, size_t gws, size_t lws, const char* what) {
         CLCHECK(clEnqueueNDRangeKernel(ocl_.queue(), k, 1, nullptr, &gws,
-                                       lws ? &lws : nullptr, 0, nullptr, nullptr),
+                                       lws ? &lws : nullptr, 0, nullptr, kprof_.next(k)),
                 what);
     }
     void run2(cl_kernel k, size_t g0, size_t g1, const char* what) {
         size_t g[2] = {g0, g1};
         CLCHECK(clEnqueueNDRangeKernel(ocl_.queue(), k, 2, nullptr, g, nullptr,
-                                       0, nullptr, nullptr), what);
+                                       0, nullptr, kprof_.next(k)), what);
     }
     void run_gemv_b(QW& W, cl_mem x, cl_mem out, int N, int K, int Ntot,
                     int row_off, int M);

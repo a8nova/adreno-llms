@@ -577,6 +577,69 @@ static int vlm_main(int argc, char** argv, Tokenizer& tok, const Nnb& nnb,
 }
 #endif  // BONSAI_VISION
 
+// Decode speed at a given context depth, without paying to prefill that depth first.
+//
+// Prefill is one forward per token, so actually reaching 16K tokens takes hours; a device farm test
+// gets 45 minutes. Per-token decode cost depends on HOW MANY keys attention reads (pos+1), not on
+// what they hold, so starting the pipelined decode loop at pos=d over a cache nobody wrote measures
+// the cost of token d+1 of a real reply. The text it produces is meaningless; only the clock is
+// read. Test-only: nothing in Edgi sets BONSAI_DEPTH_BENCH.
+//   BONSAI_DEPTH_BENCH="0,4096,8192,16128"  BONSAI_DEPTH_BENCH_N=64 (tokens timed per depth, for
+//   prefill and then decode)
+static int depth_bench(DeviceModel& model, OpenCLContext& ocl, Tokenizer& tok, const ModelMeta& mm,
+                       const char* spec) {
+    using clk = std::chrono::steady_clock;
+    lcd::bw_bench(ocl.context(), ocl.device(), ocl.queue());
+    int n_attn = 0;
+    for (char c : mm.layer_types) n_attn += (c == 'F');
+    const char* ne = getenv("BONSAI_DEPTH_BENCH_N");
+    const int n = ne ? std::max(8, atoi(ne)) : 64;
+    const int warm = 4;   // first steps pay for queue start-up, not depth
+    const int seed = tok.encode("The").back();
+    std::string s = spec;
+    for (size_t at = 0; at < s.size();) {
+        size_t comma = s.find(',', at);
+        if (comma == std::string::npos) comma = s.size();
+        int d = atoi(s.substr(at, comma - at).c_str());
+        at = comma + 1;
+        if (d < 0 || d + 2 * (warm + n) + 1 >= DeviceModel::CTX_CAP) {
+            fprintf(stderr, "DEPTHBENCH depth=%d skipped (ctx %d)\n", d, DeviceModel::CTX_CAP);
+            continue;
+        }
+        model.reset_state();
+        // Prefill at this depth: the prompt path, one forward per token without logits.
+        int pos = d;
+        for (int i = 0; i < warm; ++i) model.forward(seed, pos++, false);
+        clFinish(ocl.queue());
+        const auto tp = clk::now();
+        for (int i = 0; i < n; ++i) model.forward(seed, pos++, false);
+        clFinish(ocl.queue());
+        const double dp = std::chrono::duration<double>(clk::now() - tp).count();
+        fprintf(stderr, "DEPTHBENCH depth=%d prefill_tokens=%d sec=%.3f prefill_tok_s=%.3f\n",
+                d, n, dp, n / dp);
+        model.seed_token(seed);
+        int slot = model.forward_dev(pos++, true);
+        clk::time_point t0;
+        for (int i = 0; i < warm + n; ++i) {
+            if (i == warm) { model.kprof_.reset(); t0 = clk::now(); }
+            const int next = model.forward_dev(pos++, true);
+            model.read_token_slot(slot);
+            slot = next;
+        }
+        const double dt = std::chrono::duration<double>(clk::now() - t0).count();
+        model.read_token_slot(slot);
+        fprintf(stderr, "DEPTHBENCH depth=%d tokens=%d sec=%.3f tok_s=%.3f ms_per_tok=%.1f\n",
+                d, n, dt, n / dt, dt * 1000.0 / n);
+        clFinish(ocl.queue());
+        char label[32];
+        snprintf(label, sizeof(label), "depth=%d", d);
+        model.kprof_.dump(label, n, dt);
+        lcd::print_bytes(d + warm + n, n_attn, mm.heads, mm.kv_heads, mm.head_dim, DeviceModel::ES);
+        fflush(stderr);
+    }
+    return 0;
+}
+
 static int edgi_main(int argc, char** argv) {
     std::string prompt = argv[1];
     int n_gen = atoi(argv[2]);
@@ -608,6 +671,7 @@ static int edgi_main(int argc, char** argv) {
     g_load_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_load0).count();
     fprintf(stderr, "BENCHMARK model_load_sec: %.3f\n", g_load_s);
     fflush(stderr);
+    if (const char* db = getenv("BONSAI_DEPTH_BENCH")) return depth_bench(model, ocl, tok, nnb.meta, db);
 
 #ifdef BONSAI_VISION
     for (int i = 1; i < argc; ++i)

@@ -105,6 +105,7 @@ class Nnb {
         return it->second;
     }
     bool has(const std::string& name) const { return tensors_.count(name) != 0; }
+    size_t bytes() const { return size_; }   // whole file: an upper bound on uploaded weights
 
     ModelMeta meta;
 

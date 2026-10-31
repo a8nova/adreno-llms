@@ -153,7 +153,7 @@ std::vector<float> model_forward_graph(OpenCLContext& cl_ctx,
         Model* m = g_active_model_for_vlm_splice;
         if (m) {
             const int requested = (start_pos == 0)
-                ? (seq_len + 256)                // prefill: reserve 256 decode slots
+                ? (seq_len + m->decode_reserve)  // prefill: reserve the whole reply
                 : (start_pos + seq_len);          // decode: must already fit
             if (!m->ensure_caches(requested)) {
                 clReleaseMemObject(ids_buf);
@@ -400,7 +400,7 @@ cl_mem model_forward_graph_logits_buf(OpenCLContext& cl_ctx,
     {
         Model* m = g_active_model_for_vlm_splice;
         if (m) {
-            const int requested = (start_pos == 0) ? (seq_len + 256) : (start_pos + seq_len);
+            const int requested = (start_pos == 0) ? (seq_len + m->decode_reserve) : (start_pos + seq_len);
             if (!m->ensure_caches(requested)) { clReleaseMemObject(ids_buf); return nullptr; }
             const int k_rows = start_pos + seq_len;
             if (!m->update_counter(queue, start_pos, k_rows)) { clReleaseMemObject(ids_buf); return nullptr; }
